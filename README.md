@@ -1,5 +1,7 @@
 # Low Latency Capture Viewer — v0.16.0 single-graph direct viewer
 
+> [한국어 README](README.ko.md)
+
 Windows x64 viewer optimized for an AVerMedia GC573, with experimental support
 for DirectShow capture cards exposing uncompressed NV12 or YUY2. The runtime
 contains no external media player, demuxer, decoder, or FFmpeg path.

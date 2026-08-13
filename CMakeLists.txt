@@ -38,5 +38,5 @@ if (MSVC)
 endif()
 
 install(TARGETS LowLatencyCaptureViewer RUNTIME DESTINATION .)
-install(FILES LICENSE README.md DESIGN.txt BUILD_INFO.txt DEPENDENCIES.txt
+install(FILES LICENSE README.md README.ko.md DESIGN.txt BUILD_INFO.txt DEPENDENCIES.txt
         "실행안내.txt" GITHUB_PREP.md settings.ini DESTINATION .)
