@@ -1,0 +1,218 @@
+Low Latency Capture Viewer v0.16.0 design (continued from v0.14.2)
+
+v0.15.9 graphics recovery
+-------------------------
+- The render loop reuses its existing HRESULT branch: success performs exactly
+  the previous upload, VideoProcessorBlt, overlay, and Present operations.
+- A failure queries the old device removal reason, releases all renderer-owned
+  D2D/DWrite/D3D11/DXGI resources, and recreates only that renderer in place.
+- The DirectShow graph, latest-sample callback, frame event, and WASAPI thread
+  are not stopped during recovery. Incoming frames retain latest-only behavior.
+- Three bounded attempts use 0/100/250-ms delays. Only exhaustion returns the
+  existing fatal graph-failure path.
+- Occlusion is a success-status control path, not a device failure. While
+  occluded, a 50-ms `DXGI_PRESENT_TEST` avoids full rendering and resumes on the
+  next available test without affecting normal visible presentation.
+
+v0.15.8 background audio policy
+------------------------------
+- Volume wheel steps are 5 percent; loaded volume is normalized to 5-percent
+  boundaries for consistent behavior with older settings files.
+- WM_ACTIVATEAPP updates an atomic background-mute state. The WASAPI thread
+  continues consuming PCM and ramps only its effective gain to or from zero.
+- Logical volume remains unchanged while inactive, so foreground restoration
+  returns to the exact user-selected level without a WASAPI restart or backlog.
+- The setting is persisted independently as Audio/MuteWhenBackground.
+
+v0.15.7 outer-edge release
+-------------------------
+- Snap entry stays at 18 DIP and release stays at 15 DIP.
+- All snapped axes release on 15 DIP of cursor travel in either direction.
+  Desktop-outer edges no longer impose an off-screen hard stop.
+- Per-axis suppression remains armed until the window leaves the 18-DIP entry
+  zone, preventing immediate reattachment after an outward release.
+
+v0.15.6 DPI/font lifetime and warmup
+-----------------------------------
+- A DPI-specific 9pt font is assigned without per-control repaint. Old fonts
+  are never deleted while any child may reference them; all are released only
+  after the settings window closes.
+- A single RDW_ERASE/RDW_ALLCHILDREN redraw follows each complete DPI layout.
+- A monotonic 2000ms tracking gate excludes startup transients from OSD totals.
+  Media processing remains active during the gate.
+
+v0.15.5 settings repaint and selectors
+--------------------------------------
+- No application-owned font is attached to Win32 child controls. This avoids
+  stale transparent STATIC glyphs when focus or per-monitor DPI state changes.
+- RDW_ERASE | RDW_ALLCHILDREN repaints the complete dialog on activation and
+  after layout changes.
+- Format and FPS are stored independently. Frame choices are the unique rates
+  compatible with Auto or the currently selected NV12/YUY2 format.
+
+v0.15.4 settings DPI invariant
+--------------------------------
+- One monitor and one effective DPI are resolved before CreateWindowEx.
+- The 900x600-DIP client, adjusted outer size, 9pt font, and child rectangles
+  all derive from that same DPI value.
+- WM_DPICHANGED recreates the font and layout at the destination DPI while
+  WM_GETDPISCALEDSIZE preserves the same logical client dimensions.
+
+v0.15.3 format/frame selection
+-----------------------------
+- IAMStreamConfig probing deduplicates every NV12/YUY2 format and rounded FPS
+  pair at the chosen resolution, sorting NV12 first and frame rates descending.
+- Auto retains the preset target (120 fps for FHD/QHD, 60 fps for UHD) with
+  compatible fallback. Explicit entries persist and request their exact FPS.
+- A 60 fps choice reduces the source callback rate itself; it is not frame skip.
+
+v0.15.2 switch ordering
+-----------------------
+- The old endpoint is stopped and the replacement client is fully initialized.
+- Its output buffer is primed with silence.
+- Only then, immediately before Start, are the live PCM ring, resampler count,
+  and observed queue minimum reset. This excludes setup time from live latency.
+
+v0.15.1 default-output tracking
+-------------------------------
+- An IMMNotificationClient watches eRender/eConsole default changes only when
+  OutputDeviceId is empty. A fixed endpoint registers no switch behavior.
+- A generation counter tells the WASAPI loop to stop within one 100 ms wait,
+  release the old client, clear queued PCM, and initialize the new default.
+- DirectShow capture and D3D11 presentation are not restarted.
+
+v0.15 selection boundary
+------------------------
+- The user may bind a stable DirectShow moniker ID and a stable WASAPI endpoint
+  ID. Empty IDs mean automatic GC573-first capture and Windows-default audio.
+- Settings-time IAMStreamConfig probing lists only uncompressed NV12/YUY2 modes
+  at the selected resolution and reports the FPS that runtime selection uses.
+- Runtime retains the original one-filter, one-graph design. Experimental cards
+  therefore need video and 48 kHz stereo PCM output pins on the same filter.
+- NV12 and YUY2 use DXGI_FORMAT_NV12 and DXGI_FORMAT_YUY2 respectively through
+  the same three-surface D3D11 upload ring and Video Processor path.
+- Device removal is a terminal capture error. There is no reconnect state machine.
+
+1. Exactly one Filter Graph and one GC573 capture-filter instance are created.
+2. Video and audio pins are connected as two branches of that same graph.
+3. The graph reference clock is disabled; video frames are not timestamp-scheduled.
+4. The video callback AddRefs one latest IMediaSample and releases any stale sample. No full-frame CPU memcpy or FIFO video queue exists.
+5. D3D11 uploads NV12, converts through the hardware video processor, and presents through flip-discard.
+6. IDXGISwapChain2 and IDXGIDevice1 maximum frame latency are both requested as 1.
+7. Tearing mode uses Present(0, DXGI_PRESENT_ALLOW_TEARING) when supported.
+8. VSync mode uses Present(1, 0).
+9. Audio PCM enters a bounded ring and is independently consumed by WASAPI Shared/Exclusive.
+10. The executable launches no companion process and has no external player fallback.
+
+11. The render thread uses MMCSS Playback / HIGH priority.
+12. A sample is released immediately after upload, before Present/VSync waiting.
+13. Three NV12 GPU upload surfaces rotate so UpdateSubresource never targets
+    the surface currently consumed by the video processor.
+14. D3D11.1 discard updates are used when available; D3D11 is the fallback.
+15. GC573 was tested with a downstream mapped-D3D11 allocator. The driver
+    replaces custom allocators with its own system-memory allocator, and its
+    samples expose no Direct3D surface. One CPU-to-GPU transfer therefore
+    remains a driver boundary rather than an application queue.
+16. The selected pixel resolution is never changed automatically. If the
+    requested NV12 frame rate is unavailable on a target driver, the highest
+    supported lower frame rate at the exact same resolution is selected.
+17. The actual negotiated frame rate is exposed in the title, OSD, and log.
+18. Capture-device discovery tolerates PC-specific friendly-name suffixes.
+19. DirectShow input-buffer choices were removed after measurements proved the
+    GC573 driver delivered identical 10 ms packets for 5 and 20 ms requests.
+    Actual packet size and interval are measured and exposed in the OSD.
+20. Drift correction is off by default and bypasses all resampling. The
+    optional mode uses a 16-tap windowed-sinc interpolator with a slowly
+    changing consumption ratio limited to +/-1000 ppm.
+21. The optional drift mode primes a small PCM safety margin before playback;
+    this trades additional audio queueing for long-session stability.
+22. Tab OSD and volume HUD text are cached in small BGRA GPU textures. One
+    lightweight D3D11 shader pass composites them into the same swapchain;
+    there is no GDI child-overlay window or separate DWM composition path.
+23. Mouse wheel volume changes by 5 percent. A 100 percent target bypasses the
+    gain loop; changes use a per-buffer ramp and cannot amplify above unity.
+24. The HUD corner is configurable. A top-left HUD moves below the Tab OSD
+    while both are visible.
+25. Normal-window physical position and monitor device name are saved before
+    destruction and safely clamped when restored. Fullscreen itself is not
+    persisted.
+26. WM_MOVING applies an 18-DIP, per-monitor-DPI edge threshold against the
+    nearest monitor work area. It preserves the complete outer-window size,
+    supports all four edges/corners, and does not cover the taskbar.
+27. Edge snap is enabled by default, persisted in settings.ini, and bypassed
+    while Shift is held. The handler is inactive outside manual window moves,
+    so capture, rendering, Present, and audio threads are unchanged.
+28. Horizontal and vertical snap axes are latched independently. A 15-DIP cursor
+    movement toward the window interior releases the corresponding axis, then
+    suppresses reattachment until that axis leaves the 18-DIP entry zone.
+29. Every edge releases after 15 DIP in either cursor direction. This includes
+    desktop-outer edges, allowing deliberate off-screen movement without Shift.
+30. Snap targeting follows the cursor monitor rather than the largest portion
+    of the moving window. Each target monitor's effective DPI controls the 18/3
+    DIP thresholds.
+31. WM_GETDPISCALEDSIZE provides the exact outer size required for the selected
+    physical client pixels. WM_DPICHANGED applies that generated rectangle once;
+    move completion performs an idempotent pixel-perfect check.
+32. The startup dialog has a 480 x 600 DIP client layout. Child positions and
+    dimensions are recalculated for its active DPI without changing fonts.
+33. Monitor-relative sizing stores the selected video's monitor-coverage ratio
+    in millionths. WM_MOVING applies that ratio when the cursor enters another
+    monitor, preserves aspect ratio, and retains the cursor's grip point.
+34. Pixel-perfect and monitor-relative sizing are independent. Pixel-perfect
+    disables mouse sizing and establishes an exact 1:1 initial client area.
+    Monitor-relative sizing may change that size when another monitor is
+    entered; the settings UI explicitly warns that this can break 1:1.
+35. The relative size is recalculated against physical per-monitor dimensions,
+    so a 2560x1440 window at 66.67% on 4K becomes 1280x720 on FHD and restores
+    without cumulative DPI rounding.
+36. VSync is labelled as tear prevention with a possible small latency increase.
+    Clock-drift correction has a hover `?` explanation and a click-through full
+    explanation; both live only in the pre-capture settings dialog.
+37. Audio underrun and overrun instrumentation records event counts, exact
+    missing/dropped PCM frames, and the GetTickCount64 time of the latest event.
+38. The OSD converts missing/dropped frames to milliseconds and reports a
+    cumulative event rate plus signed PCM imbalance divided by monitored time.
+39. With Pixel-perfect off, WM_SIZING preserves the selected capture aspect
+    ratio. Normal windows retain their native sizing frame. Borderless windows
+    expose custom edge/corner hit tests without WS_THICKFRAME, avoiding a
+    visible native frame or bright strip at the top.
+40. When Pixel-perfect and monitor-relative sizing are both enabled, accepting
+    settings always rebuilds the coverage baseline from the selected capture
+    size and restored start monitor. Stale scales from earlier manually sized
+    sessions are never reused for this combination.
+41. Snap entry remains 18 DIP, while release is 15 DIP to absorb small cursor
+    motion after attachment without requiring Shift for a deliberate release.
+39. The ppm value is explicitly labelled estimated because scheduling stalls,
+    startup phase, and clock mismatch all contribute to the same counters.
+40. Automatic guidance waits two minutes, treats errors older than ten minutes
+    as historical, and recommends correction for recent >=12 events/hour or an
+    absolute cumulative imbalance of at least 50 ppm.
+41. The `?` hover and click-through guide tells users to observe for 10–30
+    minutes and distinguishes stable, rare-error, and repeated-imbalance states.
+42. Clock correction and PCM queue target are independent settings. Queue
+    targets are 10, 15, 20, or 30 ms and apply to both unaltered and resampled
+    audio paths.
+43. The queue target describes total PCM available immediately before a WASAPI
+    render request, avoiding the false implication that the post-render OSD
+    queue must always equal the target.
+44. An underrun is classified once as late GC573 input, ordinary queue
+    depletion, or sinc-resampler output shortfall. The categories are mutually
+    exclusive and sum to the underrun event count.
+45. Input lateness means the most recent capture callback is more than its
+    measured packet duration plus 5 ms old at underrun time.
+46. Resampler shortfall means enough raw PCM existed for the WASAPI request but
+    the filter could not produce all output frames, normally due to look-ahead
+    pressure at the lowest queue target.
+47. OSD lines independently report resampler status, queue current/target/minimum,
+    queue diagnosis, and the three underrun-cause counters.
+48. The OSD cache is 700x420. Texture allocation, DirectWrite bounds,
+    background drawing, swapchain composite rectangle, and top-left HUD offset
+    derive from shared constants so added diagnostic rows cannot be clipped by
+    stale 350-pixel geometry.
+49. User-facing audio terminology distinguishes the WASAPI output buffer,
+    its current output occupancy, and the internal PCM buffer. The independent
+    target setting is labelled PCM buffer target; the ambiguous “waiting amount”
+    wording is not used in the runtime OSD.
+
+Remaining boundary: one system-memory-to-D3D11 transfer enforced by the GC573
+DirectShow filter's allocator policy.

@@ -1,0 +1,30 @@
+# CMake and Visual Studio build trees
+build/
+build-*/
+out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+Makefile
+*.sln
+*.vcxproj*
+
+# Local binaries and compiler artifacts
+LowLatencyCaptureViewer.exe
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.exp
+
+# Runtime diagnostics and generated logs
+logs/
+*.log
+smoke-test.log
+
+# Per-user IDE files
+.vs/
+.vscode/
+*.user
+*.suo

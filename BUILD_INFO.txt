@@ -1,0 +1,339 @@
+Low Latency Capture Viewer v0.16.0 x64 (continued from the v0.14.2 rework)
+
+v0.15.9 D3D11 foreground-return recovery
+-----------------------------------------
+- A transient VideoProcessor/overlay/Present failure no longer immediately
+  stops the single capture graph and closes the viewer.
+- On failure only, log `GetDeviceRemovedReason` and rebuild the D3D11 device,
+  upload surfaces, video processor, overlays, and swapchain in place.
+- DirectShow capture and WASAPI remain running during up to three bounded
+  renderer attempts (immediate, +100 ms, +250 ms).
+- `DXGI_STATUS_OCCLUDED` is treated as a non-fatal hidden/covered state and
+  tested every 50 ms until presentation is available again.
+- The normal successful frame path adds no polling, sleep, device-reason query,
+  queue, or frame. Existing HRESULT checking is reused, so latency is unchanged.
+
+v0.15.8 volume and background-mute update
+-----------------------------------------
+- Mouse-wheel volume now changes in 5-percent steps and saved legacy values
+  are rounded to the nearest 5 percent when loaded.
+- Add a persistent `MuteWhenBackground` checkbox, disabled by default.
+- Losing application activation ramps the render gain to zero; reactivation
+  restores the saved volume. Capture, PCM queue consumption, and WASAPI stay
+  running, so background muting does not accumulate latency or restart audio.
+- The Tab OSD distinguishes background auto-mute, zero volume, attenuation,
+  and the 100-percent PCM gain-loop bypass.
+
+v0.15.7 snap release change
+--------------------------
+- Keep the 18-DIP snap entry distance and 15-DIP release distance.
+- Every monitor work-area edge now releases after a 15-DIP cursor drag in
+  either direction, including desktop-outer edges.
+- A window can therefore be deliberately dragged partially or fully off-screen
+  without holding Shift. Re-snap suppression still prevents immediate sticking.
+
+v0.15.6 fixes
+---------------
+- Widen the settings client from 900 to 950 DIP and expand both combo columns.
+- Apply one explicit DPI-scaled 9pt Segoe UI font to every child control.
+- Keep every created HFONT alive until after child-window destruction, then
+  delete all handles; one erased full redraw follows font assignment/layout.
+- Exclude the first 2000 ms from OSD video, FPS, audio health, and queue-minimum
+  statistics without delaying capture, presentation, or audio playback.
+
+v0.15.5 fixes
+---------------
+- Removed the custom HFONT replacement path that could leave transparent STATIC
+  text remnants after focus or DPI repaint sequences.
+- Force an erase plus full parent/child redraw after creation, DPI changes, and
+  activation. The stable Windows control font is used again.
+- Split Pixel Format / Frame into independent Pixel Format and Frame combos.
+- Both combos remain capability-driven and persist independently.
+
+v0.15.4 fixes
+---------------
+- Choose the cursor monitor before settings-window creation and use that exact
+  monitor's effective DPI for both client and non-client dimensions.
+- Center the settings window explicitly instead of relying on CW_USEDEFAULT.
+- Apply an explicit 9-point Segoe UI font scaled to the same DPI as controls.
+- Rebuild font, controls, and outer size together on per-monitor DPI changes.
+- This removes mixed system-DPI/actual-monitor-DPI layouts.
+
+v0.15.3 additions
+-----------------
+- Replaced the one-FPS-per-format probe with unique format/FPS enumeration.
+- Persist `Video/FrameRate` with the selected NV12/YUY2 capability.
+- Selecting 60 fps asks IAMStreamConfig for that actual 60 fps media type.
+- Renamed the setting to Pixel Format / Frame and enlarged its drop-down.
+- Widened the settings client to 900 DIP and aligned all controls in both
+  columns. Clock drift uses the same combo x-coordinate as every audio row.
+
+v0.15.2 fixes
+---------------
+- Moved the endpoint-switch PCM clear from before WASAPI construction to the
+  instant immediately before the replacement client's Start call. Capture that
+  arrives during initialization can no longer become permanent added latency.
+- Reset the observed pre-render minimum together with the PCM/resampler state.
+- Position the clock-drift label/help/combo from measured label width, removing
+  both clipping and excessive fixed spacing across DPI scales.
+
+v0.15.1 additions
+-----------------
+- The Windows-default output choice now follows eConsole default-device changes
+  through IMMNotificationClient while the application is running.
+- Only the WASAPI renderer is rebuilt. The capture graph and video thread remain
+  active, and queued PCM is cleared to prevent post-switch latency buildup.
+- Fixed-output endpoint selections remain pinned to their stable endpoint ID.
+- Widened and repositioned the clock-drift label, help button, and combo so the
+  Korean label is not clipped at scaled DPI.
+
+v0.15.0 additions
+-----------------
+- Select an active WASAPI render endpoint or follow the Windows default.
+- Select a DirectShow video capture filter; automatic mode still prefers GC573.
+- Probe NV12/YUY2 capabilities for the selected device and resolution and show
+  the effective FPS in the settings combo.
+- Upload both NV12 and YUY2 directly into matching D3D11 video-processor input
+  textures; no FFmpeg, decoder, or intermediate video queue was added.
+- Optionally tee diagnostics to timestamped UTF-8 files under `logs`.
+- Experimental non-GC573 support requires same-filter 48 kHz stereo PCM audio.
+- Automatic device reconnect is intentionally excluded.
+Build date: 2026-08-14
+Configuration: Release / x64 / MSVC 19.39 / C++20
+
+v0.14.7 snap retention adjustment:
+- Increased release from 8 DIP to 15 DIP after real-use feedback.
+- The 18-DIP attraction threshold and Shift bypass are unchanged.
+
+v0.14.6 snap retention adjustment:
+- Kept the 18-DIP attraction distance and increased release from 3 to 8 DIP.
+- Small cursor motion after snapping remains attached; intentional movement
+  still releases without Shift, including shared monitor boundaries.
+
+v0.14.5 monitor-relative baseline correction:
+- Pixel-perfect plus monitor-relative mode always recalculates coverage from
+  the selected source size and restored start monitor when settings are accepted.
+- A stale 25% manual scale can no longer produce 480x270 on FHD or 960x540 on 4K.
+
+v0.14.4 window-sizing correction (v0.14.2 base):
+- Pixel-perfect now fixes the client at exact 1:1 and removes mouse sizing.
+- Pixel-perfect Off enables edge/corner sizing with capture-aspect locking.
+- Monitor-relative sizing is independent and warns when combined with 1:1.
+- Borderless sizing uses custom hit testing without WS_THICKFRAME, avoiding
+  the bright native strip seen in the discarded v0.14.3 build.
+
+v0.14.2 terminology cleanup:
+- Runtime OSD now says output buffer, output occupancy, PCM buffer, and PCM
+  buffer target instead of mixing buffer, padding, and waiting-amount terms.
+- Settings labels now say WASAPI output buffer and PCM buffer target.
+- The help and Korean execution guide define the three quantities explicitly.
+
+v0.14.1 OSD clipping fix:
+- Expanded the OSD GPU cache from 700x350 to 700x420 pixels for the additional
+  v0.14 resampler, queue, and cause-diagnosis rows.
+- Replaced the independent texture, DirectWrite, background, composite, and HUD
+  offset height literals with shared constants.
+- Text receives a 668x394 layout inside the 700x420 rounded background, leaving
+  the original 16-pixel horizontal and 12-pixel top margins.
+- Release x64 compilation completed successfully with /W4.
+
+v0.14 independent resampling/queue control and cause-separated OSD:
+- Clock-drift resampling and PCM safety target are now independent settings.
+- Added 10 ms lowest-latency, 15 ms resampling-low-latency, 20 ms stable, and
+  30 ms high-jitter PCM target choices. The selection persists separately from
+  DriftCorrection in settings.ini.
+- Older settings without PcmQueueTargetMs retain their effective behavior:
+  10 ms when correction was Off and 20 ms when it was Resample.
+- The OSD separately displays resampler mode/applied ppm/status and PCM current,
+  pre-render target, observed minimum, and queue diagnosis.
+- Every underrun is classified exactly once as a late GC573 input callback,
+  ordinary safety-queue depletion, or resampler output shortfall despite enough
+  raw PCM. The three visible counters sum to the underrun total.
+- Resampler limit approach and resampler output shortfall are distinct from a
+  low safety target. Help text explains which setting to change for each state.
+- Automated UI verification found all four queue choices in the 480x564-DIP
+  dialog and confirmed that Resample plus an independent 15 ms target saved as
+  separate settings.
+- Release x64 compilation completed successfully with /W4.
+
+v0.13 audio-health OSD and drift-guidance update:
+- Underrun and overrun now show both event count and exact missing/dropped PCM
+  duration, derived from separately accumulated frame counts.
+- The time of the latest audio error and monitoring start are recorded without
+  locking the WASAPI or DirectShow callbacks.
+- Added OSD clock diagnosis, cumulative events/hour, signed PCM imbalance ppm
+  estimate, and age of the most recent error.
+- Guidance observes for two minutes before deciding, considers a ten-minute-old
+  error historical, and recommends correction for recent >=12 events/hour or
+  >=50 ppm absolute cumulative imbalance.
+- The ppm value is labelled estimated: scheduling stalls and startup transients
+  are included, so it is not presented as a direct hardware-clock measurement.
+- Expanded the clock-drift `?` hover and click help with a 10–30 minute test
+  procedure and explanations for stable, rare-error, and correction-recommended
+  states.
+- Automated UI input verified that hover help appears and hides correctly; the
+  click-through dialog contains the diagnosis procedure and ppm limitation.
+- Release x64 compilation completed successfully with /W4.
+
+v0.12 monitor-relative sizing and settings-help update:
+- Added an optional monitor-relative window mode. The app records the selected
+  video's monitor-coverage ratio and reapplies it while crossing monitors.
+- Real DISPLAY1/DISPLAY2 movement verified 1280x720 on a 1920x1200 monitor,
+  2560x1440 on a 3840x2160 monitor, 1280x720 when moved back, and 2560x1440
+  on the return trip. The video aspect ratio stayed unchanged.
+- The cursor grip point is retained during the cross-monitor resize, and the
+  existing 18-DIP internal-edge snap / 3-DIP release behavior remains active.
+- At v0.12, Pixel-perfect and monitor-relative modes were mutually exclusive
+  in the UI. v0.14.4 supersedes this historical behavior and makes them
+  independent.
+  Automated control input verified both directions of the mutual exclusion.
+- The startup client is now 480x520 DIP; its added relative-size checkbox and
+  existing controls fit without clipping at the tested DPI.
+- The VSync item now reads "찢어짐 방지 · 지연 약간 상승 가능".
+- Added a `?` button beside clock-drift correction. Hover shows the registered
+  "소리 찢어짐 방지" tooltip and moving away hides it; clicking opens the full
+  explanation of stability, added queueing, and changed PCM samples.
+- Release x64 compilation completed successfully with /W4.
+- The final capture-path run before the settings-only tooltip adjustment used
+  2560x1440 @ 120, captured 226 frames, presented 222, and completed with zero
+  audio underrun/overrun frames.
+
+v0.11 multi-monitor and startup-UI correction:
+- Internal monitor boundaries retain the 18-DIP snap but release after 3 DIP
+  in either direction, allowing a continuous drag into the adjacent monitor.
+- Desktop-outer edges still hold against off-screen dragging and release toward
+  the visible work area.
+- Snap targeting now follows the cursor monitor and uses that monitor's DPI.
+- Pixel-perfect DPI changes use WM_GETDPISCALEDSIZE plus the generated
+  WM_DPICHANGED rectangle exactly once, followed by an idempotent move-end check.
+- The startup settings client area is now 480 x 480 DIP and all child controls
+  scale with the dialog DPI; fonts are unchanged.
+- Actual DISPLAY1/DISPLAY2 testing verified both-direction internal release and
+  one-direction external-edge holding.
+- Three 100-percent/150-percent DPI round trips kept the client exactly
+  1920x1080 every time; outer chrome correctly alternated between 1936x1119 and
+  1942x1136.
+- At 150-percent DPI the settings client measured 720x720 physical pixels; all
+  18 controls were inside it and the diagnostic status width measured 647 px.
+- The settings dialog also moved 150% -> 100% -> 150% as exact 720x720 ->
+  480x480 -> 720x720 clients with all controls inside on every monitor.
+- Final 2560x1440 @ 120 smoke test captured 1162 frames and presented 1158;
+  audio completed with 0 underrun/overrun frames.
+
+v0.10.3 snap-entry adjustment retained:
+- Increased the edge attraction distance from 12 DIP to 18 DIP.
+- The v0.10.2 easy 3-DIP release and re-snap suppression are unchanged.
+- At 150-percent DPI the intended entry and release distances are 27 and
+  5 physical pixels respectively.
+- Automated input verified that exactly 27 pixels snapped, 28 pixels remained
+  unchanged, and a 5-pixel inward cursor move released the snapped axis.
+
+v0.10.2 snap-release correction retained:
+- Restored the useful 12-DIP attraction distance.
+- A snapped axis now releases after only 3 DIP of cursor movement back toward
+  the window interior; Shift is no longer required for normal release.
+- After release, that axis stays disarmed until it leaves the attraction zone,
+  preventing the old immediate re-snap loop.
+- Horizontal and vertical axes release independently for natural corner moves.
+- At 150-percent DPI, automated input verified an 18-pixel entry distance and
+  a 5-pixel release: below-release movement stayed attached, release detached,
+  near-edge movement stayed suppressed, and leaving/re-entering snapped again.
+- The corner test released horizontal while vertical remained attached.
+- Final 2560x1440 @ 120 smoke test captured 1166 frames and presented 1165;
+  audio completed with 0 underrun/overrun frames.
+
+v0.10.1 snap-distance experiment superseded:
+- Reduced the edge attraction distance from 12 DIP to 6 DIP so the window
+  releases more easily and only snaps when it is very close to an edge.
+- Runtime, capture, rendering, audio, and saved-position behavior are unchanged.
+- At 150-percent DPI the new threshold measured 9 physical pixels: an 8-pixel
+  gap snapped, while a 10-pixel gap remained completely unchanged.
+
+v0.10 window edge-snap update retained:
+- Added an on-by-default setting for snapping the normal window to monitor
+  work-area edges and corners without changing its size.
+- The 12-DIP threshold scales with per-monitor DPI and respects taskbar space.
+- Multi-monitor moves use the nearest monitor work area.
+- Holding Shift during a drag temporarily bypasses application snapping.
+- The setting and final snapped window position persist across launches.
+
+v0.9 overlay, volume, and window-state update:
+- Removed the ineffective GC573 input-buffer selector. Actual packet size and
+  callback interval remain visible in the Tab OSD.
+- Replaced the GDI child-window OSD with cached DirectWrite GPU textures and a
+  small D3D11 premultiplied-alpha pass in the existing swapchain.
+- Mouse wheel over the video adjusts application volume by 2 percent.
+- At 100 percent the PCM volume loop is bypassed; other values use a smooth
+  per-buffer ramp and never amplify above unity.
+- Volume HUD corner is selectable and saved; top-left is the default.
+- The normal window position and monitor are saved and safely restored.
+
+v0.8 audio instrumentation and drift correction retained:
+- User-selectable 5/10/20/30/40 ms GC573 DirectShow allocator request.
+- Actual allocator capacity, callback packet size/interval, PCM queue depth,
+  WASAPI padding and drift correction ppm are visible in the Tab OSD.
+- Resampling is Off by default and the original PCM path remains unchanged.
+- Optional 16-tap windowed-sinc drift correction is limited to +/-1000 ppm
+  and maintains a small safety queue for long-session stability.
+
+v0.7.1 portability fix retained:
+- The selected pixel-perfect resolution is preserved on every PC.
+- The requested frame rate is preferred; if the target GC573 driver does not
+  expose it, the highest supported lower NV12 rate at that exact resolution is
+  selected automatically.
+- The actual negotiated frame rate is shown in the title, OSD, and log.
+- Capture-device discovery also accepts names containing GC573 or Live Gamer
+  4K, covering friendly-name differences between driver versions/locales.
+- Initialization failures now show an error dialog instead of silently closing.
+
+v0.7 optimization retained:
+- Three default-usage NV12 GPU surfaces are rotated for uploads.
+- The CPU never updates the same NV12 surface that the GPU is currently using.
+- D3D11.1 UpdateSubresource1 with D3D11_COPY_DISCARD is used when available.
+- The original D3D11 UpdateSubresource call remains as an automatic fallback.
+- The latest-frame-only policy is unchanged; the surface ring is not a frame
+  queue and does not add presentation latency.
+
+Purpose:
+- Avoid the contended UpdateSubresource path, which can require a CPU copy to
+  temporary command storage followed by a second asynchronous GPU copy.
+- Keep upload and video-processing work independent without waiting for an old
+  texture to become idle.
+
+Verification on this PC:
+- Release x64 build completed successfully with /W4.
+- 150-percent-DPI snap test: 12 DIP became 18 physical pixels; left edge and
+  bottom-right corner snapped exactly to the 3840x2088 work area.
+- Shift bypass and the disabled setting both left the proposed move unchanged.
+- A snapped 0,100 physical origin restored exactly at 0,100 on the next run.
+- Final 2560x1440 @ 120 hidden-overlay smoke test: 1169 frames captured,
+  1168 presented, 1 stale frame replaced, latest app processing 0.636 ms.
+- The final 10-second audio test completed with 0 underrun/overrun frames.
+- 2560x1440 @ 120 overlay-hidden test: latest callback-to-Present 0.491 ms.
+- Tab OSD + volume HUD visible in the same swapchain: 0.589 ms, 1166 frames
+  presented in 10 seconds, no audio underrun/overrun.
+- Visual capture confirmed Korean text, transparency, volume bar, and the
+  top-left collision rule.
+- Real WM_MOUSEWHEEL input changed 100 to 98 percent and persisted it.
+- A 1080p window moved to logical 777,444 restored at exactly 777,444 on the
+  150-percent-DPI monitor; physical coordinates were stored correctly.
+- Original PCM mode: 10-second smoke test, 0 underrun/overrun frames.
+- Resampling mode: 60-second smoke test, captured 7187 video frames and
+  produced 0 underrun/overrun audio frames.
+- Measured audio: 480-frame/10.00 ms packets, 10.01 ms average callback period.
+- This GC573 driver delivered the same 10 ms packets for both 5 and 20 ms
+  DirectShow buffer requests; the request does not reduce its packet period.
+- The D3D11.1 discard path was active.
+
+Zero-copy feasibility result:
+- GC573 DirectShow samples do not expose IMediaSample2Config/VRAM surfaces.
+- A custom mapped-D3D11 allocator was accepted during the first negotiation,
+  but the GC573 filter replaced it with its own allocator before connection
+  completion (VFW_E_NO_ALLOCATOR when replacement was refused).
+- Therefore the driver's system-memory frame cannot be removed from this
+  DirectShow path. v0.7 removes destination-surface contention and the possible
+  contended two-copy UpdateSubresource path; one system-memory-to-GPU transfer
+  remains unavoidable with this driver.
+- One Filter Graph and one GC573 capture-filter instance remain.
+
+No companion executable is required.

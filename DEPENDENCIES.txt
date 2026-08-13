@@ -1,0 +1,14 @@
+Low Latency Capture Viewer v0.16.0 - dependencies
+=================================================
+
+This development package does not bundle the Microsoft Visual C++ runtime.
+The target PC needs:
+
+- Windows 10 or Windows 11 x64
+- Microsoft Visual C++ 2015-2022 Redistributable (x64)
+- A DirectShow capture-card driver
+- A card exposing uncompressed NV12 or YUY2 and same-filter 48 kHz stereo PCM
+- D3D11, DXGI, DirectShow, and WASAPI Windows system components
+
+The tested/recommended card is AVerMedia GC573. Other cards are experimental.
+No mpv.exe, FFmpeg DLL, decoder, or companion executable is required.
