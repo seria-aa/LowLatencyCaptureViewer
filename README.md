@@ -14,7 +14,7 @@ No mpv, FFmpeg, decoder, or companion executable is required.
 - Single DirectShow graph for video and audio capture
 - Latest-frame rendering: stale video samples are discarded instead of queued
 - D3D11 Video Processor, flip-discard swapchain, and maximum frame latency of 1
-- Selectable tearing-allowed presentation or VSync
+- Selectable immediate presentation or VSync
 - WASAPI Shared or Exclusive output, with default-device tracking or a fixed endpoint
 - Independent PCM safety target and optional clock-drift correction
 - Resolution, pixel-format, and frame-rate selection from the capture card's capabilities
@@ -46,8 +46,8 @@ when enabled, are written to the `logs` folder.
 
 | Setting | Start with |
 | --- | --- |
-| Presentation | Tearing allowed for the lowest display latency; use VSync to prevent tearing. |
-| Audio mode | WASAPI Shared for broad compatibility; try Exclusive if the endpoint supports it. |
+| Presentation | Immediate presentation for the lowest display latency; use VSync to prevent tearing. |
+| Audio mode | WASAPI Shared for compatibility; Exclusive uses the endpoint directly when supported. |
 | Output device | Follow the Windows default device unless a fixed device is required. |
 | Clock drift correction | Off for unaltered PCM. Enable only when long-running playback shows repeated drift-related errors. |
 | PCM target | 10 ms for minimum latency; raise it only if underruns repeat. |

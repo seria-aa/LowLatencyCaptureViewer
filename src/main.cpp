@@ -2262,7 +2262,7 @@ static void UpdateConfiguredVideoTitle(HWND videoHost, int configuredFps) {
             ? L"WASAPI Exclusive" : L"WASAPI Shared";
     const wchar_t* presentationLabel =
         g_settings.presentationMode == PresentationMode::VSync
-            ? L"VSync" : L"Tearing";
+            ? L"VSync" : L"Immediate";
     const auto configuredFormat = static_cast<VideoPixelFormat>(
         g_activePixelFormat.load(std::memory_order_acquire));
     wchar_t title[512]{};
@@ -3859,9 +3859,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             180, 20, 210, 120, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_AUDIO)), instance, nullptr);
         SendMessageW(state->audioCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(L"WASAPI Shared"));
+                     reinterpret_cast<LPARAM>(
+                         L"WASAPI Shared (호환성 우선 · 권장)"));
         SendMessageW(state->audioCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(L"WASAPI Exclusive"));
+                     reinterpret_cast<LPARAM>(
+                         L"WASAPI Exclusive (지연 최소화 · 장치 독점)"));
         SendMessageW(state->audioCombo, CB_SETCURSEL,
                      g_settings.audioMode == AudioMode::WasapiExclusive ? 1 : 0, 0);
 
@@ -4024,7 +4026,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             instance, nullptr);
         SendMessageW(state->presentationCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(
-                         L"Tearing 허용 (초저지연 권장)"));
+                         L"저지연 즉시 표시 (찢어짐 가능)"));
         SendMessageW(state->presentationCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(
                          L"VSync (찢어짐 방지 · 지연 약간 상승 가능)"));
@@ -5083,7 +5085,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         g_settings.presentationMode == PresentationMode::VSync
             ? L"VSync"
             : g_videoTearing.load(std::memory_order_acquire)
-                  ? L"Tearing 허용" : L"Immediate";
+                  ? L"저지연 즉시 표시" : L"Immediate";
     wchar_t latencyText[64]{};
     if (latencyUs >= 0) {
         swprintf_s(latencyText, L"%.2f ms", latencyUs / 1000.0);
