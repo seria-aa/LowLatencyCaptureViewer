@@ -1,4 +1,15 @@
-Low Latency Capture Viewer v0.16.0 design (continued from v0.14.2)
+Low Latency Capture Viewer v0.17.0 design (continued from v0.14.2)
+
+v0.17.0 capture capability selection
+------------------------------------
+- `IAMStreamConfig::GetStreamCaps` is queried again whenever the settings
+  dialog changes the capture filter or resolution. Only matching-resolution,
+  progressive NV12/YUY2 capabilities are retained.
+- The UI derives its pixel-format selector, per-format frame-rate selector,
+  and detected-mode status text from that result. Auto retains the existing
+  NV12-first preference while allowing the user to lock either field.
+- A missing capability result is a settings-time validation state rather than
+  an attempted graph startup. No probe is performed in the runtime path.
 
 v0.15.9 graphics recovery
 -------------------------

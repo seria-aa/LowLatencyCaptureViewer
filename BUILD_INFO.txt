@@ -1,4 +1,17 @@
-Low Latency Capture Viewer v0.16.0 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v0.17.0 x64 (continued from the v0.14.2 rework)
+
+v0.17.0 automatic capture-mode detection
+----------------------------------------
+- Changing the selected capture device or resolution now queries the
+  DirectShow video pin capabilities again and rebuilds the pixel-format and
+  frame-rate lists from actual uncompressed NV12/YUY2 modes.
+- Pixel format and frame rate remain independent choices: Auto/NV12/YUY2 can
+  be paired with Auto or a supported FPS such as 120 or 60.
+- The settings window shows a compact detected-mode summary. If the selected
+  device and resolution have no supported mode, the selectors and Start button
+  are disabled instead of allowing a later initialization failure.
+- Capability probing occurs only in the settings dialog. It does not run after
+  Start and adds no capture, render, or audio latency.
 
 v0.15.9 D3D11 foreground-return recovery
 -----------------------------------------
