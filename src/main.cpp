@@ -3310,6 +3310,7 @@ struct SettingsDialogState {
     HWND captureDeviceLabel = nullptr;
     HWND pixelFormatLabel = nullptr;
     HWND frameRateLabel = nullptr;
+    HWND videoCapabilityStatus = nullptr;
     HWND audioCombo = nullptr;
     HWND bufferCombo = nullptr;
     HWND audioOutputCombo = nullptr;
@@ -3423,12 +3424,13 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->pixelFormatCombo, 630, 152, 295, 160, dpi);
     PlaceSettingsControl(state->frameRateLabel, 505, 200, 120, 24, dpi);
     PlaceSettingsControl(state->frameRateCombo, 630, 196, 295, 200, dpi);
-    PlaceSettingsControl(state->pixelCheck, 505, 246, 420, 28, dpi);
-    PlaceSettingsControl(state->relativeSizeCheck, 505, 280, 420, 28, dpi);
-    PlaceSettingsControl(state->relativeSizeWarning, 525, 308, 400, 36, dpi);
-    PlaceSettingsControl(state->borderlessCheck, 505, 350, 420, 28, dpi);
-    PlaceSettingsControl(state->windowSnapCheck, 505, 384, 420, 28, dpi);
-    PlaceSettingsControl(state->saveLogCheck, 505, 418, 420, 28, dpi);
+    PlaceSettingsControl(state->videoCapabilityStatus, 505, 234, 420, 24, dpi);
+    PlaceSettingsControl(state->pixelCheck, 505, 266, 420, 28, dpi);
+    PlaceSettingsControl(state->relativeSizeCheck, 505, 300, 420, 28, dpi);
+    PlaceSettingsControl(state->relativeSizeWarning, 525, 328, 400, 36, dpi);
+    PlaceSettingsControl(state->borderlessCheck, 505, 370, 420, 28, dpi);
+    PlaceSettingsControl(state->windowSnapCheck, 505, 404, 420, 28, dpi);
+    PlaceSettingsControl(state->saveLogCheck, 505, 438, 420, 28, dpi);
     PlaceSettingsControl(state->startButton, 745, 552, 80, 30, dpi);
     PlaceSettingsControl(state->cancelButton, 835, 552, 80, 30, dpi);
 }
@@ -3633,6 +3635,53 @@ static VideoPixelFormat SelectedPixelFormat(
                            : static_cast<VideoPixelFormat>(value);
 }
 
+static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
+    if (!state) return;
+
+    const bool supported = !state->pixelFormats.empty();
+    if (state->pixelFormatCombo) {
+        EnableWindow(state->pixelFormatCombo, supported ? TRUE : FALSE);
+    }
+    if (state->frameRateCombo) {
+        EnableWindow(state->frameRateCombo, supported ? TRUE : FALSE);
+    }
+    if (state->startButton) {
+        EnableWindow(state->startButton, supported ? TRUE : FALSE);
+    }
+    if (!state->videoCapabilityStatus) return;
+
+    std::wstring message;
+    if (!supported) {
+        message = L"지원 모드 없음: 다른 장치 또는 해상도를 선택하세요.";
+    } else {
+        message = L"자동 인식: ";
+        bool firstFormat = true;
+        for (const auto format : {VideoPixelFormat::Nv12,
+                                  VideoPixelFormat::Yuy2}) {
+            std::vector<int> frameRates;
+            for (const auto& support : state->pixelFormats) {
+                if (support.format == format) {
+                    frameRates.push_back(support.selectedFps);
+                }
+            }
+            if (frameRates.empty()) continue;
+            std::sort(frameRates.begin(), frameRates.end(), std::greater<int>());
+            frameRates.erase(std::unique(frameRates.begin(), frameRates.end()),
+                             frameRates.end());
+            if (!firstFormat) message += L"  ·  ";
+            message += PixelFormatName(format);
+            message += L" ";
+            for (size_t i = 0; i < frameRates.size(); ++i) {
+                if (i != 0) message += L"/";
+                message += std::to_wstring(frameRates[i]);
+            }
+            message += L" fps";
+            firstFormat = false;
+        }
+    }
+    SetWindowTextW(state->videoCapabilityStatus, message.c_str());
+}
+
 static void PopulateFrameRateCombo(SettingsDialogState* state) {
     if (!state || !state->frameRateCombo) return;
     int desiredFrameRate = g_settings.videoFrameRate;
@@ -3645,6 +3694,16 @@ static void PopulateFrameRateCombo(SettingsDialogState* state) {
         if (oldValue != CB_ERR) desiredFrameRate = static_cast<int>(oldValue);
     }
     SendMessageW(state->frameRateCombo, CB_RESETCONTENT, 0, 0);
+    if (state->pixelFormats.empty()) {
+        const LRESULT noModeIndex = SendMessageW(
+            state->frameRateCombo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"지원 프레임 없음"));
+        SendMessageW(state->frameRateCombo, CB_SETITEMDATA,
+                     static_cast<WPARAM>(noModeIndex), 0);
+        SendMessageW(state->frameRateCombo, CB_SETCURSEL,
+                     static_cast<WPARAM>(noModeIndex), 0);
+        return;
+    }
     const LRESULT autoIndex = SendMessageW(
         state->frameRateCombo, CB_ADDSTRING, 0,
         reinterpret_cast<LPARAM>(L"자동 선택 (권장 프레임)"));
@@ -3692,6 +3751,19 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
     state->pixelFormats = ProbePixelFormats(
         SelectedCaptureDeviceId(state), preset.width, preset.height);
     SendMessageW(state->pixelFormatCombo, CB_RESETCONTENT, 0, 0);
+    if (state->pixelFormats.empty()) {
+        const LRESULT noModeIndex = SendMessageW(
+            state->pixelFormatCombo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"지원 포맷 없음"));
+        SendMessageW(state->pixelFormatCombo, CB_SETITEMDATA,
+                     static_cast<WPARAM>(noModeIndex),
+                     static_cast<LPARAM>(VideoPixelFormat::Auto));
+        SendMessageW(state->pixelFormatCombo, CB_SETCURSEL,
+                     static_cast<WPARAM>(noModeIndex), 0);
+        PopulateFrameRateCombo(state);
+        UpdateVideoCapabilityStatus(state);
+        return;
+    }
     LRESULT autoIndex = SendMessageW(
         state->pixelFormatCombo, CB_ADDSTRING, 0,
         reinterpret_cast<LPARAM>(L"자동 선택 (NV12 우선 · 권장)"));
@@ -3720,6 +3792,7 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
     SendMessageW(state->pixelFormatCombo, CB_SETCURSEL,
                  static_cast<WPARAM>(selectedIndex), 0);
     PopulateFrameRateCombo(state);
+    UpdateVideoCapabilityStatus(state);
 }
 
 static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool accepted) {
@@ -4100,6 +4173,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(IDC_SETTINGS_FRAME_RATE)),
             instance, nullptr);
+        state->videoCapabilityStatus = CreateWindowExW(
+            0, L"STATIC", L"지원 모드 확인 중...",
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
+            430, 234, 365, 24, hwnd, nullptr, instance, nullptr);
         PopulatePixelFormatCombo(state);
 
         state->pixelCheck = CreateWindowExW(
@@ -4164,6 +4241,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             0, L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
             375, 520, 80, 30, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_CANCEL)), instance, nullptr);
+        UpdateVideoCapabilityStatus(state);
 
         const UINT initialDpi = GetDpiForWindow(hwnd);
         ApplySettingsFont(state, hwnd, initialDpi);

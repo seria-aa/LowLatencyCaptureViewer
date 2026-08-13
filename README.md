@@ -17,7 +17,7 @@ No mpv, FFmpeg, decoder, or companion executable is required.
 - Selectable immediate presentation or VSync
 - WASAPI Shared or Exclusive output, with default-device tracking or a fixed endpoint
 - Independent PCM safety target and optional clock-drift correction
-- Resolution, pixel-format, and frame-rate selection from the capture card's capabilities
+- Automatic mode detection per selected capture device and resolution; choose from its available pixel formats and frame rates
 - Pixel-perfect 1:1 mode, aspect-ratio-locked resizing, multi-monitor DPI support, and edge snap
 - Tab diagnostics overlay, optional logs, volume HUD, and background auto-mute
 
@@ -52,6 +52,10 @@ when enabled, are written to the `logs` folder.
 | Clock drift correction | Off for unaltered PCM. Enable only when long-running playback shows repeated drift-related errors. |
 | PCM target | 10 ms for minimum latency; raise it only if underruns repeat. |
 | Video format | Auto/NV12 first; select 60 fps when 120 fps is not sustainable. |
+
+Changing the capture device or resolution refreshes the supported format and
+frame-rate list. The settings window shows the detected combinations, and
+disables Start when the selected device has no supported uncompressed mode.
 
 `Pixel-perfect` fixes the client area to the selected capture resolution and
 disables manual resizing. With it off, the window can be resized while keeping
