@@ -4,6 +4,15 @@ Windows x64 viewer optimized for an AVerMedia GC573, with experimental support
 for DirectShow capture cards exposing uncompressed NV12 or YUY2. The runtime
 contains no external media player, demuxer, decoder, or FFmpeg path.
 
+## License
+
+This project is licensed under the GNU General Public License v3.0 or any later
+version. See [LICENSE](LICENSE). Copyright (C) 2026 seria-aa.
+
+The Windows system components, Microsoft Visual C++ Redistributable, capture-card
+drivers, and other separately installed dependencies remain subject to their own
+licenses. They are not included in this repository.
+
 ## Runtime architecture
 
 One DirectShow Filter Graph

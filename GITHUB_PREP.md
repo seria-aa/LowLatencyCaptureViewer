@@ -6,8 +6,8 @@ that is device compatibility information, not the application name.
 
 Before making the repository public:
 
-1. Choose and add a license file (for example, MIT) appropriate for the code
-   and any bundled documentation.
+1. This repository is licensed under the GNU General Public License v3.0 or
+   any later version. Keep the root `LICENSE` file with every source release.
 2. Review the author name, repository URL, and release notes.
 3. Build from a clean x64 Developer PowerShell using the commands in README.md.
 4. Do not commit `build-*`, `logs/`, local binaries, or machine-specific
