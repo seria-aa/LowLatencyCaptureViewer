@@ -172,7 +172,7 @@ struct AppSettings {
     bool muteWhenBackground = false;
     PresentationMode presentationMode = PresentationMode::AllowTearing;
     ScalingMode scalingMode = ScalingMode::Smooth;
-    VideoPreset videoPreset = VideoPreset::R2560x1440;
+    VideoPreset videoPreset = VideoPreset::R1920x1080;
     VideoPixelFormat pixelFormat = VideoPixelFormat::Auto;
     int videoFrameRate = 0;
     std::wstring captureDeviceId;
@@ -836,7 +836,7 @@ static const VideoPresetInfo& CurrentVideoPreset() {
     for (const auto& info : kVideoPresets) {
         if (info.preset == g_settings.videoPreset) return info;
     }
-    return kVideoPresets[1];
+    return kVideoPresets[0];
 }
 
 static int RequestedVideoFrameRate() {
@@ -925,7 +925,7 @@ static void LoadSettings() {
     GetPrivateProfileStringW(L"Audio", L"OutputDeviceId", L"",
                              audioOutputDeviceId,
                              ARRAYSIZE(audioOutputDeviceId), path.c_str());
-    GetPrivateProfileStringW(L"Video", L"Resolution", L"2560x1440", resolution,
+    GetPrivateProfileStringW(L"Video", L"Resolution", L"1920x1080", resolution,
                              ARRAYSIZE(resolution), path.c_str());
     GetPrivateProfileStringW(L"Video", L"CaptureDeviceId", L"",
                              captureDeviceId, ARRAYSIZE(captureDeviceId),
@@ -3802,7 +3802,7 @@ struct SettingsDialogState {
     std::vector<CaptureDeviceInfo> captureAudioDevices;
     std::vector<AudioEndpointInfo> audioEndpoints;
     std::vector<PixelFormatSupport> pixelFormats;
-    VideoPreset initialVideoPreset = VideoPreset::R2560x1440;
+    VideoPreset initialVideoPreset = VideoPreset::R1920x1080;
     HMONITOR currentMonitor = nullptr;
     UINT32 selectedSharedPeriodFrames = 0;
     int selectedBufferMs = kRecommendedWasapiBufferMs;
@@ -3817,20 +3817,6 @@ static int SettingsPixels(int dips, UINT dpi) {
 
 static constexpr int kSettingsClientWidthDip = 950;
 static constexpr int kSettingsClientHeightDip = 640;
-
-static VideoPreset RecommendedVideoPresetForMonitor(HMONITOR monitor) {
-    MONITORINFO info{sizeof(info)};
-    if (monitor && GetMonitorInfoW(monitor, &info)) {
-        const int monitorWidth = info.rcMonitor.right - info.rcMonitor.left;
-        // Use the horizontal desktop resolution for the FHD/QHD suggestion.
-        // This keeps 16:10 FHD-class displays such as 1920x1200 in the FHD
-        // bucket instead of incorrectly promoting them to QHD.
-        if (monitorWidth <= 1920) {
-            return VideoPreset::R1920x1080;
-        }
-    }
-    return VideoPreset::R2560x1440;
-}
 
 static SIZE SettingsDialogOuterSize(HWND hwnd, UINT dpi) {
     RECT rect{0, 0, SettingsPixels(kSettingsClientWidthDip, dpi),
@@ -4374,30 +4360,11 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
 
 static void FollowSettingsDialogMonitor(SettingsDialogState* state,
                                         HMONITOR monitor) {
-    if (!state || !state->videoCombo || !monitor ||
+    if (!state || !monitor ||
         monitor == state->currentMonitor) {
         return;
     }
     state->currentMonitor = monitor;
-    state->initialVideoPreset = RecommendedVideoPresetForMonitor(monitor);
-
-    size_t selected = 0;
-    for (size_t i = 0; i < ARRAYSIZE(kVideoPresets); ++i) {
-        if (kVideoPresets[i].preset == state->initialVideoPreset) {
-            selected = i;
-            break;
-        }
-    }
-    if (SendMessageW(state->videoCombo, CB_GETCURSEL, 0, 0) ==
-        static_cast<LRESULT>(selected)) {
-        return;
-    }
-    SendMessageW(state->videoCombo, CB_SETCURSEL,
-                 static_cast<WPARAM>(selected), 0);
-    // Resolution changes alter the capture pin's available format/FPS list.
-    // This runs only when the settings dialog crosses to another monitor,
-    // never in the active capture/render path.
-    PopulatePixelFormatCombo(state);
 }
 
 static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool accepted) {
@@ -4809,7 +4776,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             SendMessageW(state->videoCombo, CB_ADDSTRING, 0,
                          reinterpret_cast<LPARAM>(info.label));
         }
-        size_t selectedVideo = 1;
+        size_t selectedVideo = 0;
         for (size_t i = 0; i < ARRAYSIZE(kVideoPresets); ++i) {
             if (kVideoPresets[i].preset == state->initialVideoPreset) {
                 selectedVideo = i;
@@ -5150,8 +5117,7 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
                              settingsRect.bottom - settingsRect.top};
     MONITORINFO settingsMonitorInfo{sizeof(settingsMonitorInfo)};
     GetMonitorInfoW(settingsMonitor, &settingsMonitorInfo);
-    state.initialVideoPreset =
-        RecommendedVideoPresetForMonitor(settingsMonitor);
+    state.initialVideoPreset = g_settings.videoPreset;
     const RECT work = settingsMonitorInfo.rcWork;
     const int settingsX = work.left +
         ((work.right - work.left) - settingsOuter.cx) / 2;
@@ -5195,6 +5161,10 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
 // -----------------------------------------------------------------------------
 
 static bool g_fullscreen = false;
+// Set only when pixel-perfect startup automatically fills a matching monitor.
+// Esc exits the viewer directly in that case; manually entered F11 fullscreen
+// retains the usual first-Esc-to-windowed behavior.
+static bool g_autoFullscreen = false;
 static WINDOWPLACEMENT g_prevPlacement{ sizeof(g_prevPlacement) };
 static LONG_PTR g_prevStyle = 0;
 static RECT g_lastWindowedRect{};
@@ -5757,7 +5727,7 @@ static LRESULT CALLBACK VideoHostSubclassProc(
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
-static void ToggleFullscreen(HWND hwnd) {
+static void ToggleFullscreen(HWND hwnd, bool automaticStartup = false) {
     if (!g_fullscreen) {
         GetWindowRect(hwnd, &g_lastWindowedRect);
         g_haveLastWindowedRect = true;
@@ -5775,6 +5745,7 @@ static void ToggleFullscreen(HWND hwnd) {
                      SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
         ShowCursor(FALSE);
         g_fullscreen = true;
+        g_autoFullscreen = automaticStartup;
     } else {
         SetWindowLongPtrW(hwnd, GWL_STYLE, g_prevStyle);
         SetWindowPlacement(hwnd, &g_prevPlacement);
@@ -5783,6 +5754,7 @@ static void ToggleFullscreen(HWND hwnd) {
                      SWP_NOZORDER | SWP_NOOWNERZORDER);
         ShowCursor(TRUE);
         g_fullscreen = false;
+        g_autoFullscreen = false;
     }
 }
 
@@ -6259,8 +6231,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         if (wParam == VK_ESCAPE) {
-            if (g_fullscreen) ToggleFullscreen(hwnd);
-            else PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            if (g_fullscreen && !g_autoFullscreen) {
+                ToggleFullscreen(hwnd);
+            } else {
+                if (g_fullscreen) ShowCursor(TRUE);
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            }
             return 0;
         }
         break;
@@ -6434,10 +6410,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     UpdateBackgroundAudioMute(
         foregroundProcessId == GetCurrentProcessId());
 
-    if (g_settings.pixelPerfect && SelectedResolutionMatchesMonitor(hwnd)) {
+    // Monitor-relative sizing deliberately restores the saved window ratio.
+    // Do not let a coincidental capture/monitor resolution match replace that
+    // restored size with startup fullscreen.
+    if (g_settings.pixelPerfect && !g_settings.relativeWindowSize &&
+        SelectedResolutionMatchesMonitor(hwnd)) {
         fwprintf(stderr,
                  L"[video] selected resolution matches monitor; entering borderless fullscreen.\n");
-        ToggleFullscreen(hwnd);
+        ToggleFullscreen(hwnd, true);
     }
 
     const uint64_t trackingStartMs = GetTickCount64();

@@ -1,4 +1,15 @@
-Low Latency Capture Viewer v1.0.4 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.0.5 x64 (continued from the v0.14.2 rework)
+
+v1.0.5 window-state and capture-resolution behavior
+----------------------------------------------------
+- Fresh configurations start with 1920x1080 capture selected. The selected
+  capture resolution is persisted and never changes merely because either
+  window moves to a different monitor.
+- Monitor-relative sizing restores its saved window-coverage ratio on launch.
+  It now takes priority over automatic Pixel-perfect fullscreen, including when
+  the selected capture resolution happens to match the restored monitor.
+- Pixel-perfect startup fullscreen remains available when monitor-relative
+  sizing is disabled. Esc closes that automatic fullscreen directly.
 
 v1.0.4 display scaling and capture-ownership guidance
 ------------------------------------------------------

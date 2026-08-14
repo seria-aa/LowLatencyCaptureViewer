@@ -41,11 +41,11 @@ compressed formats, P010, and automatic device reconnect are not supported.
 
 ## Install and run
 
-1. Run `LowLatencyCaptureViewer_v1.0.4_Setup.exe` and follow the wizard.
+1. Run `LowLatencyCaptureViewer_v1.0.5_Setup.exe` and follow the wizard.
 2. Launch **Low Latency Capture Viewer** from the Start menu or the installed
    executable.
 
-A portable `LowLatencyCaptureViewer_v1.0.4_x64.zip` is also available. Extract
+A portable `LowLatencyCaptureViewer_v1.0.5_x64.zip` is also available. Extract
 it anywhere and run `LowLatencyCaptureViewer.exe`.
 
 Settings and diagnostic logs are stored per user in
@@ -73,13 +73,11 @@ language executable.
 | Scaling mode | Smooth by default. Try Sharp when a non-pixel-perfect fullscreen image looks soft. |
 
 Changing the capture device or resolution refreshes the supported format and
-frame-rate list. While the settings dialog is moved to another monitor, its
-recommended capture resolution follows that monitor (1080p on FHD, QHD on
-larger displays) and refreshes the capability list once at the monitor
-boundary. This happens only in the settings dialog and does not add work to
-the active capture or render path. The settings window shows the detected
-combinations, and disables Start when the selected device has no supported
-uncompressed mode.
+frame-rate list. A fresh configuration starts at 1920 x 1080 (FHD). The chosen
+capture resolution is remembered and is never changed automatically when the
+settings or viewer window moves to another monitor. The settings window shows
+the detected combinations, and disables Start when the selected device has no
+supported uncompressed mode.
 
 `Capture audio device` uses an audio pin on the selected video device first.
 For USB capture devices that expose audio separately, it then looks for a
@@ -135,7 +133,7 @@ a separate direct-endpoint option; it is not an `IAudioClient3` requirement.
 | Mouse wheel over video | Change application volume in 5% steps |
 | Drag near an edge or corner | Snap window without resizing it |
 | `Shift` + drag | Temporarily bypass edge snap |
-| `Esc` | Leave fullscreen; press again in windowed mode to exit |
+| `Esc` | Exit immediately from automatic pixel-perfect fullscreen; leave manually entered F11 fullscreen, then exit from windowed mode. Monitor-relative sizing never auto-enters fullscreen. |
 
 ## Diagnostics
 
