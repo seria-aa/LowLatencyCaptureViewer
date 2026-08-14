@@ -80,6 +80,10 @@ frames, selected format, WASAPI buffer state, PCM queue depth, drift correction,
 and underrun/overrun counts. Statistics begin after a two-second warm-up; capture
 and playback begin immediately.
 
+![Tab diagnostics overlay](docs/images/tab-diagnostics.png)
+
+*Example Tab diagnostics overlay. Values vary by device, display, and driver.*
+
 The reported ppm is an operational estimate, not a direct hardware-clock
 measurement. It includes scheduling stalls and startup behavior. Observe it for
 10–30 minutes before enabling resampling solely for drift correction.
@@ -93,6 +97,45 @@ Terms used by the overlay:
 An occasional underrun is not necessarily audible or harmful. If it repeats,
 raise the PCM target before enabling resampling when preserving the original PCM
 samples is more important than long-run clock correction.
+
+## Practical compatibility notes
+
+### Viewer vs. OBS
+
+OBS Studio is a general-purpose production tool for scenes, recording, streaming,
+filters, plugins, and encoding. This viewer is a dedicated preview path: it does
+not compose scenes, encode, record, or require FFmpeg/mpv. That smaller path is
+useful when preview latency and predictable behavior matter, but it is not an
+OBS benchmark or replacement. Use OBS when production features are required.
+
+### WASAPI Exclusive and system DSP
+
+Use **WASAPI Shared** when Windows-wide effects or third-party APO/DSP software
+such as Equalizer APO or HeSuVi must remain active. **WASAPI Exclusive** opens the
+endpoint directly and can reduce the shared-mixer path, but it typically bypasses
+shared-mode APO/DSP effects and prevents other applications from using that
+endpoint at the same time. Choose based on whether compatibility or minimum
+audio-path latency is the priority.
+
+### Mixed monitor refresh rates
+
+In a windowed desktop with displays running at different refresh rates, Windows
+DWM composition can produce different frame pacing or occasional micro-stutter
+when the window crosses monitors. Immediate presentation avoids waiting for a
+VSync interval and is the low-latency choice, at the cost of possible tearing.
+VSync reduces tearing but adds a wait and its pacing depends on the current
+display. Match capture FPS to the target monitor when possible and compare the
+Input FPS and Present FPS in the Tab overlay.
+
+### Overhead and input-latency expectations
+
+The viewer avoids an encoder, scene graph, and queued video pipeline; it keeps
+only the newest frame and performs the required D3D11 upload and presentation.
+Actual CPU/GPU usage still depends on resolution, FPS, driver, monitor, and
+desktop composition, so fixed hardware-independent percentages are not promised.
+Likewise, the OSD app-processing value is not end-to-end HDMI or display latency.
+Rhythm games and other timing-sensitive use cases should be validated on the
+capture card and monitor that will actually be used.
 
 ## Build from source
 
