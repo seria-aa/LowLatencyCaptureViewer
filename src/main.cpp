@@ -3337,6 +3337,7 @@ struct SettingsDialogState {
     HWND startButton = nullptr;
     HWND cancelButton = nullptr;
     HWND tooltipWindow = nullptr;
+    HWND activeTooltipTarget = nullptr;
     std::vector<HFONT> uiFonts;
     std::thread probeThread;
     std::atomic<bool> probeReady{false};
@@ -4347,11 +4348,17 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         const HWND tooltip = reinterpret_cast<HWND>(lParam);
         if (state && IsSettingsHelpControl(state, target) &&
             tooltip == state->tooltipWindow) {
+            if (state->activeTooltipTarget &&
+                state->activeTooltipTarget != target) {
+                TrackSettingsTooltip(state->activeTooltipTarget, tooltip,
+                                     false);
+            }
             POINT cursor{};
             GetCursorPos(&cursor);
             SendMessageW(tooltip, TTM_TRACKPOSITION, 0,
                          MAKELPARAM(cursor.x + 16, cursor.y + 20));
             TrackSettingsTooltip(target, tooltip, true);
+            state->activeTooltipTarget = target;
         }
         return 0;
     }
@@ -4359,7 +4366,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
     case WM_SETTINGS_TOOLTIP_HIDE: {
         const HWND target = reinterpret_cast<HWND>(wParam);
         const HWND tooltip = reinterpret_cast<HWND>(lParam);
-        if (state && IsSettingsHelpControl(state, target) &&
+        if (state && target == state->activeTooltipTarget &&
+            IsSettingsHelpControl(state, target) &&
             tooltip == state->tooltipWindow) {
             RECT targetRect{};
             POINT cursor{};
@@ -4367,6 +4375,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             GetCursorPos(&cursor);
             if (PtInRect(&targetRect, cursor)) return 0;
             TrackSettingsTooltip(target, tooltip, false);
+            state->activeTooltipTarget = nullptr;
         }
         return 0;
     }
@@ -4560,12 +4569,16 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
         const BOOL result = GetMessageW(&msg, nullptr, 0, 0);
         if (result <= 0) break;
         if (msg.message == WM_MOUSEMOVE && state.tooltipWindow) {
-            SendMessageW(hwnd,
-                         IsSettingsHelpControl(&state, msg.hwnd)
-                             ? WM_SETTINGS_TOOLTIP_SHOW
-                             : WM_SETTINGS_TOOLTIP_HIDE,
-                         reinterpret_cast<WPARAM>(state.driftHelp),
-                         reinterpret_cast<LPARAM>(state.tooltipWindow));
+            const HWND target = IsSettingsHelpControl(&state, msg.hwnd)
+                ? msg.hwnd : state.activeTooltipTarget;
+            if (target) {
+                SendMessageW(hwnd,
+                             IsSettingsHelpControl(&state, msg.hwnd)
+                                 ? WM_SETTINGS_TOOLTIP_SHOW
+                                 : WM_SETTINGS_TOOLTIP_HIDE,
+                             reinterpret_cast<WPARAM>(target),
+                             reinterpret_cast<LPARAM>(state.tooltipWindow));
+            }
         }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
