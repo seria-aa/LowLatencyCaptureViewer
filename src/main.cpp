@@ -182,6 +182,7 @@ struct AppSettings {
     std::wstring audioOutputDeviceId;
     bool saveLog = false;
     bool showDiagnosticConsole = false;
+    bool skipStartupSettings = false;
     bool pixelPerfect = true;
     bool relativeWindowSize = false;
     int relativeWindowScalePpm = 0;
@@ -286,6 +287,8 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"창을 모니터 가장자리에 스냅 (권장)", L"Snap window to monitor edges (recommended)"},
         {L"진단 로그 파일 저장 (사용자 폴더)", L"Save diagnostic log (user folder)"},
         {L"진단 콘솔 창 표시", L"Show diagnostic console window"},
+        {L"다음 실행부터 바로 시작", L"Start directly next time"},
+        {L"저장된 설정으로 바로 실행 · Shift 실행 또는 F2로 설정 열기", L"Starts with saved settings · hold Shift at launch or press F2 for settings"},
         {L"언어 / Language", L"Language"},
         {L"Low Latency Capture Viewer 설정", L"Low Latency Capture Viewer Settings"},
         {L"시작", L"Start"},
@@ -347,6 +350,7 @@ constexpr size_t kRingFrames = 48000 / 2;
 
 static HWND g_videoHost = nullptr;
 static std::atomic<bool> g_running{true};
+static std::atomic<bool> g_restartToSettings{false};
 static std::atomic<uint64_t> g_videoCapturedFrames{0};
 static std::atomic<uint64_t> g_videoPresentedFrames{0};
 static std::atomic<uint64_t> g_videoReplacedFrames{0};
@@ -897,9 +901,13 @@ static void LoadSettings() {
     wchar_t monitorDevice[64]{};
     wchar_t saveLog[8]{};
     wchar_t showDiagnosticConsole[8]{};
+    wchar_t skipStartupSettings[8]{};
 
     GetPrivateProfileStringW(L"General", L"Language", L"Auto", language,
                              ARRAYSIZE(language), path.c_str());
+    GetPrivateProfileStringW(L"General", L"SkipStartupSettings", L"0",
+                             skipStartupSettings,
+                             ARRAYSIZE(skipStartupSettings), path.c_str());
 
     GetPrivateProfileStringW(L"Audio", L"Mode", L"Shared", audio,
                              ARRAYSIZE(audio), path.c_str());
@@ -1045,6 +1053,8 @@ static void LoadSettings() {
     g_settings.saveLog = wcstol(saveLog, nullptr, 10) != 0;
     g_settings.showDiagnosticConsole =
         wcstol(showDiagnosticConsole, nullptr, 10) != 0;
+    g_settings.skipStartupSettings =
+        wcstol(skipStartupSettings, nullptr, 10) != 0;
 
     if (_wcsicmp(resolution, L"1920x1080") == 0) {
         g_settings.videoPreset = VideoPreset::R1920x1080;
@@ -1076,6 +1086,9 @@ static void SaveSettings() {
     if (g_settings.uiLanguage == UiLanguage::Korean) language = L"Korean";
     if (g_settings.uiLanguage == UiLanguage::English) language = L"English";
     WritePrivateProfileStringW(L"General", L"Language", language,
+                               path.c_str());
+    WritePrivateProfileStringW(L"General", L"SkipStartupSettings",
+                               g_settings.skipStartupSettings ? L"1" : L"0",
                                path.c_str());
     WritePrivateProfileStringW(
         L"Audio", L"Mode",
@@ -3743,6 +3756,7 @@ constexpr int IDC_SETTINGS_LANGUAGE = 2024;
 constexpr int IDC_SETTINGS_SHOW_CONSOLE = 2025;
 constexpr int IDC_SETTINGS_CAPTURE_AUDIO_DEVICE = 2026;
 constexpr int IDC_SETTINGS_SCALING = 2027;
+constexpr int IDC_SETTINGS_SKIP_STARTUP = 2028;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
@@ -3789,6 +3803,8 @@ struct SettingsDialogState {
     HWND windowSnapCheck = nullptr;
     HWND saveLogCheck = nullptr;
     HWND showConsoleCheck = nullptr;
+    HWND skipStartupCheck = nullptr;
+    HWND skipStartupHint = nullptr;
     HWND startButton = nullptr;
     HWND cancelButton = nullptr;
     HWND tooltipWindow = nullptr;
@@ -3879,6 +3895,8 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->muteBackgroundCheck, 24, 318, 451, 28, dpi);
     PlaceSettingsControl(state->languageLabel, 24, 352, 160, 24, dpi);
     PlaceSettingsControl(state->languageCombo, 195, 348, 280, 120, dpi);
+    PlaceSettingsControl(state->skipStartupCheck, 24, 396, 451, 28, dpi);
+    PlaceSettingsControl(state->skipStartupHint, 44, 424, 431, 42, dpi);
 
     PlaceSettingsControl(state->presentationLabel, 505, 24, 95, 24, dpi);
     PlaceSettingsControl(state->presentationHelp, 604, 20, 24, 24, dpi);
@@ -4453,6 +4471,8 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->saveLogCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.showDiagnosticConsole = SendMessageW(
             state->showConsoleCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_settings.skipStartupSettings = SendMessageW(
+            state->skipStartupCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.muteWhenBackground = SendMessageW(
             state->muteBackgroundCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.pixelPerfect = SendMessageW(
@@ -4684,6 +4704,22 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                      reinterpret_cast<LPARAM>(L"English"));
         SendMessageW(state->languageCombo, CB_SETCURSEL,
                      static_cast<WPARAM>(g_settings.uiLanguage), 0);
+
+        state->skipStartupCheck = CreateWindowExW(
+            0, L"BUTTON", UI_TEXT(L"다음 실행부터 바로 시작"),
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+            24, 396, 451, 28, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_SKIP_STARTUP)),
+            instance, nullptr);
+        SendMessageW(state->skipStartupCheck, BM_SETCHECK,
+                     g_settings.skipStartupSettings
+                         ? BST_CHECKED : BST_UNCHECKED, 0);
+        state->skipStartupHint = CreateWindowExW(
+            0, L"STATIC", UI_TEXT(
+                L"저장된 설정으로 바로 실행 · Shift 실행 또는 F2로 설정 열기"),
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
+            44, 424, 431, 42, hwnd, nullptr, instance, nullptr);
 
         state->presentationLabel = makeLabel(UI_TEXT(L"화면 표시 방식"), 24, 274);
         state->presentationCombo = CreateWindowExW(
@@ -5770,6 +5806,7 @@ static bool SelectedResolutionMatchesMonitor(HWND hwnd) {
 }
 
 static constexpr UINT WM_TOGGLE_RUNTIME_OSD = WM_APP + 91;
+static constexpr UINT WM_OPEN_SETTINGS = WM_APP + 92;
 
 static void FormatAudioErrorAge(uint64_t lastErrorMs, uint64_t nowMs,
                                 wchar_t* output, size_t outputCount) {
@@ -6222,6 +6259,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         break;
 
     case WM_KEYDOWN:
+        if (wParam == VK_F2) {
+            SendMessageW(hwnd, WM_OPEN_SETTINGS, 0, 0);
+            return 0;
+        }
         if (wParam == VK_TAB) {
             ToggleRuntimeOsd();
             return 0;
@@ -6249,6 +6290,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         ToggleRuntimeOsd();
         return 0;
 
+    case WM_OPEN_SETTINGS:
+        // The capture graph and WASAPI renderer are rebuilt only after this
+        // window has closed and their threads have joined.
+        g_restartToSettings.store(true, std::memory_order_release);
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        return 0;
+
     case WM_CLOSE:
         PersistWindowPosition(hwnd);
         g_windowPositionPersisted = true;
@@ -6269,6 +6317,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+static void RelaunchWithSettings() {
+    wchar_t executable[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(nullptr, executable,
+                                             ARRAYSIZE(executable));
+    if (!length || length >= ARRAYSIZE(executable)) return;
+
+    std::wstring commandLine = L"\"";
+    commandLine += executable;
+    commandLine += L"\" --force-settings";
+    std::vector<wchar_t> mutableCommand(commandLine.begin(),
+                                        commandLine.end());
+    mutableCommand.push_back(L'\0');
+    STARTUPINFOW startup{sizeof(startup)};
+    PROCESS_INFORMATION process{};
+    if (CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr,
+                       FALSE, 0, nullptr, nullptr, &startup, &process)) {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+}
+
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX commonControls{
@@ -6282,13 +6351,19 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         wcsstr(commandLine, L"--smoke-test-60") != nullptr;
     const bool overlaySmokeTest = commandLine &&
         wcsstr(commandLine, L"--smoke-test-overlay") != nullptr;
+    const bool forceSettings = commandLine &&
+        wcsstr(commandLine, L"--force-settings") != nullptr;
     if (overlaySmokeTest) {
         g_osdVisible.store(true, std::memory_order_release);
         g_volumeHudUntilMs.store(GetTickCount64() + 20'000,
                                  std::memory_order_release);
         g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
     }
-    if (!smokeTest && !ShowSettingsDialog(hInst)) return 0;
+    const bool shiftLaunch = !smokeTest &&
+        (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool showStartupSettings = !smokeTest &&
+        (forceSettings || shiftLaunch || !g_settings.skipStartupSettings);
+    if (showStartupSettings && !ShowSettingsDialog(hInst)) return 0;
 
     // Allocate a console for prototype diagnostics.
     const BOOL allocatedConsole = AllocConsole();
@@ -6471,6 +6546,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                     failureText.c_str());
                 MessageBoxW(hwnd, message, L"Low Latency Capture Viewer",
                             MB_OK | MB_ICONERROR);
+                g_restartToSettings.store(true, std::memory_order_release);
             }
             g_running.store(false);
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -6499,6 +6575,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         if (m.message == WM_KEYDOWN && m.wParam == VK_TAB &&
             GetKeyState(VK_CONTROL) >= 0) {
             SendMessageW(hwnd, WM_TOGGLE_RUNTIME_OSD, 0, 0);
+            continue;
+        }
+        if (m.message == WM_KEYDOWN && m.wParam == VK_F2) {
+            SendMessageW(hwnd, WM_OPEN_SETTINGS, 0, 0);
             continue;
         }
         TranslateMessage(&m);
@@ -6571,6 +6651,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         fwprintf(stderr, L"[smoke-volume] final=%d%%\n",
                  g_volumePercent.load(std::memory_order_acquire));
     }
+    const bool restartToSettings =
+        !smokeTest && g_restartToSettings.exchange(false,
+                                                    std::memory_order_acq_rel);
     CloseSavedLog();
+    if (restartToSettings) RelaunchWithSettings();
     return 0;
 }

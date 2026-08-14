@@ -1,4 +1,13 @@
-Low Latency Capture Viewer v1.0.5 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.0.6 x64 (continued from the v0.14.2 rework)
+
+v1.0.6 direct startup and settings recovery
+-----------------------------------------
+- Added an off-by-default option to launch directly with saved settings,
+  skipping the startup settings dialog.
+- Hold Shift while launching to show settings for that launch, or press F2 in
+  the viewer to stop capture safely and reopen settings.
+- A capture initialization failure now returns to settings after its error
+  message, preventing a direct-start configuration from becoming a dead end.
 
 v1.0.5 window-state and capture-resolution behavior
 ----------------------------------------------------

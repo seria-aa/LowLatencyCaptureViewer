@@ -41,11 +41,11 @@ compressed formats, P010, and automatic device reconnect are not supported.
 
 ## Install and run
 
-1. Run `LowLatencyCaptureViewer_v1.0.5_Setup.exe` and follow the wizard.
+1. Run `LowLatencyCaptureViewer_v1.0.6_Setup.exe` and follow the wizard.
 2. Launch **Low Latency Capture Viewer** from the Start menu or the installed
    executable.
 
-A portable `LowLatencyCaptureViewer_v1.0.5_x64.zip` is also available. Extract
+A portable `LowLatencyCaptureViewer_v1.0.6_x64.zip` is also available. Extract
 it anywhere and run `LowLatencyCaptureViewer.exe`.
 
 Settings and diagnostic logs are stored per user in
@@ -59,6 +59,12 @@ The application contains Korean and English UI strings in one executable. The
 settings dialog offers **Auto (Windows language)**, **한국어**, and **English**;
 the selected language is saved per user and does not install a duplicate
 language executable.
+
+Enable **Start directly next time** to open the viewer with the saved capture,
+audio, and window settings without first showing the settings dialog. Hold
+**Shift** while launching to show settings for that launch, or press **F2** in
+the viewer to close it safely and reopen the settings dialog. If capture
+initialization fails, the viewer returns to settings after showing the error.
 
 ## Recommended starting settings
 
@@ -129,6 +135,7 @@ a separate direct-endpoint option; it is not an `IAudioClient3` requirement.
 | Control | Action |
 | --- | --- |
 | `F11` | Toggle borderless fullscreen |
+| `F2` | Close the viewer safely and reopen settings |
 | `Tab` | Show or hide diagnostics |
 | Mouse wheel over video | Change application volume in 5% steps |
 | Drag near an edge or corner | Snap window without resizing it |
