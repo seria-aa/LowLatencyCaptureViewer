@@ -1,4 +1,12 @@
-Low Latency Capture Viewer v1.0.0 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.0.1 x64 (continued from the v0.14.2 rework)
+
+v1.0.1 language selection
+-------------------------
+- One executable now supports Auto (Windows language), Korean, and English.
+- The selected language is stored in the per-user settings file; no second
+  language executable is installed.
+- Settings labels, help, diagnostics OSD, volume HUD, and status text switch
+  with the selected language.
 
 v1.0.0 installer and per-user data
 -----------------------------------

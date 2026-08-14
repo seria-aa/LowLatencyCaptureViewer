@@ -18,7 +18,10 @@ binary. Release builds use the static MSVC runtime. A target PC still needs
 the capture-card driver and the Windows multimedia components listed in
 `DEPENDENCIES.txt`.
 
-The v1.0.0 distribution has two forms: an Inno Setup installer for Program
+The v1.0.1 distribution has two forms: an Inno Setup installer for Program
 Files and a portable x64 ZIP. Both keep settings and optional logs under
 `%LOCALAPPDATA%\\LowLatencyCaptureViewer`; they do not ship a machine-specific
 `settings.ini`.
+
+The application is a single executable with Auto, Korean, and English UI
+selection. It does not install duplicate language executables.
