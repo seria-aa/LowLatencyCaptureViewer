@@ -3341,6 +3341,7 @@ struct SettingsDialogState {
     std::vector<CaptureDeviceInfo> captureDevices;
     std::vector<AudioEndpointInfo> audioEndpoints;
     std::vector<PixelFormatSupport> pixelFormats;
+    VideoPreset initialVideoPreset = VideoPreset::R2560x1440;
     UINT32 selectedSharedPeriodFrames = 0;
     int selectedBufferMs = kRecommendedWasapiBufferMs;
     bool bufferItemsAreSharedFrames = false;
@@ -4149,7 +4150,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         }
         size_t selectedVideo = 1;
         for (size_t i = 0; i < ARRAYSIZE(kVideoPresets); ++i) {
-            if (kVideoPresets[i].preset == g_settings.videoPreset) {
+            if (kVideoPresets[i].preset == state->initialVideoPreset) {
                 selectedVideo = i;
                 break;
             }
@@ -4460,6 +4461,14 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
                              settingsRect.bottom - settingsRect.top};
     MONITORINFO settingsMonitorInfo{sizeof(settingsMonitorInfo)};
     GetMonitorInfoW(settingsMonitor, &settingsMonitorInfo);
+    const int monitorWidth = settingsMonitorInfo.rcMonitor.right -
+                             settingsMonitorInfo.rcMonitor.left;
+    const int monitorHeight = settingsMonitorInfo.rcMonitor.bottom -
+                              settingsMonitorInfo.rcMonitor.top;
+    state.initialVideoPreset =
+        monitorWidth <= 1920 && monitorHeight <= 1080
+            ? VideoPreset::R1920x1080
+            : VideoPreset::R2560x1440;
     const RECT work = settingsMonitorInfo.rcWork;
     const int settingsX = work.left +
         ((work.right - work.left) - settingsOuter.cx) / 2;
@@ -4504,8 +4513,8 @@ static LONG_PTR g_prevStyle = 0;
 static RECT g_lastWindowedRect{};
 static bool g_haveLastWindowedRect = false;
 static bool g_windowPositionPersisted = false;
-static constexpr int kWindowSnapDistanceDip = 18;
-static constexpr int kWindowSnapReleaseDip = 15;
+static constexpr int kWindowSnapDistanceDip = 20;
+static constexpr int kWindowSnapReleaseDip = 20;
 
 enum class HorizontalSnapEdge { None, Left, Right };
 enum class VerticalSnapEdge { None, Top, Bottom };
