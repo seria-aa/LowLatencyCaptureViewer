@@ -52,11 +52,19 @@ when enabled, are written to the `logs` folder.
 | Output device | Follow the Windows default device unless a fixed device is required. |
 | Clock drift correction | Off for unaltered PCM. Enable only when long-running playback shows repeated drift-related errors. |
 | PCM target | 10 ms for minimum latency; raise it only if underruns repeat. |
-| Video format | Auto/NV12 first; select 60 fps when 120 fps is not sustainable. |
+| Video format | Auto/NV12 first for the lowest upload overhead; select 60 fps when 120 fps is not sustainable. |
 
 Changing the capture device or resolution refreshes the supported format and
 frame-rate list. The settings window shows the detected combinations, and
 disables Start when the selected device has no supported uncompressed mode.
+
+For this viewer, **NV12 is the preferred low-latency format**. Its 12-bit-per-
+pixel layout transfers 25% less frame data than 16-bit-per-pixel YUY2 during the
+remaining system-memory-to-D3D11 upload, so it generally has lower bandwidth and
+processing overhead. Both formats otherwise use the same latest-frame-only
+D3D11 Video Processor path. The exact latency difference still depends on the
+capture device and driver; choose YUY2 when its 4:2:2 chroma detail is more
+important or when a particular device handles it better.
 
 `Pixel-perfect` fixes the client area to the selected capture resolution and
 disables manual resizing. With it off, the window can be resized while keeping
