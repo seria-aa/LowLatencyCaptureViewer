@@ -37,11 +37,11 @@ reconnect are not supported.
 
 ## Install and run
 
-1. Run `LowLatencyCaptureViewer_v1.0.0_Setup.exe` and follow the wizard.
+1. Run `LowLatencyCaptureViewer_v1.0.1_Setup.exe` and follow the wizard.
 2. Launch **Low Latency Capture Viewer** from the Start menu or the installed
    executable.
 
-A portable `LowLatencyCaptureViewer_v1.0.0_x64.zip` is also available. Extract
+A portable `LowLatencyCaptureViewer_v1.0.1_x64.zip` is also available. Extract
 it anywhere and run `LowLatencyCaptureViewer.exe`.
 
 Settings and diagnostic logs are stored per user in
@@ -49,6 +49,11 @@ Settings and diagnostic logs are stored per user in
 executable is copied there automatically on first launch; it is not deleted.
 The uninstaller leaves this user data in place so reinstalling does not erase
 preferences or diagnostics.
+
+The application contains Korean and English UI strings in one executable. The
+settings dialog offers **Auto (Windows language)**, **한국어**, and **English**;
+the selected language is saved per user and does not install a duplicate
+language executable.
 
 ## Recommended starting settings
 
@@ -157,20 +162,26 @@ audio-path latency is the priority.
 
 In a windowed desktop with displays running at different refresh rates, Windows
 DWM composition can produce different frame pacing or occasional micro-stutter
-when the window crosses monitors. Immediate presentation avoids waiting for a
-VSync interval and is the low-latency choice, at the cost of possible tearing.
-VSync reduces tearing but adds a wait and its pacing depends on the current
-display. Match capture FPS to the target monitor when possible and compare the
-Input FPS and Present FPS in the Tab overlay.
+when the window crosses monitors. Immediate presentation avoids an additional
+VSync wait and is the low-latency choice, at the cost of possible tearing; it
+does not remove all pacing differences caused by DWM. VSync reduces tearing but
+adds a wait and its pacing depends on the current display. When choosing a
+capture rate, first stay within the source's supported rates, then prefer a
+rate that has an even cadence with the target monitor when one is available.
+Compare the Input FPS and Present FPS in the Tab overlay after moving the
+window.
 
 ### Capture frame rate
 
-Choose a capture rate at or below the source's actual maximum rate. A 120 fps
-source has no additional visual information at 144 fps; a capture card may only
-repeat or re-time frames in that mode. A 144 Hz display does not require 144 fps
-capture. Use 120 fps for a 120 fps source and 60 fps for a 60 fps source. For
-VSync, a 120 Hz or 240 Hz display can provide more even pacing for 120 fps video
-than a 144 Hz display.
+Choose a capture rate at or below the source's actual maximum rate. This source
+limit takes priority over the monitor refresh rate: a 120 fps source has no
+additional visual information at 144 fps, and a capture card may only repeat or
+re-time frames in that mode. A 144 Hz display therefore does not require 144 fps
+capture. Use 120 fps for a 120 fps source and 60 fps for a 60 fps source. If the
+source offers several rates, choose the one that also fits the target display
+cadence when possible (for example, 120 fps with 120/240 Hz). For VSync, a
+120 Hz or 240 Hz display can provide more even pacing for 120 fps video than a
+144 Hz display.
 
 ### Overhead and input-latency expectations
 

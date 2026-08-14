@@ -1,4 +1,12 @@
-Low Latency Capture Viewer v1.0.0 design (continued from v0.14.2)
+Low Latency Capture Viewer v1.0.1 design (continued from v0.14.2)
+
+v1.0.1 language selection
+-------------------------
+- A single executable contains Korean and English UI strings.
+- Auto follows the Windows user locale; Korean and English can be selected
+  explicitly in the settings dialog.
+- Language selection is persisted in the per-user settings file and does not
+  affect capture, rendering, audio, or timing threads.
 
 v1.0.0 packaging and per-user storage
 --------------------------------------

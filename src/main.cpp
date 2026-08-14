@@ -51,6 +51,7 @@
 #include <future>
 #include <functional>
 #include <cstdarg>
+#include <unordered_map>
 
 // -----------------------------------------------------------------------------
 // Minimal Sample Grabber declarations.
@@ -132,6 +133,12 @@ enum class VideoPixelFormat {
     Yuy2,
 };
 
+enum class UiLanguage {
+    Auto,
+    Korean,
+    English,
+};
+
 struct CaptureDeviceInfo {
     std::wstring id;
     std::wstring name;
@@ -149,6 +156,7 @@ struct PixelFormatSupport {
 };
 
 struct AppSettings {
+    UiLanguage uiLanguage = UiLanguage::Auto;
     AudioMode audioMode = AudioMode::WasapiShared;
     int wasapiBufferMs = kRecommendedWasapiBufferMs;
     UINT32 wasapiSharedPeriodFrames = 0;
@@ -190,6 +198,121 @@ static constexpr VideoPresetInfo kVideoPresets[] = {
 };
 
 static AppSettings g_settings{};
+
+static bool IsEnglishUi() {
+    if (g_settings.uiLanguage == UiLanguage::English) return true;
+    if (g_settings.uiLanguage == UiLanguage::Korean) return false;
+    wchar_t localeName[LOCALE_NAME_MAX_LENGTH]{};
+    if (GetUserDefaultLocaleName(localeName, ARRAYSIZE(localeName)) > 0) {
+        return _wcsnicmp(localeName, L"ko", 2) != 0;
+    }
+    return false;
+}
+
+static const wchar_t* UiText(const wchar_t* korean) {
+    if (!korean || !IsEnglishUi()) return korean;
+    // The map is intentionally keyed by the existing Korean source strings.
+    // This keeps settings files backward-compatible and lets the UI switch
+    // language without a second executable or a runtime translation service.
+    static const std::unordered_map<std::wstring, std::wstring> english = {
+        {L"Windows 기본 장치", L"Windows default device"},
+        {L"선택 장치 없음", L"No selected device"},
+        {L" (기본)", L" (default)"},
+        {L"선택한 출력 장치", L"Selected output device"},
+        {L" (기본 추적)", L" (following default)"},
+        {L"음량  %d%%", L"Volume  %d%%"},
+        {L"%.2f ms (권장)", L"%.2f ms (recommended)"},
+        {L"%.2f ms (최저)", L"%.2f ms (minimum)"},
+        {L"%d ms (권장)", L"%d ms (recommended)"},
+        {L"Shared 저지연 지원 확인 중…", L"Checking Shared low-latency support…"},
+        {L"IAudioClient3 지원됨 · Shared %.2f–%.2f ms · 검사 %.1f ms", L"IAudioClient3 available · Shared %.2f–%.2f ms · probe %.1f ms"},
+        {L"IAudioClient3 사용 불가 · 기본 Shared로 자동 전환 (0x%08X)", L"IAudioClient3 unavailable · using classic Shared (0x%08X)"},
+        {L"지원 모드 없음: 다른 장치 또는 해상도를 선택하세요.", L"No supported mode: choose another device or resolution."},
+        {L"자동 인식: ", L"Detected: "},
+        {L"지원 프레임 없음", L"No supported frame rate"},
+        {L"자동 선택 (권장 프레임)", L"Auto select (recommended frame rate)"},
+        {L"지원 포맷 없음", L"No supported format"},
+        {L"자동 선택 (NV12 우선 · 권장)", L"Auto select (NV12 first · recommended)"},
+        {L"오디오 출력 모드", L"Audio output mode"},
+        {L"WASAPI Shared (호환성 우선 · 권장)", L"WASAPI Shared (compatibility · recommended)"},
+        {L"WASAPI Exclusive (지연 최소화 · 장치 독점)", L"WASAPI Exclusive (minimum latency · exclusive device)"},
+        {L"WASAPI 출력 장치", L"WASAPI output device"},
+        {L"Windows 기본 출력 장치 따라가기 (권장)", L"Follow Windows default output (recommended)"},
+        {L" (현재 기본)", L" (current default)"},
+        {L"WASAPI 출력 버퍼", L"WASAPI output buffer"},
+        {L"볼륨 HUD 위치", L"Volume HUD position"},
+        {L"좌측 상단 (기본)", L"Top-left (default)"},
+        {L"우측 상단", L"Top-right"},
+        {L"좌측 하단", L"Bottom-left"},
+        {L"우측 하단", L"Bottom-right"},
+        {L"클록 드리프트 보정", L"Clock-drift correction"},
+        {L"끔 (원본 PCM · 음질 우선)", L"Off (unaltered PCM · quality first)"},
+        {L"자동 리샘플링 (장시간 안정성 권장)", L"Automatic resampling (recommended for long sessions)"},
+        {L"PCM 버퍼 목표", L"PCM buffer target"},
+        {L"10 ms (최저 지연)", L"10 ms (minimum latency)"},
+        {L"15 ms (저지연 목표)", L"15 ms (low-latency target)"},
+        {L"20 ms (안정 권장)", L"20 ms (stable recommendation)"},
+        {L"30 ms (안정성 우선)", L"30 ms (stability first)"},
+        {L"백그라운드에서 자동 음소거", L"Mute automatically in background"},
+        {L"화면 표시 방식", L"Presentation mode"},
+        {L"저지연", L"Immediate"},
+        {L"캡처 장치", L"Capture device"},
+        {L"자동 선택 (GC573 우선 · 권장)", L"Auto select (GC573 first · recommended)"},
+        {L" (실험적)", L" (experimental)"},
+        {L"캡처 해상도", L"Capture resolution"},
+        {L"픽셀 포맷", L"Pixel format"},
+        {L"프레임", L"Frame rate"},
+        {L"지원 모드 확인 중...", L"Checking supported modes..."},
+        {L"Pixel-perfect (1:1 · 창 크기 고정)", L"Pixel-perfect (1:1 · fixed window size)"},
+        {L"모니터 이동 시 상대적 창 크기 유지 (독립 옵션)", L"Keep relative window size when moving monitors (independent)"},
+        {L"※ Pixel-perfect와 함께 켜면 모니터 이동 시 1:1이 깨질 수 있습니다.", L"※ With Pixel-perfect, moving monitors may break 1:1 scaling."},
+        {L"제목 표시줄 숨기기 (borderless 창)", L"Hide title bar (borderless window)"},
+        {L"창을 모니터 가장자리에 스냅 (권장)", L"Snap window to monitor edges (recommended)"},
+        {L"진단 로그 파일 저장 (사용자 폴더)", L"Save diagnostic log (user folder)"},
+        {L"언어 / Language", L"Language"},
+        {L"Low Latency Capture Viewer 설정", L"Low Latency Capture Viewer Settings"},
+        {L"시작", L"Start"},
+        {L"취소", L"Cancel"},
+        {L"없음", L"None"},
+        {L"방금", L"just now"},
+        {L"%llu초 전", L"%llu seconds ago"},
+        {L"%llu분 %llu초 전", L"%llu minutes %llu seconds ago"},
+        {L"%llu시간 %llu분 전", L"%llu hours %llu minutes ago"},
+        {L"측정 대기 중", L"Waiting for measurement"},
+        {L"측정 중", L"Measuring"},
+        {L"워밍업 · 시작 2초 제외", L"Warm-up · first 2 seconds excluded"},
+        {L"리샘플러 출력 부족 감지", L"Resampler output shortage detected"},
+        {L"리샘플러 보정 한계 접근", L"Resampler correction limit approaching"},
+        {L"리샘플러 정상 작동", L"Resampler operating normally"},
+        {L"보정 작동 · 오류 원인 아래 확인", L"Correction active · see error cause below"},
+        {L"안정 · 보정 불필요", L"Stable · correction unnecessary"},
+        {L"관찰 중", L"Observing"},
+        {L"초기 오류 · 더 관찰", L"Initial error · observe longer"},
+        {L"현재 안정 · 경과 관찰", L"Currently stable · continue observing"},
+        {L"입력 지터 · 보정보다 대기량", L"Input jitter · increase buffering before correction"},
+        {L"반복 불균형 · 보정 권장", L"Repeated imbalance · correction recommended"},
+        {L"드문 오류 · 끔 유지 가능", L"Rare errors · Off can be kept"},
+        {L"최저 지연 · 오류 없음", L"Minimum latency · no errors"},
+        {L"PCM 버퍼 여유 정상", L"PCM buffer headroom normal"},
+        {L"현재 안정 · 과거 오류 있음", L"Currently stable · previous errors"},
+        {L"PCM 버퍼 부족 가능", L"Possible PCM buffer shortage"},
+        {L"PCM 버퍼 있음 · 리샘플러 확인", L"PCM buffer available · check resampler"},
+        {L"캡처 패킷 지연 감지", L"Capture packet delay detected"},
+        {L"백그라운드 음소거 중", L"Background mute active"},
+        {L"PCM 연산 우회", L"PCM processing bypassed"},
+        {L"음소거", L"Muted"},
+        {L"PCM 감쇠 적용", L"PCM attenuation applied"},
+        {L"자동 리샘플링", L"Automatic resampling"},
+        {L"끔 (원본 PCM)", L"Off (unaltered PCM)"},
+        {L"Pixel-perfect 시작 · Monitor-relative 이동", L"Pixel-perfect start · monitor-relative move"},
+        {L"Pixel-perfect (고정 크기)", L"Pixel-perfect (fixed size)"},
+        {L"Scaled (비율 고정)", L"Scaled (fixed aspect ratio)"},
+    };
+    const auto it = english.find(korean);
+    return it == english.end() ? korean : it->second.c_str();
+}
+
+#define UI_TEXT(text) UiText(text)
 
 struct AudioClient3Support {
     bool supported = false;
@@ -668,12 +791,12 @@ static std::wstring ConfiguredAudioEndpointName(
         for (const auto& endpoint : endpoints) {
             if (endpoint.id == endpointId) return endpoint.name;
         }
-        return L"선택 장치 없음";
+        return UI_TEXT(L"선택 장치 없음");
     }
     for (const auto& endpoint : endpoints) {
-        if (endpoint.isDefault) return endpoint.name + L" (기본)";
+        if (endpoint.isDefault) return endpoint.name + UI_TEXT(L" (기본)");
     }
-    return L"Windows 기본 장치";
+    return UI_TEXT(L"Windows 기본 장치");
 }
 
 static const VideoPresetInfo& CurrentVideoPreset() {
@@ -715,6 +838,7 @@ static std::wstring SettingsPath() {
 static void LoadSettings() {
     MigrateLegacySettings();
     const std::wstring path = SettingsPath();
+    wchar_t language[16]{};
     wchar_t audio[32]{};
     wchar_t bufferMs[16]{};
     wchar_t sharedPeriodFrames[16]{};
@@ -738,6 +862,9 @@ static void LoadSettings() {
     wchar_t windowY[32]{};
     wchar_t monitorDevice[64]{};
     wchar_t saveLog[8]{};
+
+    GetPrivateProfileStringW(L"General", L"Language", L"Auto", language,
+                             ARRAYSIZE(language), path.c_str());
 
     GetPrivateProfileStringW(L"Audio", L"Mode", L"Shared", audio,
                              ARRAYSIZE(audio), path.c_str());
@@ -794,6 +921,14 @@ static void LoadSettings() {
                              ARRAYSIZE(monitorDevice), path.c_str());
     GetPrivateProfileStringW(L"Diagnostics", L"SaveLog", L"0", saveLog,
                              ARRAYSIZE(saveLog), path.c_str());
+
+    if (_wcsicmp(language, L"English") == 0) {
+        g_settings.uiLanguage = UiLanguage::English;
+    } else if (_wcsicmp(language, L"Korean") == 0) {
+        g_settings.uiLanguage = UiLanguage::Korean;
+    } else {
+        g_settings.uiLanguage = UiLanguage::Auto;
+    }
 
     g_settings.audioMode = (_wcsicmp(audio, L"Exclusive") == 0)
                                ? AudioMode::WasapiExclusive
@@ -888,6 +1023,11 @@ static void LoadSettings() {
 static void SaveSettings() {
     EnsureUserDataDirectory();
     const std::wstring path = SettingsPath();
+    const wchar_t* language = L"Auto";
+    if (g_settings.uiLanguage == UiLanguage::Korean) language = L"Korean";
+    if (g_settings.uiLanguage == UiLanguage::English) language = L"English";
+    WritePrivateProfileStringW(L"General", L"Language", language,
+                               path.c_str());
     WritePrivateProfileStringW(
         L"Audio", L"Mode",
         g_settings.audioMode == AudioMode::WasapiExclusive ? L"Exclusive" : L"Shared",
@@ -2718,12 +2858,12 @@ struct DirectD3D11Renderer {
         hr = dwriteFactory->CreateTextFormat(
             L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.0f,
-            L"ko-KR", &osdTextFormat);
+            IsEnglishUi() ? L"en-US" : L"ko-KR", &osdTextFormat);
         if (FAILED(hr)) return hr;
         hr = dwriteFactory->CreateTextFormat(
             L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 22.0f,
-            L"ko-KR", &volumeTextFormat);
+            IsEnglishUi() ? L"en-US" : L"ko-KR", &volumeTextFormat);
         if (FAILED(hr)) return hr;
         if (SUCCEEDED(hr)) {
             hr = osdCacheTarget->CreateSolidColorBrush(
@@ -2806,7 +2946,7 @@ struct DirectD3D11Renderer {
         if (FAILED(hr)) return hr;
 
         wchar_t volumeText[64]{};
-        swprintf_s(volumeText, L"음량  %d%%",
+        swprintf_s(volumeText, UI_TEXT(L"음량  %d%%"),
                    g_volumePercent.load(std::memory_order_acquire));
         hr = dwriteFactory->CreateTextLayout(
             volumeText, static_cast<UINT32>(wcslen(volumeText)),
@@ -3338,11 +3478,14 @@ constexpr int IDC_SETTINGS_FRAME_RATE = 2020;
 constexpr int IDC_SETTINGS_MUTE_BACKGROUND = 2021;
 constexpr int IDC_SETTINGS_PRESENTATION_HELP = 2022;
 constexpr int IDC_SETTINGS_PCM_QUEUE_HELP = 2023;
+constexpr int IDC_SETTINGS_LANGUAGE = 2024;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
 
 struct SettingsDialogState {
+    HWND languageLabel = nullptr;
+    HWND languageCombo = nullptr;
     HWND audioLabel = nullptr;
     HWND bufferLabel = nullptr;
     HWND audioOutputLabel = nullptr;
@@ -3478,6 +3621,8 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->pcmQueueHelp, 168, 274, 24, 24, dpi);
     PlaceSettingsControl(state->pcmQueueCombo, 195, 274, 280, 140, dpi);
     PlaceSettingsControl(state->muteBackgroundCheck, 24, 318, 451, 28, dpi);
+    PlaceSettingsControl(state->languageLabel, 24, 352, 160, 24, dpi);
+    PlaceSettingsControl(state->languageCombo, 195, 348, 280, 120, dpi);
 
     PlaceSettingsControl(state->presentationLabel, 505, 24, 95, 24, dpi);
     PlaceSettingsControl(state->presentationHelp, 604, 20, 24, 24, dpi);
@@ -3548,6 +3693,80 @@ static bool IsSettingsHelpControl(const SettingsDialogState* state,
                      target == state->presentationHelp);
 }
 
+enum class SettingsHelpTopic {
+    Drift,
+    PcmQueue,
+    Presentation,
+};
+
+static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
+    if (IsEnglishUi()) {
+        switch (topic) {
+        case SettingsHelpTopic::Drift:
+            return L"Preventing audio tearing · deciding whether correction is needed\n\n"
+                   L"The capture and output device clocks can run at slightly different rates. "
+                   L"Automatic correction follows that difference with resampling to reduce "
+                   L"dropouts or crackling during long sessions. Check the Tab OSD for 10–30 minutes.\n\n"
+                   L"'Stable · correction unnecessary' or 'Rare errors · Off can be kept' means "
+                   L"you can leave it Off when the audio is clean. If 'Repeated imbalance · "
+                   L"correction recommended' continues, enable automatic resampling. Do not judge "
+                   L"from errors immediately after startup.\n\n"
+                   L"The resampler and PCM safety buffer are independent. 'Resampler correction "
+                   L"limit approaching' indicates clock difference; 'Possible PCM buffer shortage' "
+                   L"indicates a momentary lack of queued audio; 'Capture packet delay detected' "
+                   L"indicates a late input callback. If the resampler is healthy but underruns "
+                   L"continue, raise the PCM buffer target first.\n\n"
+                   L"The imbalance ppm shown in the OSD is an estimate from accumulated underrun/"
+                   L"overrun frames, not a direct hardware-clock measurement. Automatic correction "
+                   L"adds a small amount of audio buffering and changes PCM samples.";
+        case SettingsHelpTopic::PcmQueue:
+            return L"PCM buffer target\n\n"
+                   L"The amount of captured audio kept inside the application before playback.\n"
+                   L"10 ms is minimum latency, 15 ms is the low-latency target, 20 ms is the stable "
+                   L"recommendation, and 30 ms prioritizes stability.\n\n"
+                   L"Higher values absorb more scheduling jitter but add the same amount of audio "
+                   L"latency. This is independent of the WASAPI output buffer and clock-drift correction.";
+        case SettingsHelpTopic::Presentation:
+            return L"Presentation mode\n\n"
+                   L"Immediate presents the newest frame without waiting for VSync. This minimizes "
+                   L"display latency but can show tearing.\n\n"
+                   L"VSync follows the monitor refresh and reduces tearing, but may wait for the next "
+                   L"refresh interval and can have different pacing on mixed-refresh monitors.";
+        }
+    }
+    switch (topic) {
+    case SettingsHelpTopic::Drift:
+        return L"소리 찢어짐 방지 · 보정 필요 확인\n\n"
+               L"캡처 장치와 출력 장치의 클록 차이를 자동 리샘플링으로 보정합니다. "
+               L"Tab OSD를 10~30분 확인하세요.\n\n"
+               L"'안정 · 보정 불필요' 또는 '드문 오류 · 끔 유지 가능'이면 소리에 문제가 "
+               L"없는 한 끔을 유지해도 됩니다. '반복 불균형 · 보정 권장'이 계속 보이면 "
+               L"자동 리샘플링을 권장합니다. 시작 직후 오류만으로 판단하지 마세요.\n\n"
+               L"리샘플러와 PCM 안전 대기량은 서로 독립입니다. '리샘플러 보정 한계 접근'은 "
+               L"클록 차이, 'PCM 버퍼 부족 가능'은 순간 버퍼 여유 부족, '캡처 패킷 지연 감지'는 "
+               L"입력 콜백 지연을 뜻합니다. 리샘플러가 정상인데 underrun이 나면 PCM 버퍼 "
+               L"목표를 먼저 높이세요.\n\n"
+               L"OSD의 불균형 ppm은 누적 underrun/overrun으로 계산한 참고값이며 실제 하드웨어 "
+               L"클록을 직접 측정한 값은 아닙니다. 자동 보정은 작은 오디오 대기량을 추가하고 "
+               L"PCM 샘플을 변경합니다.";
+    case SettingsHelpTopic::PcmQueue:
+        return L"PCM 버퍼 목표 안내\n\n"
+               L"캡처 오디오를 재생 전에 확보하는 프로그램 내부 대기량입니다.\n"
+               L"10ms는 최저 지연, 15ms는 저지연 목표, 20ms는 안정 권장, 30ms는 안정성 우선 "
+               L"설정입니다.\n\n"
+               L"값을 높이면 순간적인 입력 지연을 흡수할 여유가 커지지만, 그만큼 오디오 지연이 "
+               L"늘어납니다. WASAPI 출력 버퍼와 클록 드리프트 보정과는 독립적으로 조정됩니다.";
+    case SettingsHelpTopic::Presentation:
+        return L"화면 표시 방식 안내\n\n"
+               L"저지연: VSync 대기 없이 최신 프레임을 즉시 표시합니다. 표시 지연을 줄이는 대신 "
+               L"화면 경계가 맞지 않을 때 찢어짐이 보일 수 있습니다.\n\n"
+               L"VSync: 모니터 주기에 맞춰 표시해 찢어짐을 줄입니다. 대신 다음 표시 주기까지 "
+               L"기다릴 수 있어 지연이 늘어날 수 있고, 주사율이 다른 모니터에서는 프레임 페이싱이 "
+               L"달라질 수 있습니다.";
+    }
+    return L"";
+}
+
 static bool SettingsUsesSharedMode(const SettingsDialogState* state) {
     return state && SendMessageW(state->audioCombo, CB_GETCURSEL, 0, 0) == 0;
 }
@@ -3607,9 +3826,9 @@ static void PopulateSettingsBufferCombo(SettingsDialogState* state) {
             wchar_t label[96]{};
             const double ms = 1000.0 * frames / kSampleRate;
             if (frames == state->probe.defaultFrames) {
-                swprintf_s(label, L"%.2f ms (권장)", ms);
+                swprintf_s(label, UI_TEXT(L"%.2f ms (권장)"), ms);
             } else if (frames == state->probe.minimumFrames) {
-                swprintf_s(label, L"%.2f ms (최저)", ms);
+                swprintf_s(label, UI_TEXT(L"%.2f ms (최저)"), ms);
             } else {
                 swprintf_s(label, L"%.2f ms", ms);
             }
@@ -3638,7 +3857,7 @@ static void PopulateSettingsBufferCombo(SettingsDialogState* state) {
     for (size_t i = 0; i < ARRAYSIZE(kWasapiBufferOptionsMs); ++i) {
         wchar_t label[64]{};
         if (kWasapiBufferOptionsMs[i] == kRecommendedWasapiBufferMs) {
-            swprintf_s(label, L"%d ms (권장)", kWasapiBufferOptionsMs[i]);
+            swprintf_s(label, UI_TEXT(L"%d ms (권장)"), kWasapiBufferOptionsMs[i]);
         } else {
             swprintf_s(label, L"%d ms", kWasapiBufferOptionsMs[i]);
         }
@@ -3656,20 +3875,20 @@ static void PopulateSettingsBufferCombo(SettingsDialogState* state) {
 static void UpdateAudioClient3Status(SettingsDialogState* state) {
     if (!state || !state->audioStatus) return;
     if (!state->probeReady.load(std::memory_order_acquire)) {
-        SetWindowTextW(state->audioStatus, L"Shared 저지연 지원 확인 중…");
+        SetWindowTextW(state->audioStatus, UI_TEXT(L"Shared 저지연 지원 확인 중…"));
         return;
     }
 
     wchar_t status[200]{};
     if (state->probe.supported) {
         swprintf_s(status,
-                   L"IAudioClient3 지원됨 · Shared %.2f–%.2f ms · 검사 %.1f ms",
+                   UI_TEXT(L"IAudioClient3 지원됨 · Shared %.2f–%.2f ms · 검사 %.1f ms"),
                    1000.0 * state->probe.minimumFrames / kSampleRate,
                    1000.0 * state->probe.maximumFrames / kSampleRate,
                    state->probe.probeMilliseconds);
     } else {
         swprintf_s(status,
-                   L"IAudioClient3 사용 불가 · 기본 Shared로 자동 전환 (0x%08X)",
+                   UI_TEXT(L"IAudioClient3 사용 불가 · 기본 Shared로 자동 전환 (0x%08X)"),
                    static_cast<unsigned>(state->probe.result));
     }
     SetWindowTextW(state->audioStatus, status);
@@ -3725,9 +3944,9 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
 
     std::wstring message;
     if (!supported) {
-        message = L"지원 모드 없음: 다른 장치 또는 해상도를 선택하세요.";
+        message = UI_TEXT(L"지원 모드 없음: 다른 장치 또는 해상도를 선택하세요.");
     } else {
-        message = L"자동 인식: ";
+        message = UI_TEXT(L"자동 인식: ");
         bool firstFormat = true;
         for (const auto format : {VideoPixelFormat::Nv12,
                                   VideoPixelFormat::Yuy2}) {
@@ -3770,7 +3989,7 @@ static void PopulateFrameRateCombo(SettingsDialogState* state) {
     if (state->pixelFormats.empty()) {
         const LRESULT noModeIndex = SendMessageW(
             state->frameRateCombo, CB_ADDSTRING, 0,
-            reinterpret_cast<LPARAM>(L"지원 프레임 없음"));
+            reinterpret_cast<LPARAM>(UI_TEXT(L"지원 프레임 없음")));
         SendMessageW(state->frameRateCombo, CB_SETITEMDATA,
                      static_cast<WPARAM>(noModeIndex), 0);
         SendMessageW(state->frameRateCombo, CB_SETCURSEL,
@@ -3779,7 +3998,7 @@ static void PopulateFrameRateCombo(SettingsDialogState* state) {
     }
     const LRESULT autoIndex = SendMessageW(
         state->frameRateCombo, CB_ADDSTRING, 0,
-        reinterpret_cast<LPARAM>(L"자동 선택 (권장 프레임)"));
+        reinterpret_cast<LPARAM>(UI_TEXT(L"자동 선택 (권장 프레임)")));
     SendMessageW(state->frameRateCombo, CB_SETITEMDATA,
                  static_cast<WPARAM>(autoIndex), 0);
     LRESULT selectedIndex = autoIndex;
@@ -3827,7 +4046,7 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
     if (state->pixelFormats.empty()) {
         const LRESULT noModeIndex = SendMessageW(
             state->pixelFormatCombo, CB_ADDSTRING, 0,
-            reinterpret_cast<LPARAM>(L"지원 포맷 없음"));
+            reinterpret_cast<LPARAM>(UI_TEXT(L"지원 포맷 없음")));
         SendMessageW(state->pixelFormatCombo, CB_SETITEMDATA,
                      static_cast<WPARAM>(noModeIndex),
                      static_cast<LPARAM>(VideoPixelFormat::Auto));
@@ -3839,7 +4058,7 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
     }
     LRESULT autoIndex = SendMessageW(
         state->pixelFormatCombo, CB_ADDSTRING, 0,
-        reinterpret_cast<LPARAM>(L"자동 선택 (NV12 우선 · 권장)"));
+        reinterpret_cast<LPARAM>(UI_TEXT(L"자동 선택 (NV12 우선 · 권장)")));
     SendMessageW(state->pixelFormatCombo, CB_SETITEMDATA,
                  static_cast<WPARAM>(autoIndex),
                  static_cast<LPARAM>(VideoPixelFormat::Auto));
@@ -3919,6 +4138,11 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->pixelFormatCombo, CB_GETCURSEL, 0, 0);
         const LRESULT frameRateIndex = SendMessageW(
             state->frameRateCombo, CB_GETCURSEL, 0, 0);
+        const LRESULT languageIndex = SendMessageW(
+            state->languageCombo, CB_GETCURSEL, 0, 0);
+        if (languageIndex >= 0 && languageIndex <= 2) {
+            g_settings.uiLanguage = static_cast<UiLanguage>(languageIndex);
+        }
         if (audioIndex == 1) {
             g_settings.audioMode = AudioMode::WasapiExclusive;
         } else {
@@ -4028,7 +4252,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                                    x, y, 160, 24, hwnd, nullptr, instance, nullptr);
         };
 
-        state->audioLabel = makeLabel(L"오디오 출력 모드", 24, 24);
+        state->audioLabel = makeLabel(UI_TEXT(L"오디오 출력 모드"), 24, 24);
         state->audioCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -4036,14 +4260,14 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_AUDIO)), instance, nullptr);
         SendMessageW(state->audioCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(
-                         L"WASAPI Shared (호환성 우선 · 권장)"));
+                         UI_TEXT(L"WASAPI Shared (호환성 우선 · 권장)")));
         SendMessageW(state->audioCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(
-                         L"WASAPI Exclusive (지연 최소화 · 장치 독점)"));
+                         UI_TEXT(L"WASAPI Exclusive (지연 최소화 · 장치 독점)")));
         SendMessageW(state->audioCombo, CB_SETCURSEL,
                      g_settings.audioMode == AudioMode::WasapiExclusive ? 1 : 0, 0);
 
-        state->audioOutputLabel = makeLabel(L"WASAPI 출력 장치", 24, 68);
+        state->audioOutputLabel = makeLabel(UI_TEXT(L"WASAPI 출력 장치"), 24, 68);
         state->audioOutputCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -4053,11 +4277,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             instance, nullptr);
         SendMessageW(state->audioOutputCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(
-                         L"Windows 기본 출력 장치 따라가기 (권장)"));
+                         UI_TEXT(L"Windows 기본 출력 장치 따라가기 (권장)")));
         LRESULT selectedAudioEndpoint = 0;
         for (size_t i = 0; i < state->audioEndpoints.size(); ++i) {
             std::wstring label = state->audioEndpoints[i].name;
-            if (state->audioEndpoints[i].isDefault) label += L" (현재 기본)";
+            if (state->audioEndpoints[i].isDefault) label += UI_TEXT(L" (현재 기본)");
             SendMessageW(state->audioOutputCombo, CB_ADDSTRING, 0,
                          reinterpret_cast<LPARAM>(label.c_str()));
             if (state->audioEndpoints[i].id ==
@@ -4072,7 +4296,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         state->selectedSharedPeriodFrames =
             g_settings.wasapiSharedPeriodFrames;
 
-        state->bufferLabel = makeLabel(L"WASAPI 출력 버퍼", 24, 68);
+        state->bufferLabel = makeLabel(UI_TEXT(L"WASAPI 출력 버퍼"), 24, 68);
         state->bufferCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -4082,14 +4306,14 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         PopulateSettingsBufferCombo(state);
 
         state->audioStatus = CreateWindowExW(
-            0, L"STATIC", L"Shared 저지연 지원 확인 중…",
+            0, L"STATIC", UI_TEXT(L"Shared 저지연 지원 확인 중…"),
             WS_CHILD | WS_VISIBLE,
             24, 104, 370, 22, hwnd,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(IDC_SETTINGS_AUDIO_STATUS)),
             instance, nullptr);
 
-        state->volumeHudLabel = makeLabel(L"볼륨 HUD 위치", 24, 142);
+        state->volumeHudLabel = makeLabel(UI_TEXT(L"볼륨 HUD 위치"), 24, 142);
         state->volumeHudCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -4097,8 +4321,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(IDC_SETTINGS_VOLUME_HUD)),
             instance, nullptr);
-        for (const wchar_t* label : {L"좌측 상단 (기본)", L"우측 상단",
-                                     L"좌측 하단", L"우측 하단"}) {
+        for (const wchar_t* label : {UI_TEXT(L"좌측 상단 (기본)"), UI_TEXT(L"우측 상단"),
+                                     UI_TEXT(L"좌측 하단"), UI_TEXT(L"우측 하단")}) {
             SendMessageW(state->volumeHudCombo, CB_ADDSTRING, 0,
                          reinterpret_cast<LPARAM>(label));
         }
@@ -4106,7 +4330,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             state->volumeHudCombo, CB_SETCURSEL,
             static_cast<WPARAM>(g_settings.volumeHudPosition), 0);
 
-        state->driftLabel = makeLabel(L"클록 드리프트 보정", 24, 186);
+        state->driftLabel = makeLabel(UI_TEXT(L"클록 드리프트 보정"), 24, 186);
         state->driftHelp = CreateWindowExW(
             0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
                 BS_PUSHBUTTON,
@@ -4116,24 +4340,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             instance, nullptr);
         AddSettingsTooltip(
             state, hwnd, state->driftHelp,
-            L"소리 찢어짐 방지 · 보정 필요 확인\n\n"
-            L"캡처 장치와 출력 장치의 클록 차이를 자동 리샘플링으로 "
-            L"보정합니다. Tab OSD를 10~30분 확인하세요.\n\n"
-            L"'안정 · 보정 불필요' 또는 '드문 오류'이면 소리에 문제가 "
-            L"없는 한 끔을 유지해도 됩니다. '반복 불균형 · 보정 권장'이 "
-            L"계속 보이면 자동 리샘플링을 권장합니다. 시작 직후 오류만으로 "
-            L"판단하지 마세요.\n\n"
-            L"리샘플러와 PCM 안전 대기량은 서로 독립입니다. OSD에서 "
-            L"'리샘플러 보정 한계 접근'은 클록 차이, 'PCM 버퍼 부족 "
-            L"가능'은 순간 버퍼 여유 부족, '캡처 패킷 지연 감지'는 입력 "
-            L"콜백 지연을 뜻합니다. '리샘플러 출력 부족'은 PCM은 있었지만 "
-            L"필터가 출력 프레임을 모두 만들지 못한 경우입니다. "
-            L"리샘플러가 정상인데 underrun이 나면 "
-            L"먼저 PCM 버퍼 목표를 높이세요.\n\n"
-            L"OSD의 불균형 ppm은 underrun/overrun 누적량으로 계산한 "
-            L"참고값이며 실제 하드웨어 클록을 직접 측정한 값은 아닙니다. "
-            L"자동 보정은 작은 오디오 대기량을 추가하고 PCM 샘플을 "
-            L"변경합니다.");
+            SettingsHelpText(SettingsHelpTopic::Drift));
         state->driftCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -4143,17 +4350,17 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             instance, nullptr);
         SendMessageW(state->driftCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(
-                         L"끔 (원본 PCM · 음질 우선)"));
+                         UI_TEXT(L"끔 (원본 PCM · 음질 우선)")));
         SendMessageW(state->driftCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(
-                         L"자동 리샘플링 (장시간 안정성 권장)"));
+                         UI_TEXT(L"자동 리샘플링 (장시간 안정성 권장)")));
         SendMessageW(
             state->driftCombo, CB_SETCURSEL,
             g_settings.driftCorrection == DriftCorrectionMode::Resample
                 ? 1 : 0,
             0);
 
-        state->pcmQueueLabel = makeLabel(L"PCM 버퍼 목표", 24, 230);
+        state->pcmQueueLabel = makeLabel(UI_TEXT(L"PCM 버퍼 목표"), 24, 230);
         state->pcmQueueHelp = CreateWindowExW(
             0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
                 BS_PUSHBUTTON,
@@ -4163,13 +4370,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             instance, nullptr);
         AddSettingsTooltip(
             state, hwnd, state->pcmQueueHelp,
-            L"PCM 버퍼 목표 안내\n\n"
-            L"캡처 오디오를 재생 전에 확보하는 프로그램 내부 대기량입니다.\n"
-            L"10ms는 최저 지연, 15ms는 저지연 목표, 20ms는 안정 권장, "
-            L"30ms는 안정성 우선 설정입니다.\n\n"
-            L"값을 높이면 순간적인 입력 지연을 흡수할 여유가 커지지만, "
-            L"그만큼 오디오 지연이 늘어납니다. WASAPI 출력 버퍼와 클록 "
-            L"드리프트 보정과는 독립적으로 조정됩니다.");
+            SettingsHelpText(SettingsHelpTopic::PcmQueue));
         state->pcmQueueCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -4178,10 +4379,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 static_cast<INT_PTR>(IDC_SETTINGS_PCM_QUEUE)),
             instance, nullptr);
         const wchar_t* queueLabels[] = {
-            L"10 ms (최저 지연)",
-            L"15 ms (저지연 목표)",
-            L"20 ms (안정 권장)",
-            L"30 ms (안정성 우선)"};
+            UI_TEXT(L"10 ms (최저 지연)"),
+            UI_TEXT(L"15 ms (저지연 목표)"),
+            UI_TEXT(L"20 ms (안정 권장)"),
+            UI_TEXT(L"30 ms (안정성 우선)" )};
         size_t selectedQueue = 0;
         for (size_t i = 0; i < ARRAYSIZE(kPcmQueueOptionsMs); ++i) {
             const LRESULT index = SendMessageW(
@@ -4198,7 +4399,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                      static_cast<WPARAM>(selectedQueue), 0);
 
         state->muteBackgroundCheck = CreateWindowExW(
-            0, L"BUTTON", L"백그라운드에서 자동 음소거",
+            0, L"BUTTON", UI_TEXT(L"백그라운드에서 자동 음소거"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
             24, 318, 390, 28, hwnd,
             reinterpret_cast<HMENU>(
@@ -4208,7 +4409,24 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                      g_settings.muteWhenBackground
                          ? BST_CHECKED : BST_UNCHECKED, 0);
 
-        state->presentationLabel = makeLabel(L"화면 표시 방식", 24, 274);
+        state->languageLabel = makeLabel(
+            UI_TEXT(L"언어 / Language"), 24, 352);
+        state->languageCombo = CreateWindowExW(
+            0, L"COMBOBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
+            180, 348, 210, 120, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_LANGUAGE)),
+            instance, nullptr);
+        SendMessageW(state->languageCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"Auto (Windows language)"));
+        SendMessageW(state->languageCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"한국어"));
+        SendMessageW(state->languageCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"English"));
+        SendMessageW(state->languageCombo, CB_SETCURSEL,
+                     static_cast<WPARAM>(g_settings.uiLanguage), 0);
+
+        state->presentationLabel = makeLabel(UI_TEXT(L"화면 표시 방식"), 24, 274);
         state->presentationCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -4217,7 +4435,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 static_cast<INT_PTR>(IDC_SETTINGS_PRESENTATION)),
             instance, nullptr);
         SendMessageW(state->presentationCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(L"저지연"));
+                     reinterpret_cast<LPARAM>(UI_TEXT(L"저지연")));
         SendMessageW(state->presentationCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(L"VSync"));
         SendMessageW(state->presentationCombo, CB_SETCURSEL,
@@ -4232,16 +4450,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             instance, nullptr);
         AddSettingsTooltip(
             state, hwnd, state->presentationHelp,
-            L"화면 표시 방식 안내\n\n"
-            L"저지연: VSync 대기 없이 최신 프레임을 즉시 표시합니다. "
-            L"표시 지연을 줄이는 대신 화면 경계가 맞지 않을 때 찢어짐이 "
-            L"보일 수 있습니다.\n\n"
-            L"VSync: 모니터 주기에 맞춰 표시해 찢어짐을 줄입니다. "
-            L"대신 다음 표시 주기까지 기다릴 수 있어 지연이 늘어날 수 "
-            L"있고, 주사율이 다른 모니터에서는 프레임 페이싱이 달라질 수 "
-            L"있습니다.");
+            SettingsHelpText(SettingsHelpTopic::Presentation));
 
-        state->captureDeviceLabel = makeLabel(L"캡처 장치", 430, 68);
+        state->captureDeviceLabel = makeLabel(UI_TEXT(L"캡처 장치"), 430, 68);
         state->captureDeviceCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -4251,7 +4462,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             instance, nullptr);
         SendMessageW(state->captureDeviceCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(
-                         L"자동 선택 (GC573 우선 · 권장)"));
+                         UI_TEXT(L"자동 선택 (GC573 우선 · 권장)")));
         LRESULT selectedCaptureDevice = 0;
         for (size_t i = 0; i < state->captureDevices.size(); ++i) {
             std::wstring label = state->captureDevices[i].name;
@@ -4260,7 +4471,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                            ::towlower);
             if (lowered.find(L"gc573") == std::wstring::npos &&
                 lowered.find(L"live gamer 4k") == std::wstring::npos) {
-                label += L" (실험적)";
+                label += UI_TEXT(L" (실험적)");
             }
             SendMessageW(state->captureDeviceCombo, CB_ADDSTRING, 0,
                          reinterpret_cast<LPARAM>(label.c_str()));
@@ -4271,7 +4482,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         SendMessageW(state->captureDeviceCombo, CB_SETCURSEL,
                      selectedCaptureDevice, 0);
 
-        state->videoLabel = makeLabel(L"캡처 해상도", 24, 318);
+        state->videoLabel = makeLabel(UI_TEXT(L"캡처 해상도"), 24, 318);
         state->videoCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -4291,7 +4502,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         SendMessageW(state->videoCombo, CB_SETCURSEL,
                      static_cast<WPARAM>(selectedVideo), 0);
 
-        state->pixelFormatLabel = makeLabel(L"픽셀 포맷", 430, 156);
+        state->pixelFormatLabel = makeLabel(UI_TEXT(L"픽셀 포맷"), 430, 156);
         state->pixelFormatCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -4299,7 +4510,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(IDC_SETTINGS_PIXEL_FORMAT)),
             instance, nullptr);
-        state->frameRateLabel = makeLabel(L"프레임", 430, 200);
+        state->frameRateLabel = makeLabel(UI_TEXT(L"프레임"), 430, 200);
         state->frameRateCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -4308,13 +4519,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 static_cast<INT_PTR>(IDC_SETTINGS_FRAME_RATE)),
             instance, nullptr);
         state->videoCapabilityStatus = CreateWindowExW(
-            0, L"STATIC", L"지원 모드 확인 중...",
+            0, L"STATIC", UI_TEXT(L"지원 모드 확인 중..."),
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
             430, 234, 365, 24, hwnd, nullptr, instance, nullptr);
         PopulatePixelFormatCombo(state);
 
         state->pixelCheck = CreateWindowExW(
-            0, L"BUTTON", L"Pixel-perfect (1:1 · 창 크기 고정)",
+            0, L"BUTTON", UI_TEXT(L"Pixel-perfect (1:1 · 창 크기 고정)"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
             24, 362, 250, 28, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_PIXEL)), instance, nullptr);
@@ -4322,7 +4533,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                      g_settings.pixelPerfect ? BST_CHECKED : BST_UNCHECKED, 0);
 
         state->relativeSizeCheck = CreateWindowExW(
-            0, L"BUTTON", L"모니터 이동 시 상대적 창 크기 유지 (독립 옵션)",
+            0, L"BUTTON", UI_TEXT(L"모니터 이동 시 상대적 창 크기 유지 (독립 옵션)"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
             24, 396, 390, 28, hwnd,
             reinterpret_cast<HMENU>(
@@ -4334,12 +4545,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
 
         state->relativeSizeWarning = CreateWindowExW(
             0, L"STATIC",
-            L"※ Pixel-perfect와 함께 켜면 모니터 이동 시 1:1이 깨질 수 있습니다.",
+            UI_TEXT(L"※ Pixel-perfect와 함께 켜면 모니터 이동 시 1:1이 깨질 수 있습니다."),
             WS_CHILD | WS_VISIBLE,
             44, 424, 411, 24, hwnd, nullptr, instance, nullptr);
 
         state->borderlessCheck = CreateWindowExW(
-            0, L"BUTTON", L"제목 표시줄 숨기기 (borderless 창)",
+            0, L"BUTTON", UI_TEXT(L"제목 표시줄 숨기기 (borderless 창)"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
             24, 430, 300, 28, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_BORDERLESS)),
@@ -4348,7 +4559,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                      g_settings.borderlessWindow ? BST_CHECKED : BST_UNCHECKED, 0);
 
         state->windowSnapCheck = CreateWindowExW(
-            0, L"BUTTON", L"창을 모니터 가장자리에 스냅 (권장)",
+            0, L"BUTTON", UI_TEXT(L"창을 모니터 가장자리에 스냅 (권장)"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
             24, 464, 330, 28, hwnd,
             reinterpret_cast<HMENU>(
@@ -4358,7 +4569,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                      g_settings.windowSnap ? BST_CHECKED : BST_UNCHECKED, 0);
 
         state->saveLogCheck = CreateWindowExW(
-            0, L"BUTTON", L"진단 로그 파일 저장 (사용자 폴더)",
+            0, L"BUTTON", UI_TEXT(L"진단 로그 파일 저장 (사용자 폴더)"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
             430, 374, 365, 28, hwnd,
             reinterpret_cast<HMENU>(
@@ -4368,11 +4579,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                      g_settings.saveLog ? BST_CHECKED : BST_UNCHECKED, 0);
 
         state->startButton = CreateWindowExW(
-            0, L"BUTTON", L"시작", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
+            0, L"BUTTON", UI_TEXT(L"시작"), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
             285, 520, 80, 30, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_START)), instance, nullptr);
         state->cancelButton = CreateWindowExW(
-            0, L"BUTTON", L"취소", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+            0, L"BUTTON", UI_TEXT(L"취소"), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
             375, 520, 80, 30, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_CANCEL)), instance, nullptr);
         UpdateVideoCapabilityStatus(state);
@@ -4516,72 +4727,24 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             HIWORD(wParam) == BN_CLICKED) {
             MessageBoxW(
                 hwnd,
-                L"저지연: VSync 대기 없이 최신 프레임을 즉시 표시합니다. "
-                L"표시 지연을 줄이는 대신 화면 경계가 맞지 않을 때 "
-                L"찢어짐이 보일 수 있습니다.\n\n"
-                L"VSync: 모니터 주기에 맞춰 표시해 찢어짐을 줄입니다. "
-                L"대신 다음 표시 주기까지 기다릴 수 있어 지연이 늘어날 수 "
-                L"있고, 주사율이 다른 모니터에서는 프레임 페이싱이 달라질 "
-                L"수 있습니다.",
-                L"화면 표시 방식", MB_OK | MB_ICONINFORMATION);
+                SettingsHelpText(SettingsHelpTopic::Presentation),
+                UI_TEXT(L"화면 표시 방식"), MB_OK | MB_ICONINFORMATION);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_PCM_QUEUE_HELP &&
             HIWORD(wParam) == BN_CLICKED) {
             MessageBoxW(
                 hwnd,
-                L"PCM 버퍼 목표는 캡처 오디오를 재생 전에 확보하는 "
-                L"프로그램 내부 대기량입니다.\n\n"
-                L"10ms는 최저 지연, 15ms는 저지연 목표, 20ms는 안정 권장, "
-                L"30ms는 안정성 우선 설정입니다.\n\n"
-                L"값을 높이면 순간적인 입력 지연을 흡수할 여유가 커지지만, "
-                L"그만큼 오디오 지연이 늘어납니다. WASAPI 출력 버퍼와 "
-                L"클록 드리프트 보정과는 독립적으로 조정됩니다.",
-                L"PCM 버퍼 목표", MB_OK | MB_ICONINFORMATION);
+                SettingsHelpText(SettingsHelpTopic::PcmQueue),
+                UI_TEXT(L"PCM 버퍼 목표"), MB_OK | MB_ICONINFORMATION);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_DRIFT_HELP &&
             HIWORD(wParam) == BN_CLICKED) {
             MessageBoxW(
                 hwnd,
-                L"소리 찢어짐 방지 · 보정 필요 확인\n\n"
-                L"캡처 장치와 출력 장치의 클록은 아주 조금씩 다른 "
-                L"속도로 진행될 수 있습니다. 자동 보정은 리샘플링으로 "
-                L"그 차이를 따라가 장시간 재생 중 끊김이나 갈라짐을 "
-                L"줄입니다.\n\n"
-                L"판단 방법\n"
-                L"1. 프로그램을 10~30분 실행하고 Tab OSD를 확인합니다.\n"
-                L"2. '안정 · 보정 불필요': 끔을 유지해도 됩니다.\n"
-                L"3. '드문 오류 · 끔 유지 가능': 실제 소리 문제가 없다면 "
-                L"끔을 유지합니다.\n"
-                L"4. '반복 불균형 · 보정 권장': 자동 리샘플링을 "
-                L"권장합니다.\n"
-                L"5. 보정 중에도 오류가 계속되면 PCM 버퍼 목표를 한 단계 "
-                L"높입니다.\n\n"
-                L"원인 구분\n"
-                L"- 리샘플러 보정 한계 접근: 클록 속도 차이가 큽니다.\n"
-                L"- PCM 버퍼 부족 가능: 리샘플링 여부와 별개로 PCM 버퍼 "
-                L"여유가 소진됐습니다. PCM 버퍼 목표를 높입니다.\n"
-                L"- 캡처 패킷 지연 감지: 입력 콜백이 평소 패킷 주기보다 "
-                L"5ms 이상 늦었습니다. PCM 버퍼 목표를 높여 순간 지터를 "
-                L"흡수합니다.\n"
-                L"- 리샘플러 정상 작동인데 underrun 발생: 보정 자체보다 "
-                L"PCM 버퍼 문제를 먼저 의심합니다.\n\n"
-                L"- 리샘플러 출력 부족 감지: PCM 양은 있었지만 필터의 "
-                L"look-ahead가 부족했습니다. PCM 버퍼 목표를 높입니다.\n\n"
-                L"클록 보정과 PCM 버퍼 목표는 독립 설정입니다. 10ms는 "
-                L"최저 지연, 15ms는 리샘플링 저지연 권장, 20ms는 안정 "
-                L"권장입니다.\n\n"
-                L"OSD의 underrun/overrun에는 횟수와 실제 부족/폐기 시간이 "
-                L"함께 표시됩니다. 오류 추세의 회/h는 누적 빈도이고, "
-                L"불균형 ppm(추정)은 누적 PCM 차이를 실행 시간으로 나눈 "
-                L"참고값입니다. 스케줄링 지연도 포함되므로 하드웨어 클록 "
-                L"측정값으로 해석하면 안 됩니다. 시작 직후 한두 번만 발생한 "
-                L"오류는 장시간 반복 여부를 더 확인하세요.\n\n"
-                L"대신 작은 오디오 대기량이 추가되고 PCM 샘플이 "
-                L"변경되므로, 원본 음질과 최저 지연이 우선이면 끔을 "
-                L"사용하세요.",
-                L"클록 드리프트 보정", MB_OK | MB_ICONINFORMATION);
+                SettingsHelpText(SettingsHelpTopic::Drift),
+                UI_TEXT(L"클록 드리프트 보정"), MB_OK | MB_ICONINFORMATION);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_START) {
@@ -4651,9 +4814,9 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
         ((work.right - work.left) - settingsOuter.cx) / 2;
     const int settingsY = work.top +
         ((work.bottom - work.top) - settingsOuter.cy) / 2;
-    HWND hwnd = CreateWindowExW(
+        HWND hwnd = CreateWindowExW(
         settingsExStyle,
-        kSettingsClass, L"Low Latency Capture Viewer 설정",
+        kSettingsClass, UI_TEXT(L"Low Latency Capture Viewer 설정"),
         settingsStyle,
         settingsX, settingsY, settingsOuter.cx, settingsOuter.cy,
         nullptr, nullptr, hInst, &state);
@@ -5297,21 +5460,21 @@ static void FormatAudioErrorAge(uint64_t lastErrorMs, uint64_t nowMs,
                                 wchar_t* output, size_t outputCount) {
     if (!output || outputCount == 0) return;
     if (!lastErrorMs || nowMs < lastErrorMs) {
-        wcscpy_s(output, outputCount, L"없음");
+        wcscpy_s(output, outputCount, UI_TEXT(L"없음"));
         return;
     }
     const uint64_t ageSeconds = (nowMs - lastErrorMs) / 1000;
     if (ageSeconds < 2) {
-        wcscpy_s(output, outputCount, L"방금");
+        wcscpy_s(output, outputCount, UI_TEXT(L"방금"));
     } else if (ageSeconds < 60) {
-        swprintf_s(output, outputCount, L"%llu초 전",
+        swprintf_s(output, outputCount, UI_TEXT(L"%llu초 전"),
                    static_cast<unsigned long long>(ageSeconds));
     } else if (ageSeconds < 3600) {
-        swprintf_s(output, outputCount, L"%llu분 %llu초 전",
+        swprintf_s(output, outputCount, UI_TEXT(L"%llu분 %llu초 전"),
                    static_cast<unsigned long long>(ageSeconds / 60),
                    static_cast<unsigned long long>(ageSeconds % 60));
     } else {
-        swprintf_s(output, outputCount, L"%llu시간 %llu분 전",
+        swprintf_s(output, outputCount, UI_TEXT(L"%llu시간 %llu분 전"),
                    static_cast<unsigned long long>(ageSeconds / 3600),
                    static_cast<unsigned long long>((ageSeconds / 60) % 60));
     }
@@ -5357,12 +5520,12 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         g_settings.presentationMode == PresentationMode::VSync
             ? L"VSync"
             : g_videoTearing.load(std::memory_order_acquire)
-                  ? L"저지연" : L"Immediate";
+                  ? UI_TEXT(L"저지연") : L"Immediate";
     wchar_t latencyText[64]{};
     if (latencyUs >= 0) {
         swprintf_s(latencyText, L"%.2f ms", latencyUs / 1000.0);
     } else {
-        wcscpy_s(latencyText, L"측정 대기 중");
+        wcscpy_s(latencyText, UI_TEXT(L"측정 대기 중"));
     }
 
     const uint64_t underrunEvents =
@@ -5407,54 +5570,54 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         g_audioResamplePpm.load(std::memory_order_acquire);
     const bool trackingActive = OsdTrackingActive();
     const wchar_t* clockDiagnosis = trackingActive
-        ? L"측정 중" : L"워밍업 · 시작 2초 제외";
+        ? UI_TEXT(L"측정 중") : UI_TEXT(L"워밍업 · 시작 2초 제외");
     if (monitorStartMs) {
         if (g_settings.driftCorrection ==
             DriftCorrectionMode::Resample) {
             if (resamplerUnderruns > 0 &&
                 lastErrorAgeMs <= 10 * 60 * 1000) {
-                clockDiagnosis = L"리샘플러 출력 부족 감지";
+                clockDiagnosis = UI_TEXT(L"리샘플러 출력 부족 감지");
             } else if (std::abs(activeCorrectionPpm) >= 950) {
-                clockDiagnosis = L"리샘플러 보정 한계 접근";
+                clockDiagnosis = UI_TEXT(L"리샘플러 보정 한계 접근");
             } else if (totalErrorEvents == 0 ||
                        lastErrorAgeMs > 10 * 60 * 1000) {
-                clockDiagnosis = L"리샘플러 정상 작동";
+                clockDiagnosis = UI_TEXT(L"리샘플러 정상 작동");
             } else {
-                clockDiagnosis = L"보정 작동 · 오류 원인 아래 확인";
+                clockDiagnosis = UI_TEXT(L"보정 작동 · 오류 원인 아래 확인");
             }
         } else if (totalErrorEvents == 0) {
             clockDiagnosis = elapsedMs >= 2 * 60 * 1000
-                ? L"안정 · 보정 불필요" : L"관찰 중";
+                ? UI_TEXT(L"안정 · 보정 불필요") : UI_TEXT(L"관찰 중");
         } else if (elapsedMs < 2 * 60 * 1000) {
-            clockDiagnosis = L"초기 오류 · 더 관찰";
+            clockDiagnosis = UI_TEXT(L"초기 오류 · 더 관찰");
         } else if (lastErrorAgeMs > 10 * 60 * 1000) {
-            clockDiagnosis = L"현재 안정 · 경과 관찰";
+            clockDiagnosis = UI_TEXT(L"현재 안정 · 경과 관찰");
         } else if (underrunEvents > 0 && overrunEvents == 0 &&
                    latePacketUnderruns == underrunEvents) {
-            clockDiagnosis = L"입력 지터 · 보정보다 대기량";
+            clockDiagnosis = UI_TEXT(L"입력 지터 · 보정보다 대기량");
         } else if (std::abs(imbalancePpm) >= 50.0 ||
                    eventRatePerHour >= 12.0) {
-            clockDiagnosis = L"반복 불균형 · 보정 권장";
+            clockDiagnosis = UI_TEXT(L"반복 불균형 · 보정 권장");
         } else {
-            clockDiagnosis = L"드문 오류 · 끔 유지 가능";
+            clockDiagnosis = UI_TEXT(L"드문 오류 · 끔 유지 가능");
         }
     }
 
     const wchar_t* queueDiagnosis = trackingActive
-        ? L"측정 중" : L"워밍업 · 시작 2초 제외";
+        ? UI_TEXT(L"측정 중") : UI_TEXT(L"워밍업 · 시작 2초 제외");
     if (monitorStartMs) {
         if (underrunEvents == 0) {
             queueDiagnosis = g_settings.pcmQueueTargetMs ==
                                      kLowestPcmQueueMs
-                ? L"최저 지연 · 오류 없음" : L"PCM 버퍼 여유 정상";
+                ? UI_TEXT(L"최저 지연 · 오류 없음") : UI_TEXT(L"PCM 버퍼 여유 정상");
         } else if (lastErrorAgeMs > 10 * 60 * 1000) {
-            queueDiagnosis = L"현재 안정 · 과거 오류 있음";
+            queueDiagnosis = UI_TEXT(L"현재 안정 · 과거 오류 있음");
         } else if (queueDepletionUnderruns > 0) {
-            queueDiagnosis = L"PCM 버퍼 부족 가능";
+            queueDiagnosis = UI_TEXT(L"PCM 버퍼 부족 가능");
         } else if (resamplerUnderruns > 0) {
-            queueDiagnosis = L"PCM 버퍼 있음 · 리샘플러 확인";
+            queueDiagnosis = UI_TEXT(L"PCM 버퍼 있음 · 리샘플러 확인");
         } else {
-            queueDiagnosis = L"캡처 패킷 지연 감지";
+            queueDiagnosis = UI_TEXT(L"캡처 패킷 지연 감지");
         }
     }
 
@@ -5463,40 +5626,60 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     const bool backgroundMuted =
         g_backgroundAudioMuted.load(std::memory_order_acquire);
     const wchar_t* volumeProcessing = backgroundMuted
-        ? L"백그라운드 음소거 중"
+        ? UI_TEXT(L"백그라운드 음소거 중")
         : logicalVolume == 100
-              ? L"PCM 연산 우회"
-              : logicalVolume == 0 ? L"음소거" : L"PCM 감쇠 적용";
+              ? UI_TEXT(L"PCM 연산 우회")
+              : logicalVolume == 0 ? UI_TEXT(L"음소거") : UI_TEXT(L"PCM 감쇠 적용");
 
+    const wchar_t* scaleText =
+        g_settings.pixelPerfect && g_settings.relativeWindowSize
+            ? UI_TEXT(L"Pixel-perfect 시작 · Monitor-relative 이동")
+            : g_settings.pixelPerfect
+                  ? UI_TEXT(L"Pixel-perfect (고정 크기)")
+                  : g_settings.relativeWindowSize
+                        ? L"Scaled · Monitor-relative" : UI_TEXT(L"Scaled (비율 고정)");
+    const wchar_t* osdFormat = IsEnglishUi()
+        ? L"Capture diagnostics                              [Tab close]\n"
+          L"Path          %s · DirectShow → D3D11\n"
+          L"Input         %d x %d @ %d fps · %s 8-bit %s\n"
+          L"Video quality BT.709 · Limited range · D3D11 Video Processor\n"
+          L"Display       %d x %d · %s · Flip-discard · %s\n"
+          L"Actual FPS    Input %.1f · Present %.1f\n"
+          L"App latency   %s  (not total HDMI latency)\n"
+          L"Frames        Input %llu · Output %llu · Replaced %llu\n"
+          L"Audio output  WASAPI %s · %s · buffer %.2f ms · padding %.2f ms\n"
+          L"Capture audio packet %.2f ms · callback period %.2f ms\n"
+          L"Clock drift   %s · applied %+d ppm · %s\n"
+          L"PCM buffer    current %.2f ms · target %.2f ms (pre-render) · min %.2f ms\n"
+          L"PCM diagnosis %s\n"
+          L"Volume        %d%% · %s\n"
+          L"Audio errors  underrun %llu / %.2f ms · overrun %llu / %.2f ms\n"
+          L"Error causes  input delay %llu · PCM depletion %llu · resampler %llu\n"
+          L"Error trend   %.1f/h · PCM imbalance %+.0f ppm (estimated) · last %s"
+        : L"캡처 실시간 정보                              [Tab 닫기]\n"
+          L"경로          %s · DirectShow → D3D11\n"
+          L"입력          %d x %d @ %d fps · %s 8-bit %s\n"
+          L"영상 품질     BT.709 · Limited range · D3D11 Video Processor\n"
+          L"표시          %d x %d · %s · Flip-discard · %s\n"
+          L"실제 FPS      입력 %.1f · Present %.1f\n"
+          L"앱 처리 지연  %s  (총 HDMI 지연 아님)\n"
+          L"프레임        입력 %llu · 출력 %llu · 최신화 건너뜀 %llu\n"
+          L"오디오 출력   WASAPI %s · %s · 버퍼 %.2f ms · 점유 %.2f ms\n"
+          L"캡처 오디오   입력 패킷 %.2f ms · 콜백 주기 %.2f ms\n"
+          L"클록 보정     %s · 적용 %+d ppm · %s\n"
+          L"PCM 버퍼      현재 %.2f ms · 목표 %.2f ms(렌더 전) · 최저 %.2f ms\n"
+          L"PCM 버퍼 진단 %s\n"
+          L"음량          %d%% · %s\n"
+          L"오디오 오류   underrun %llu회 / %.2f ms · overrun %llu회 / %.2f ms\n"
+          L"오류 원인     입력 지연 %llu회 · PCM 버퍼 소진 %llu회 · 리샘플러 %llu회\n"
+          L"오류 추세     %.1f회/h · PCM 불균형 %+.0f ppm(추정) · 최근 %s";
     wchar_t text[2300]{};
     swprintf_s(
-        text,
-        L"캡처 실시간 정보                              [Tab 닫기]\n"
-        L"경로          %s · DirectShow → D3D11\n"
-        L"입력          %d x %d @ %d fps · %s 8-bit %s\n"
-        L"영상 품질     BT.709 · Limited range · D3D11 Video Processor\n"
-        L"표시          %d x %d · %s · Flip-discard · %s\n"
-        L"실제 FPS      입력 %.1f · Present %.1f\n"
-        L"앱 처리 지연  %s  (총 HDMI 지연 아님)\n"
-        L"프레임        입력 %llu · 출력 %llu · 최신화 건너뜀 %llu\n"
-        L"오디오 출력   WASAPI %s · %s · 버퍼 %.2f ms · 점유 %.2f ms\n"
-        L"캡처 오디오   입력 패킷 %.2f ms · 콜백 주기 %.2f ms\n"
-        L"클록 보정     %s · 적용 %+d ppm · %s\n"
-        L"PCM 버퍼      현재 %.2f ms · 목표 %.2f ms(렌더 전) · 최저 %.2f ms\n"
-        L"PCM 버퍼 진단 %s\n"
-        L"음량          %d%% · %s\n"
-        L"오디오 오류   underrun %llu회 / %.2f ms · overrun %llu회 / %.2f ms\n"
-        L"오류 원인     입력 지연 %llu회 · PCM 버퍼 소진 %llu회 · 리샘플러 %llu회\n"
-        L"오류 추세     %.1f회/h · PCM 불균형 %+.0f ppm(추정) · 최근 %s",
+        text, osdFormat,
         captureName.c_str(), preset.width, preset.height, configuredFps,
         PixelFormatName(activeFormat), chromaText, outputWidth,
         outputHeight,
-        g_settings.pixelPerfect && g_settings.relativeWindowSize
-            ? L"Pixel-perfect 시작 · Monitor-relative 이동"
-            : g_settings.pixelPerfect
-                  ? L"Pixel-perfect (고정 크기)"
-                  : g_settings.relativeWindowSize
-                        ? L"Scaled · Monitor-relative" : L"Scaled (비율 고정)",
+        scaleText,
         presentationText,
         g_osdInputFps.load(std::memory_order_acquire),
         g_osdPresentFps.load(std::memory_order_acquire), latencyText,
@@ -5514,7 +5697,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         1000.0 * capturePacketFrames / kSampleRate,
         captureIntervalUs / 1000.0,
         g_settings.driftCorrection == DriftCorrectionMode::Resample
-            ? L"자동 리샘플링" : L"끔 (원본 PCM)",
+            ? UI_TEXT(L"자동 리샘플링") : UI_TEXT(L"끔 (원본 PCM)"),
         activeCorrectionPpm, clockDiagnosis,
         1000.0 * queuedFrames / kSampleRate,
         1000.0 * queueTargetFrames / kSampleRate,
@@ -5923,15 +6106,24 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                     g_captureFailureHr.load(std::memory_order_acquire);
                 const std::wstring failureText = HrText(failure);
                 wchar_t message[768]{};
+                const wchar_t* failureFormat = IsEnglishUi()
+                    ? L"Video capture initialization failed.\n\n"
+                      L"Error: 0x%08X  %s\n\n"
+                      L"The selected device may not provide the requested "
+                      L"resolution/FPS/pixel format or a 48 kHz stereo PCM "
+                      L"audio pin.\n"
+                      L"Try Auto pixel format or another resolution. If logging "
+                      L"is enabled, check the logs folder under LocalAppData."
+                    : L"캡처 영상 초기화에 실패했습니다.\n\n"
+                      L"오류: 0x%08X  %s\n\n"
+                      L"선택한 장치가 지정한 해상도/FPS/픽셀 포맷 또는 "
+                      L"48 kHz 스테레오 PCM 오디오 핀을 제공하지 않을 수 "
+                      L"있습니다.\n"
+                      L"자동 픽셀 포맷이나 다른 해상도로 다시 시도하고, "
+                      L"로그 저장을 켠 경우 사용자 데이터 폴더의 logs를 확인해 주세요.";
                 swprintf_s(
                     message,
-                    L"캡처 영상 초기화에 실패했습니다.\n\n"
-                    L"오류: 0x%08X  %s\n\n"
-                    L"선택한 장치가 지정한 해상도/FPS/픽셀 포맷 또는 "
-                    L"48 kHz 스테레오 PCM 오디오 핀을 제공하지 않을 수 "
-                    L"있습니다.\n"
-                    L"자동 픽셀 포맷이나 다른 해상도로 다시 시도하고, "
-                    L"로그 저장을 켠 경우 사용자 데이터 폴더의 logs를 확인해 주세요.",
+                    failureFormat,
                     static_cast<unsigned int>(failure),
                     failureText.c_str());
                 MessageBoxW(hwnd, message, L"Low Latency Capture Viewer",
