@@ -3293,6 +3293,8 @@ constexpr int IDC_SETTINGS_PIXEL_FORMAT = 2018;
 constexpr int IDC_SETTINGS_SAVE_LOG = 2019;
 constexpr int IDC_SETTINGS_FRAME_RATE = 2020;
 constexpr int IDC_SETTINGS_MUTE_BACKGROUND = 2021;
+constexpr int IDC_SETTINGS_PRESENTATION_HELP = 2022;
+constexpr int IDC_SETTINGS_PCM_QUEUE_HELP = 2023;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
@@ -3305,7 +3307,9 @@ struct SettingsDialogState {
     HWND driftLabel = nullptr;
     HWND driftHelp = nullptr;
     HWND pcmQueueLabel = nullptr;
+    HWND pcmQueueHelp = nullptr;
     HWND presentationLabel = nullptr;
+    HWND presentationHelp = nullptr;
     HWND videoLabel = nullptr;
     HWND captureDeviceLabel = nullptr;
     HWND pixelFormatLabel = nullptr;
@@ -3412,10 +3416,12 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->driftHelp, 168, 230, 24, 24, dpi);
     PlaceSettingsControl(state->driftCombo, 195, 230, 280, 120, dpi);
     PlaceSettingsControl(state->pcmQueueLabel, 24, 278, 160, 24, dpi);
+    PlaceSettingsControl(state->pcmQueueHelp, 168, 274, 24, 24, dpi);
     PlaceSettingsControl(state->pcmQueueCombo, 195, 274, 280, 140, dpi);
     PlaceSettingsControl(state->muteBackgroundCheck, 24, 318, 451, 28, dpi);
 
-    PlaceSettingsControl(state->presentationLabel, 505, 24, 120, 24, dpi);
+    PlaceSettingsControl(state->presentationLabel, 505, 24, 95, 24, dpi);
+    PlaceSettingsControl(state->presentationHelp, 604, 20, 24, 24, dpi);
     PlaceSettingsControl(state->presentationCombo, 630, 20, 295, 120, dpi);
     PlaceSettingsControl(state->captureDeviceLabel, 505, 68, 120, 24, dpi);
     PlaceSettingsControl(state->captureDeviceCombo, 630, 64, 295, 220, dpi);
@@ -3474,6 +3480,13 @@ static void AddSettingsTooltip(SettingsDialogState* state, HWND owner,
     tool.lpszText = const_cast<LPWSTR>(text);
     SendMessageW(state->tooltipWindow, TTM_ADDTOOLW, 0,
                  reinterpret_cast<LPARAM>(&tool));
+}
+
+static bool IsSettingsHelpControl(const SettingsDialogState* state,
+                                  HWND target) {
+    return state && (target == state->driftHelp ||
+                     target == state->pcmQueueHelp ||
+                     target == state->presentationHelp);
 }
 
 static bool SettingsUsesSharedMode(const SettingsDialogState* state) {
@@ -4044,7 +4057,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                          L"끔 (원본 PCM · 음질 우선)"));
         SendMessageW(state->driftCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(
-                         L"자동 리샘플링 (장시간 안정성 권장 · 대기 추가)"));
+                         L"자동 리샘플링 (장시간 안정성 권장)"));
         SendMessageW(
             state->driftCombo, CB_SETCURSEL,
             g_settings.driftCorrection == DriftCorrectionMode::Resample
@@ -4052,6 +4065,22 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             0);
 
         state->pcmQueueLabel = makeLabel(L"PCM 버퍼 목표", 24, 230);
+        state->pcmQueueHelp = CreateWindowExW(
+            0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                BS_PUSHBUTTON,
+            162, 226, 24, 24, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_PCM_QUEUE_HELP)),
+            instance, nullptr);
+        AddSettingsTooltip(
+            state, hwnd, state->pcmQueueHelp,
+            L"PCM 버퍼 목표 안내\n\n"
+            L"캡처 오디오를 재생 전에 확보하는 프로그램 내부 대기량입니다.\n"
+            L"10ms는 최저 지연, 15ms는 저지연 목표, 20ms는 안정 권장, "
+            L"30ms는 안정성 우선 설정입니다.\n\n"
+            L"값을 높이면 순간적인 입력 지연을 흡수할 여유가 커지지만, "
+            L"그만큼 오디오 지연이 늘어납니다. WASAPI 출력 버퍼와 클록 "
+            L"드리프트 보정과는 독립적으로 조정됩니다.");
         state->pcmQueueCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -4060,10 +4089,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 static_cast<INT_PTR>(IDC_SETTINGS_PCM_QUEUE)),
             instance, nullptr);
         const wchar_t* queueLabels[] = {
-            L"10 ms (최저 지연 · 끊김 위험)",
-            L"15 ms (리샘플링 저지연 권장)",
+            L"10 ms (최저 지연)",
+            L"15 ms (저지연 목표)",
             L"20 ms (안정 권장)",
-            L"30 ms (불안정한 PC)"};
+            L"30 ms (안정성 우선)"};
         size_t selectedQueue = 0;
         for (size_t i = 0; i < ARRAYSIZE(kPcmQueueOptionsMs); ++i) {
             const LRESULT index = SendMessageW(
@@ -4099,14 +4128,29 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 static_cast<INT_PTR>(IDC_SETTINGS_PRESENTATION)),
             instance, nullptr);
         SendMessageW(state->presentationCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(
-                         L"저지연 즉시 표시 (찢어짐 가능)"));
+                     reinterpret_cast<LPARAM>(L"저지연"));
         SendMessageW(state->presentationCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(
-                         L"VSync (찢어짐 방지 · 지연 약간 상승 가능)"));
+                     reinterpret_cast<LPARAM>(L"VSync"));
         SendMessageW(state->presentationCombo, CB_SETCURSEL,
                      g_settings.presentationMode == PresentationMode::VSync
                          ? 1 : 0, 0);
+        state->presentationHelp = CreateWindowExW(
+            0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                BS_PUSHBUTTON,
+            604, 20, 24, 24, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_PRESENTATION_HELP)),
+            instance, nullptr);
+        AddSettingsTooltip(
+            state, hwnd, state->presentationHelp,
+            L"화면 표시 방식 안내\n\n"
+            L"저지연: VSync 대기 없이 최신 프레임을 즉시 표시합니다. "
+            L"표시 지연을 줄이는 대신 화면 경계가 맞지 않을 때 찢어짐이 "
+            L"보일 수 있습니다.\n\n"
+            L"VSync: 모니터 주기에 맞춰 표시해 찢어짐을 줄입니다. "
+            L"대신 다음 표시 주기까지 기다릴 수 있어 지연이 늘어날 수 "
+            L"있고, 주사율이 다른 모니터에서는 프레임 페이싱이 달라질 수 "
+            L"있습니다.");
 
         state->captureDeviceLabel = makeLabel(L"캡처 장치", 430, 68);
         state->captureDeviceCombo = CreateWindowExW(
@@ -4301,7 +4345,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
     case WM_SETTINGS_TOOLTIP_SHOW: {
         const HWND target = reinterpret_cast<HWND>(wParam);
         const HWND tooltip = reinterpret_cast<HWND>(lParam);
-        if (state && target == state->driftHelp &&
+        if (state && IsSettingsHelpControl(state, target) &&
             tooltip == state->tooltipWindow) {
             POINT cursor{};
             GetCursorPos(&cursor);
@@ -4315,7 +4359,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
     case WM_SETTINGS_TOOLTIP_HIDE: {
         const HWND target = reinterpret_cast<HWND>(wParam);
         const HWND tooltip = reinterpret_cast<HWND>(lParam);
-        if (state && target == state->driftHelp &&
+        if (state && IsSettingsHelpControl(state, target) &&
             tooltip == state->tooltipWindow) {
             RECT targetRect{};
             POINT cursor{};
@@ -4356,6 +4400,34 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         if (LOWORD(wParam) == IDC_SETTINGS_PIXEL_FORMAT &&
             HIWORD(wParam) == CBN_SELCHANGE) {
             PopulateFrameRateCombo(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_PRESENTATION_HELP &&
+            HIWORD(wParam) == BN_CLICKED) {
+            MessageBoxW(
+                hwnd,
+                L"저지연: VSync 대기 없이 최신 프레임을 즉시 표시합니다. "
+                L"표시 지연을 줄이는 대신 화면 경계가 맞지 않을 때 "
+                L"찢어짐이 보일 수 있습니다.\n\n"
+                L"VSync: 모니터 주기에 맞춰 표시해 찢어짐을 줄입니다. "
+                L"대신 다음 표시 주기까지 기다릴 수 있어 지연이 늘어날 수 "
+                L"있고, 주사율이 다른 모니터에서는 프레임 페이싱이 달라질 "
+                L"수 있습니다.",
+                L"화면 표시 방식", MB_OK | MB_ICONINFORMATION);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_PCM_QUEUE_HELP &&
+            HIWORD(wParam) == BN_CLICKED) {
+            MessageBoxW(
+                hwnd,
+                L"PCM 버퍼 목표는 캡처 오디오를 재생 전에 확보하는 "
+                L"프로그램 내부 대기량입니다.\n\n"
+                L"10ms는 최저 지연, 15ms는 저지연 목표, 20ms는 안정 권장, "
+                L"30ms는 안정성 우선 설정입니다.\n\n"
+                L"값을 높이면 순간적인 입력 지연을 흡수할 여유가 커지지만, "
+                L"그만큼 오디오 지연이 늘어납니다. WASAPI 출력 버퍼와 "
+                L"클록 드리프트 보정과는 독립적으로 조정됩니다.",
+                L"PCM 버퍼 목표", MB_OK | MB_ICONINFORMATION);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_DRIFT_HELP &&
@@ -4489,7 +4561,7 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
         if (result <= 0) break;
         if (msg.message == WM_MOUSEMOVE && state.tooltipWindow) {
             SendMessageW(hwnd,
-                         msg.hwnd == state.driftHelp
+                         IsSettingsHelpControl(&state, msg.hwnd)
                              ? WM_SETTINGS_TOOLTIP_SHOW
                              : WM_SETTINGS_TOOLTIP_HIDE,
                          reinterpret_cast<WPARAM>(state.driftHelp),
@@ -5172,7 +5244,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         g_settings.presentationMode == PresentationMode::VSync
             ? L"VSync"
             : g_videoTearing.load(std::memory_order_acquire)
-                  ? L"저지연 즉시 표시" : L"Immediate";
+                  ? L"저지연" : L"Immediate";
     wchar_t latencyText[64]{};
     if (latencyUs >= 0) {
         swprintf_s(latencyText, L"%.2f ms", latencyUs / 1000.0);
