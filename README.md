@@ -37,18 +37,19 @@ reconnect are not supported.
 
 ## Install and run
 
-1. Run `LowLatencyCaptureViewer_v1.0.1_Setup.exe` and follow the wizard.
+1. Run `LowLatencyCaptureViewer_v1.0.2_Setup.exe` and follow the wizard.
 2. Launch **Low Latency Capture Viewer** from the Start menu or the installed
    executable.
 
-A portable `LowLatencyCaptureViewer_v1.0.1_x64.zip` is also available. Extract
+A portable `LowLatencyCaptureViewer_v1.0.2_x64.zip` is also available. Extract
 it anywhere and run `LowLatencyCaptureViewer.exe`.
 
 Settings and diagnostic logs are stored per user in
 `%LOCALAPPDATA%\\LowLatencyCaptureViewer`. An older `settings.ini` beside the
 executable is copied there automatically on first launch; it is not deleted.
-The uninstaller leaves this user data in place so reinstalling does not erase
-preferences or diagnostics.
+The uninstaller keeps this data by default and asks whether to remove it. Choose
+**No** to preserve preferences and diagnostics for a future reinstall, or
+**Yes** to delete them permanently.
 
 The application contains Korean and English UI strings in one executable. The
 settings dialog offers **Auto (Windows language)**, **한국어**, and **English**;

@@ -172,6 +172,7 @@ struct AppSettings {
     std::wstring captureDeviceId;
     std::wstring audioOutputDeviceId;
     bool saveLog = false;
+    bool showDiagnosticConsole = false;
     bool pixelPerfect = true;
     bool relativeWindowSize = false;
     int relativeWindowScalePpm = 0;
@@ -269,6 +270,7 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"제목 표시줄 숨기기 (borderless 창)", L"Hide title bar (borderless window)"},
         {L"창을 모니터 가장자리에 스냅 (권장)", L"Snap window to monitor edges (recommended)"},
         {L"진단 로그 파일 저장 (사용자 폴더)", L"Save diagnostic log (user folder)"},
+        {L"진단 콘솔 창 표시", L"Show diagnostic console window"},
         {L"언어 / Language", L"Language"},
         {L"Low Latency Capture Viewer 설정", L"Low Latency Capture Viewer Settings"},
         {L"시작", L"Start"},
@@ -280,7 +282,7 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"%llu시간 %llu분 전", L"%llu hours %llu minutes ago"},
         {L"측정 대기 중", L"Waiting for measurement"},
         {L"측정 중", L"Measuring"},
-        {L"워밍업 · 시작 2초 제외", L"Warm-up · first 2 seconds excluded"},
+        {L"워밍업 · 시작 5초 제외", L"Warm-up · first 5 seconds excluded"},
         {L"리샘플러 출력 부족 감지", L"Resampler output shortage detected"},
         {L"리샘플러 보정 한계 접근", L"Resampler correction limit approaching"},
         {L"리샘플러 정상 작동", L"Resampler operating normally"},
@@ -371,7 +373,9 @@ static std::atomic<double> g_osdInputFps{0.0};
 static std::atomic<double> g_osdPresentFps{0.0};
 static std::atomic<bool> g_osdVisible{false};
 static constexpr uint64_t kOsdTrackingWarmupMs = 2000;
+static constexpr uint64_t kAudioTrackingWarmupMs = 5000;
 static std::atomic<uint64_t> g_osdTrackingStartMs{UINT64_MAX};
+static std::atomic<uint64_t> g_audioTrackingStartMs{UINT64_MAX};
 static std::atomic<bool> g_captureAudioAvailable{true};
 static std::wstring g_activeCaptureDeviceName = kCaptureName;
 static std::wstring g_activeAudioOutputName = L"Windows 기본 장치";
@@ -431,6 +435,11 @@ static DXGI_FORMAT PixelFormatDxgi(VideoPixelFormat format) {
 static bool OsdTrackingActive() {
     return GetTickCount64() >=
         g_osdTrackingStartMs.load(std::memory_order_acquire);
+}
+
+static bool AudioTrackingActive() {
+    return GetTickCount64() >=
+        g_audioTrackingStartMs.load(std::memory_order_acquire);
 }
 
 static void SetActiveAudioOutputName(const std::wstring& name) {
@@ -862,6 +871,7 @@ static void LoadSettings() {
     wchar_t windowY[32]{};
     wchar_t monitorDevice[64]{};
     wchar_t saveLog[8]{};
+    wchar_t showDiagnosticConsole[8]{};
 
     GetPrivateProfileStringW(L"General", L"Language", L"Auto", language,
                              ARRAYSIZE(language), path.c_str());
@@ -921,6 +931,9 @@ static void LoadSettings() {
                              ARRAYSIZE(monitorDevice), path.c_str());
     GetPrivateProfileStringW(L"Diagnostics", L"SaveLog", L"0", saveLog,
                              ARRAYSIZE(saveLog), path.c_str());
+    GetPrivateProfileStringW(L"Diagnostics", L"ShowConsole", L"0",
+                             showDiagnosticConsole,
+                             ARRAYSIZE(showDiagnosticConsole), path.c_str());
 
     if (_wcsicmp(language, L"English") == 0) {
         g_settings.uiLanguage = UiLanguage::English;
@@ -996,6 +1009,8 @@ static void LoadSettings() {
         wcstol(frameRate, nullptr, 10));
     g_settings.videoFrameRate = savedFrameRate > 0 ? savedFrameRate : 0;
     g_settings.saveLog = wcstol(saveLog, nullptr, 10) != 0;
+    g_settings.showDiagnosticConsole =
+        wcstol(showDiagnosticConsole, nullptr, 10) != 0;
 
     if (_wcsicmp(resolution, L"1920x1080") == 0) {
         g_settings.videoPreset = VideoPreset::R1920x1080;
@@ -1101,6 +1116,9 @@ static void SaveSettings() {
     WritePrivateProfileStringW(L"Diagnostics", L"SaveLog",
                                g_settings.saveLog ? L"1" : L"0",
                                path.c_str());
+    WritePrivateProfileStringW(L"Diagnostics", L"ShowConsole",
+                               g_settings.showDiagnosticConsole ? L"1" : L"0",
+                               path.c_str());
 }
 
 // -----------------------------------------------------------------------------
@@ -1128,7 +1146,7 @@ public:
             const size_t drop = std::min(available_ + frames - kRingFrames, available_);
             readFrame_ = (readFrame_ + drop) % kRingFrames;
             available_ -= drop;
-            if (OsdTrackingActive()) {
+            if (AudioTrackingActive()) {
                 overruns_++;
                 g_audioOverrunFrames.fetch_add(drop,
                                                std::memory_order_relaxed);
@@ -1369,7 +1387,7 @@ public:
 
         const size_t frames = static_cast<size_t>(bytes / bytesPerFrame);
         const uint64_t nowMs = GetTickCount64();
-        const bool track = OsdTrackingActive();
+        const bool track = AudioTrackingActive();
         if (track) {
             uint64_t unsetStart = 0;
             g_audioMonitorStartMs.compare_exchange_strong(
@@ -1949,7 +1967,7 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
             size_t got = 0;
             const size_t availableBeforeRender =
                 g_ring.availableFrames() + driftResampler.bufferedFrames();
-            if (audioStarted && OsdTrackingActive()) {
+            if (audioStarted && AudioTrackingActive()) {
                 UINT32 observed = static_cast<UINT32>((std::min)(
                     availableBeforeRender,
                     static_cast<size_t>(UINT32_MAX)));
@@ -2029,7 +2047,7 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
             if (got < writable) {
                 memset(out + got * wf.nBlockAlign, 0,
                        (writable - static_cast<UINT32>(got)) * wf.nBlockAlign);
-                if (audioStarted && OsdTrackingActive()) {
+                if (audioStarted && AudioTrackingActive()) {
                     g_underruns++;
                     g_audioUnderrunFrames.fetch_add(
                         writable - static_cast<UINT32>(got),
@@ -3479,6 +3497,7 @@ constexpr int IDC_SETTINGS_MUTE_BACKGROUND = 2021;
 constexpr int IDC_SETTINGS_PRESENTATION_HELP = 2022;
 constexpr int IDC_SETTINGS_PCM_QUEUE_HELP = 2023;
 constexpr int IDC_SETTINGS_LANGUAGE = 2024;
+constexpr int IDC_SETTINGS_SHOW_CONSOLE = 2025;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
@@ -3520,6 +3539,7 @@ struct SettingsDialogState {
     HWND borderlessCheck = nullptr;
     HWND windowSnapCheck = nullptr;
     HWND saveLogCheck = nullptr;
+    HWND showConsoleCheck = nullptr;
     HWND startButton = nullptr;
     HWND cancelButton = nullptr;
     HWND tooltipWindow = nullptr;
@@ -3642,6 +3662,7 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->borderlessCheck, 505, 370, 420, 28, dpi);
     PlaceSettingsControl(state->windowSnapCheck, 505, 404, 420, 28, dpi);
     PlaceSettingsControl(state->saveLogCheck, 505, 438, 420, 28, dpi);
+    PlaceSettingsControl(state->showConsoleCheck, 505, 472, 420, 28, dpi);
     PlaceSettingsControl(state->startButton, 745, 552, 80, 30, dpi);
     PlaceSettingsControl(state->cancelButton, 835, 552, 80, 30, dpi);
 }
@@ -4194,6 +4215,8 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
         }
         g_settings.saveLog = SendMessageW(
             state->saveLogCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_settings.showDiagnosticConsole = SendMessageW(
+            state->showConsoleCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.muteWhenBackground = SendMessageW(
             state->muteBackgroundCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.pixelPerfect = SendMessageW(
@@ -4577,6 +4600,17 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             instance, nullptr);
         SendMessageW(state->saveLogCheck, BM_SETCHECK,
                      g_settings.saveLog ? BST_CHECKED : BST_UNCHECKED, 0);
+
+        state->showConsoleCheck = CreateWindowExW(
+            0, L"BUTTON", UI_TEXT(L"진단 콘솔 창 표시"),
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+            430, 408, 365, 28, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_SHOW_CONSOLE)),
+            instance, nullptr);
+        SendMessageW(state->showConsoleCheck, BM_SETCHECK,
+                     g_settings.showDiagnosticConsole
+                         ? BST_CHECKED : BST_UNCHECKED, 0);
 
         state->startButton = CreateWindowExW(
             0, L"BUTTON", UI_TEXT(L"시작"), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
@@ -5568,9 +5602,9 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
 
     const int activeCorrectionPpm =
         g_audioResamplePpm.load(std::memory_order_acquire);
-    const bool trackingActive = OsdTrackingActive();
+    const bool trackingActive = AudioTrackingActive();
     const wchar_t* clockDiagnosis = trackingActive
-        ? UI_TEXT(L"측정 중") : UI_TEXT(L"워밍업 · 시작 2초 제외");
+        ? UI_TEXT(L"측정 중") : UI_TEXT(L"워밍업 · 시작 5초 제외");
     if (monitorStartMs) {
         if (g_settings.driftCorrection ==
             DriftCorrectionMode::Resample) {
@@ -5604,7 +5638,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     }
 
     const wchar_t* queueDiagnosis = trackingActive
-        ? UI_TEXT(L"측정 중") : UI_TEXT(L"워밍업 · 시작 2초 제외");
+        ? UI_TEXT(L"측정 중") : UI_TEXT(L"워밍업 · 시작 5초 제외");
     if (monitorStartMs) {
         if (underrunEvents == 0) {
             queueDiagnosis = g_settings.pcmQueueTargetMs ==
@@ -5972,7 +6006,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     if (!smokeTest && !ShowSettingsDialog(hInst)) return 0;
 
     // Allocate a console for prototype diagnostics.
-    AllocConsole();
+    const BOOL allocatedConsole = AllocConsole();
+    if (allocatedConsole && !g_settings.showDiagnosticConsole) {
+        const HWND console = GetConsoleWindow();
+        if (console) ShowWindow(console, SW_HIDE);
+    }
+    if (allocatedConsole && g_settings.showDiagnosticConsole) {
+        const HWND console = GetConsoleWindow();
+        if (console) ShowWindow(console, SW_SHOW);
+    }
     FILE* f = nullptr;
     if (smokeTest) {
         EnsureUserDataDirectory();
@@ -6089,11 +6131,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         ToggleFullscreen(hwnd);
     }
 
-    g_osdTrackingStartMs.store(GetTickCount64() + kOsdTrackingWarmupMs,
+    const uint64_t trackingStartMs = GetTickCount64();
+    g_osdTrackingStartMs.store(trackingStartMs + kOsdTrackingWarmupMs,
                                std::memory_order_release);
+    g_audioTrackingStartMs.store(trackingStartMs + kAudioTrackingWarmupMs,
+                                 std::memory_order_release);
     fwprintf(stderr,
-             L"[osd] statistics warmup: first %llu ms excluded.\n",
+             L"[osd] video statistics warmup: first %llu ms excluded.\n",
              static_cast<unsigned long long>(kOsdTrackingWarmupMs));
+    fwprintf(stderr,
+             L"[osd] audio diagnostics warmup: first %llu ms excluded.\n",
+             static_cast<unsigned long long>(kAudioTrackingWarmupMs));
 
     // One DirectShow graph owns one selected capture-filter instance and both
     // its video and audio branches. WASAPI remains an independent consumer.
