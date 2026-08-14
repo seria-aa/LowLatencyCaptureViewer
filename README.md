@@ -16,7 +16,7 @@ No mpv, FFmpeg, decoder, or companion executable is required.
   selection of separately exposed USB audio filters
 - Latest-frame rendering: stale video samples are discarded instead of queued
 - D3D11 Video Processor, flip-discard swapchain, and maximum frame latency of 1
-- Selectable immediate presentation or VSync
+- Selectable immediate presentation or VSync, plus smooth or sharp scaling
 - WASAPI Shared or Exclusive output, with default-device tracking or a fixed endpoint
 - IAudioClient3 shared-mode period negotiation with automatic classic-WASAPI fallback
 - Independent PCM safety target and optional clock-drift correction
@@ -41,11 +41,11 @@ compressed formats, P010, and automatic device reconnect are not supported.
 
 ## Install and run
 
-1. Run `LowLatencyCaptureViewer_v1.0.3_Setup.exe` and follow the wizard.
+1. Run `LowLatencyCaptureViewer_v1.0.4_Setup.exe` and follow the wizard.
 2. Launch **Low Latency Capture Viewer** from the Start menu or the installed
    executable.
 
-A portable `LowLatencyCaptureViewer_v1.0.3_x64.zip` is also available. Extract
+A portable `LowLatencyCaptureViewer_v1.0.4_x64.zip` is also available. Extract
 it anywhere and run `LowLatencyCaptureViewer.exe`.
 
 Settings and diagnostic logs are stored per user in
@@ -70,6 +70,7 @@ language executable.
 | Clock drift correction | Off for unaltered PCM. Enable only when long-running playback shows repeated drift-related errors. |
 | PCM target | 10 ms for minimum latency; raise it only if underruns repeat. |
 | Video format | Auto/NV12 first for the lowest upload overhead; select 60 fps when 120 fps is not sustainable. |
+| Scaling mode | Smooth by default. Try Sharp when a non-pixel-perfect fullscreen image looks soft. |
 
 Changing the capture device or resolution refreshes the supported format and
 frame-rate list. While the settings dialog is moved to another monitor, its
@@ -99,6 +100,17 @@ disables manual resizing. With it off, the window can be resized while keeping
 the video aspect ratio. Monitor-relative sizing is independent: when enabled,
 the saved monitor-relative scale is also applied on the next launch, so a QHD
 window moved to an FHD display does not reopen at the full QHD size there.
+
+`Scaling mode` affects non-1:1 video only. **Smooth** is the standard filtered
+scale. **Sharp** enables the GPU video processor's edge-enhancement filter,
+when the display driver supports it, without adding a frame queue. It can make
+text and UI clearer when the image is enlarged; it cannot make a non-integer
+scale mathematically pixel-perfect. If unsupported, Sharp safely uses Smooth.
+
+Before starting, close other programs that may already be using the capture
+device, such as OBS Studio or a vendor utility (for example Elgato 4K Capture
+Utility). A device that is already in use can fail during capture initialization
+even when its selected mode is supported.
 
 ## Low-latency audio
 

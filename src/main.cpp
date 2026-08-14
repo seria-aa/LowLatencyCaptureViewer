@@ -127,6 +127,11 @@ enum class PresentationMode {
     VSync,
 };
 
+enum class ScalingMode {
+    Smooth,
+    Sharp,
+};
+
 enum class VideoPixelFormat {
     Auto,
     Nv12,
@@ -166,6 +171,7 @@ struct AppSettings {
     VolumeHudPosition volumeHudPosition = VolumeHudPosition::TopLeft;
     bool muteWhenBackground = false;
     PresentationMode presentationMode = PresentationMode::AllowTearing;
+    ScalingMode scalingMode = ScalingMode::Smooth;
     VideoPreset videoPreset = VideoPreset::R2560x1440;
     VideoPixelFormat pixelFormat = VideoPixelFormat::Auto;
     int videoFrameRate = 0;
@@ -260,6 +266,9 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"백그라운드에서 자동 음소거", L"Mute automatically in background"},
         {L"화면 표시 방식", L"Presentation mode"},
         {L"저지연", L"Immediate"},
+        {L"화면 확대 방식", L"Scaling mode"},
+        {L"부드럽게", L"Smooth"},
+        {L"선명하게", L"Sharp"},
         {L"캡처 장치", L"Capture device"},
         {L"자동 선택 (GC573 우선 · 권장)", L"Auto select (GC573 first · recommended)"},
         {L"캡처 오디오 장치", L"Capture audio device"},
@@ -930,6 +939,9 @@ static void LoadSettings() {
                              ARRAYSIZE(frameRate), path.c_str());
     GetPrivateProfileStringW(L"Video", L"Presentation", L"AllowTearing",
                              presentation, ARRAYSIZE(presentation), path.c_str());
+    wchar_t scaling[32]{};
+    GetPrivateProfileStringW(L"Video", L"Scaling", L"Smooth",
+                             scaling, ARRAYSIZE(scaling), path.c_str());
     GetPrivateProfileStringW(L"Video", L"PixelPerfect", L"1", pixelPerfect,
                              ARRAYSIZE(pixelPerfect), path.c_str());
     GetPrivateProfileStringW(L"Video", L"RelativeWindowSize", L"0",
@@ -1015,6 +1027,8 @@ static void LoadSettings() {
     g_settings.presentationMode = (_wcsicmp(presentation, L"VSync") == 0)
                                       ? PresentationMode::VSync
                                       : PresentationMode::AllowTearing;
+    g_settings.scalingMode = (_wcsicmp(scaling, L"Sharp") == 0)
+        ? ScalingMode::Sharp : ScalingMode::Smooth;
     g_settings.audioOutputDeviceId = audioOutputDeviceId;
     g_settings.captureDeviceId = captureDeviceId;
     g_settings.captureAudioDeviceId = captureAudioDeviceId;
@@ -1122,6 +1136,10 @@ static void SaveSettings() {
         L"Video", L"Presentation",
         g_settings.presentationMode == PresentationMode::VSync
             ? L"VSync" : L"AllowTearing",
+        path.c_str());
+    WritePrivateProfileStringW(
+        L"Video", L"Scaling",
+        g_settings.scalingMode == ScalingMode::Sharp ? L"Sharp" : L"Smooth",
         path.c_str());
     WritePrivateProfileStringW(L"Video", L"PixelPerfect",
                                g_settings.pixelPerfect ? L"1" : L"0", path.c_str());
@@ -2698,6 +2716,7 @@ struct DirectD3D11Renderer {
     UINT nextUploadSurface = 0;
     UINT activeUploadSurface = 0;
     bool allowTearing = false;
+    bool sharpScalingActive = false;
     bool discardUpdateAvailable = false;
     bool occluded = false;
     uint64_t nextOcclusionTestMs = 0;
@@ -2754,6 +2773,7 @@ struct DirectD3D11Renderer {
         nextUploadSurface = 0;
         activeUploadSurface = 0;
         allowTearing = false;
+        sharpScalingActive = false;
         discardUpdateAvailable = false;
         occluded = false;
         nextOcclusionTestMs = 0;
@@ -2883,6 +2903,27 @@ struct DirectD3D11Renderer {
         }
         hr = videoDevice->CreateVideoProcessor(enumerator, 0, &processor);
         if (FAILED(hr)) return hr;
+        if (g_settings.scalingMode == ScalingMode::Sharp) {
+            D3D11_VIDEO_PROCESSOR_FILTER_RANGE sharpness{};
+            if (SUCCEEDED(enumerator->GetVideoProcessorFilterRange(
+                    D3D11_VIDEO_PROCESSOR_FILTER_EDGE_ENHANCEMENT, &sharpness)) &&
+                sharpness.Maximum > sharpness.Minimum) {
+                const int value = sharpness.Default +
+                    (sharpness.Maximum - sharpness.Default) / 2;
+                videoContext->VideoProcessorSetStreamFilter(
+                    processor, 0, D3D11_VIDEO_PROCESSOR_FILTER_EDGE_ENHANCEMENT,
+                    TRUE, std::clamp(value, sharpness.Minimum,
+                                     sharpness.Maximum));
+                sharpScalingActive = true;
+                fwprintf(stderr,
+                         L"[video] scaling: sharp (Video Processor, value %d)\n",
+                         std::clamp(value, sharpness.Minimum,
+                                    sharpness.Maximum));
+            } else {
+                fwprintf(stderr,
+                         L"[video] sharp scaling unavailable; using smooth scaling.\n");
+            }
+        }
 
         D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDesc{};
         inputDesc.FourCC = 0;
@@ -3701,6 +3742,7 @@ constexpr int IDC_SETTINGS_PCM_QUEUE_HELP = 2023;
 constexpr int IDC_SETTINGS_LANGUAGE = 2024;
 constexpr int IDC_SETTINGS_SHOW_CONSOLE = 2025;
 constexpr int IDC_SETTINGS_CAPTURE_AUDIO_DEVICE = 2026;
+constexpr int IDC_SETTINGS_SCALING = 2027;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
@@ -3718,6 +3760,7 @@ struct SettingsDialogState {
     HWND pcmQueueHelp = nullptr;
     HWND presentationLabel = nullptr;
     HWND presentationHelp = nullptr;
+    HWND scalingLabel = nullptr;
     HWND videoLabel = nullptr;
     HWND captureDeviceLabel = nullptr;
     HWND captureAudioDeviceLabel = nullptr;
@@ -3733,6 +3776,7 @@ struct SettingsDialogState {
     HWND pcmQueueCombo = nullptr;
     HWND audioStatus = nullptr;
     HWND presentationCombo = nullptr;
+    HWND scalingCombo = nullptr;
     HWND videoCombo = nullptr;
     HWND captureDeviceCombo = nullptr;
     HWND captureAudioDeviceCombo = nullptr;
@@ -3864,13 +3908,15 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->frameRateLabel, 505, 244, 120, 24, dpi);
     PlaceSettingsControl(state->frameRateCombo, 630, 240, 295, 200, dpi);
     PlaceSettingsControl(state->videoCapabilityStatus, 505, 278, 420, 24, dpi);
-    PlaceSettingsControl(state->pixelCheck, 505, 310, 420, 28, dpi);
-    PlaceSettingsControl(state->relativeSizeCheck, 505, 344, 420, 28, dpi);
-    PlaceSettingsControl(state->relativeSizeWarning, 525, 372, 400, 36, dpi);
-    PlaceSettingsControl(state->borderlessCheck, 505, 414, 420, 28, dpi);
-    PlaceSettingsControl(state->windowSnapCheck, 505, 448, 420, 28, dpi);
-    PlaceSettingsControl(state->saveLogCheck, 505, 482, 420, 28, dpi);
-    PlaceSettingsControl(state->showConsoleCheck, 505, 516, 420, 28, dpi);
+    PlaceSettingsControl(state->scalingLabel, 505, 310, 120, 24, dpi);
+    PlaceSettingsControl(state->scalingCombo, 630, 306, 295, 120, dpi);
+    PlaceSettingsControl(state->pixelCheck, 505, 344, 420, 28, dpi);
+    PlaceSettingsControl(state->relativeSizeCheck, 505, 378, 420, 28, dpi);
+    PlaceSettingsControl(state->relativeSizeWarning, 525, 406, 400, 36, dpi);
+    PlaceSettingsControl(state->borderlessCheck, 505, 448, 420, 28, dpi);
+    PlaceSettingsControl(state->windowSnapCheck, 505, 482, 420, 28, dpi);
+    PlaceSettingsControl(state->saveLogCheck, 505, 516, 420, 28, dpi);
+    PlaceSettingsControl(state->showConsoleCheck, 505, 550, 420, 28, dpi);
     PlaceSettingsControl(state->startButton, 745, 582, 80, 30, dpi);
     PlaceSettingsControl(state->cancelButton, 835, 582, 80, 30, dpi);
 }
@@ -4367,6 +4413,8 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->videoCombo, CB_GETCURSEL, 0, 0);
         const LRESULT presentationIndex = SendMessageW(
             state->presentationCombo, CB_GETCURSEL, 0, 0);
+        const LRESULT scalingIndex = SendMessageW(
+            state->scalingCombo, CB_GETCURSEL, 0, 0);
         const LRESULT volumeHudIndex = SendMessageW(
             state->volumeHudCombo, CB_GETCURSEL, 0, 0);
         const LRESULT driftIndex = SendMessageW(
@@ -4393,6 +4441,8 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
         g_settings.presentationMode = presentationIndex == 1
                                           ? PresentationMode::VSync
                                           : PresentationMode::AllowTearing;
+        g_settings.scalingMode = scalingIndex == 1
+            ? ScalingMode::Sharp : ScalingMode::Smooth;
         g_settings.wasapiBufferMs = state->selectedBufferMs;
         if (volumeHudIndex >= 0 && volumeHudIndex <= 3) {
             g_settings.volumeHudPosition =
@@ -4790,6 +4840,20 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
             430, 234, 365, 24, hwnd, nullptr, instance, nullptr);
         PopulatePixelFormatCombo(state);
+
+        state->scalingLabel = makeLabel(UI_TEXT(L"화면 확대 방식"), 430, 274);
+        state->scalingCombo = CreateWindowExW(
+            0, L"COMBOBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
+            550, 270, 245, 120, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_SCALING)),
+            instance, nullptr);
+        SendMessageW(state->scalingCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(UI_TEXT(L"부드럽게")));
+        SendMessageW(state->scalingCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(UI_TEXT(L"선명하게")));
+        SendMessageW(state->scalingCombo, CB_SETCURSEL,
+                     g_settings.scalingMode == ScalingMode::Sharp ? 1 : 0, 0);
 
         state->pixelCheck = CreateWindowExW(
             0, L"BUTTON", UI_TEXT(L"Pixel-perfect (1:1 · 창 크기 고정)"),
@@ -6405,6 +6469,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                       L"The selected device may not provide the requested "
                       L"resolution/FPS/pixel format or a compatible 48 kHz "
                       L"stereo PCM capture-audio input.\n"
+                      L"Close other apps that may be using the capture device "
+                      L"(for example OBS or the vendor capture utility), then "
                       L"Try Auto pixel format, another resolution, or select "
                       L"a capture audio device. If logging "
                       L"is enabled, check the logs folder under LocalAppData."
@@ -6413,6 +6479,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                       L"선택한 장치가 지정한 해상도/FPS/픽셀 포맷 또는 "
                       L"호환되는 48 kHz 스테레오 PCM 캡처 오디오 입력을 "
                       L"제공하지 않을 수 있습니다.\n"
+                      L"OBS 또는 제조사 캡처 프로그램처럼 캡처 장치를 사용 중인 "
+                      L"다른 앱을 먼저 종료한 뒤, "
                       L"자동 픽셀 포맷, 다른 해상도 또는 캡처 오디오 장치를 "
                       L"선택해 다시 시도하고, "
                       L"로그 저장을 켠 경우 사용자 데이터 폴더의 logs를 확인해 주세요.";
