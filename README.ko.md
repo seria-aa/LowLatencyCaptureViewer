@@ -9,9 +9,8 @@ AVerMedia GC573를 기준으로 개발·검증했습니다. 다른 DirectShow �
 
 mpv, FFmpeg, 서드파티 코덱 팩, 별도 실행 파일은 필요하지 않습니다.
 
-> **v1.0.6.1 Beta:** Windows Media Foundation 기반의 MJPEG, H.264/AVC,
-> MPEG-4 압축 캡처 호환성을 실험적으로 추가했습니다. 이 모드는 직접 선택하는
-> 베타 기능이며 실제 장치 검증이 필요합니다. 검증된 최저지연 경로는 NV12/YUY2입니다.
+> **v1.0.6.2 Beta:** 시작 설정을 필수/고급 항목으로 정리하고, 선택한 영상 장치에
+> 내부 오디오 핀이 있는지 사전 확인합니다. 검증된 최저지연 경로는 NV12/YUY2입니다.
 
 ## 주요 기능
 
@@ -47,11 +46,11 @@ GC573가 테스트·권장 장치입니다. 다른 장치는 실험적입니다.
 
 ## 설치 및 실행
 
-1. `LowLatencyCaptureViewer_v1.0.6.1_Setup.exe`를 실행하고 설치합니다.
+1. `LowLatencyCaptureViewer_v1.0.6.2_Setup.exe`를 실행하고 설치합니다.
 2. 시작 메뉴의 **Low Latency Capture Viewer** 또는 설치된 실행 파일을
    실행합니다.
 
-포터블판 `LowLatencyCaptureViewer_v1.0.6.1_x64.zip`도 함께 제공합니다. 원하는
+포터블판 `LowLatencyCaptureViewer_v1.0.6.2_x64.zip`도 함께 제공합니다. 원하는
 폴더에 압축을 풀고 `LowLatencyCaptureViewer.exe`를 실행하면 됩니다.
 
 설정과 진단 로그는 사용자별로

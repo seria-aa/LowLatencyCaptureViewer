@@ -1,4 +1,20 @@
-Low Latency Capture Viewer v1.0.6.1 Beta x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.0.6.2 Beta x64 (continued from the v0.14.2 rework)
+
+v1.0.6.2 Beta settings clarity and capture-audio preflight
+----------------------------------------------------------
+- Reorganized the startup settings dialog into an essential view and an
+  expandable advanced view. Frequently used audio, display, window-behavior,
+  language, and direct-start choices remain visible without expanding it.
+- The selected video filter is inspected while settings are open to determine
+  whether it exposes a built-in DirectShow audio output pin. When present,
+  automatic capture audio is shown as built-in; otherwise the separate capture
+  audio-device selector remains available.
+- The preflight only enumerates pins and never runs a capture graph. It is not
+  part of the video present loop, DirectShow callback, PCM ring, or WASAPI
+  render thread, so it adds no steady-state capture latency or frame queue.
+- When a selected device/resolution exposes NV12 or YUY2, compressed beta
+  formats are hidden from the pixel-format selector to keep the tested raw
+  low-latency path as the clear default.
 
 v1.0.6.1 Beta compressed-capture compatibility and volume boost
 ---------------------------------------------------------------

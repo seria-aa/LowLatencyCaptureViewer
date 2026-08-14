@@ -102,7 +102,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.0.6.1 Beta";
+constexpr wchar_t kAppVersionLabel[] = L"v1.0.6.2 Beta";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -159,6 +159,13 @@ enum class UiLanguage {
     English,
 };
 
+enum class InternalCaptureAudioState {
+    Checking,
+    Available,
+    SeparateDeviceNeeded,
+    Unknown,
+};
+
 struct CaptureDeviceInfo {
     std::wstring id;
     std::wstring name;
@@ -173,6 +180,11 @@ struct AudioEndpointInfo {
 struct PixelFormatSupport {
     VideoPixelFormat format = VideoPixelFormat::Auto;
     int selectedFps = 0;
+};
+
+struct InternalCaptureAudioProbe {
+    InternalCaptureAudioState state = InternalCaptureAudioState::Checking;
+    HRESULT result = S_OK;
 };
 
 struct AppSettings {
@@ -272,6 +284,12 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"WASAPI 출력 버퍼", L"WASAPI output buffer"},
         {L"볼륨 HUD 위치", L"Volume HUD position"},
         {L"100% 이상 볼륨 증폭 허용 (최대 200%)", L"Allow volume boost above 100% (up to 200%)"},
+        {L"▸ 고급 설정", L"▸ Advanced settings"},
+        {L"⌄ 고급 설정 숨기기", L"⌄ Hide advanced settings"},
+        {L"내부 오디오 확인 중…", L"Checking built-in audio…"},
+        {L"영상 장치 내부 오디오 감지됨 · 자동 사용", L"Built-in audio detected · using automatically"},
+        {L"별도 캡처 오디오 장치 선택", L"Select a separate capture audio device"},
+        {L"내부 오디오 확인 불가 · 자동 선택", L"Built-in audio unavailable · automatic selection"},
         {L"좌측 상단 (기본)", L"Top-left (default)"},
         {L"우측 상단", L"Top-right"},
         {L"좌측 하단", L"Bottom-left"},
@@ -3061,6 +3079,44 @@ static std::vector<PixelFormatSupport> ProbePixelFormats(
     return result;
 }
 
+// This runs only while the settings dialog is open. It enumerates the chosen
+// DirectShow filter's advertised output pins without building or running a
+// graph, so it cannot add capture-time latency or steady-state overhead.
+static InternalCaptureAudioProbe ProbeInternalCaptureAudio(
+    const std::wstring& captureDeviceId) {
+    InternalCaptureAudioProbe probe{};
+    HRESULT initHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool uninitialize = SUCCEEDED(initHr);
+    if (initHr == RPC_E_CHANGED_MODE) initHr = S_OK;
+    if (FAILED(initHr)) {
+        probe.state = InternalCaptureAudioState::Unknown;
+        probe.result = initHr;
+        return probe;
+    }
+
+    IBaseFilter* capture = nullptr;
+    IPin* audioPin = nullptr;
+    HRESULT hr = FindCaptureFilter(captureDeviceId, &capture);
+    if (SUCCEEDED(hr)) {
+        hr = FindOutputPinByName(capture, kAudioPinName, &audioPin);
+    }
+    if (FAILED(hr) && capture) {
+        hr = FindOutputPinByMajorType(capture, MEDIATYPE_Audio, &audioPin);
+    }
+    if (SUCCEEDED(hr) && audioPin) {
+        probe.state = InternalCaptureAudioState::Available;
+    } else if (hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND)) {
+        probe.state = InternalCaptureAudioState::SeparateDeviceNeeded;
+    } else {
+        probe.state = InternalCaptureAudioState::Unknown;
+    }
+    probe.result = hr;
+    SafeRelease(audioPin);
+    SafeRelease(capture);
+    if (uninitialize) CoUninitialize();
+    return probe;
+}
+
 static void UpdateConfiguredVideoTitle(HWND videoHost, int configuredFps) {
     HWND root = GetAncestor(videoHost, GA_ROOT);
     if (!root) return;
@@ -4230,9 +4286,11 @@ constexpr int IDC_SETTINGS_SCALING = 2027;
 constexpr int IDC_SETTINGS_SKIP_STARTUP = 2028;
 constexpr int IDC_SETTINGS_VOLUME_BOOST = 2029;
 constexpr int IDC_SETTINGS_VOLUME_BOOST_HELP = 2030;
+constexpr int IDC_SETTINGS_ADVANCED_TOGGLE = 2031;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
+constexpr UINT WM_CAPTURE_AUDIO_PROBE_COMPLETE = WM_APP + 76;
 
 struct SettingsDialogState {
     HWND languageLabel = nullptr;
@@ -4253,6 +4311,7 @@ struct SettingsDialogState {
     HWND videoLabel = nullptr;
     HWND captureDeviceLabel = nullptr;
     HWND captureAudioDeviceLabel = nullptr;
+    HWND captureAudioStatus = nullptr;
     HWND pixelFormatLabel = nullptr;
     HWND frameRateLabel = nullptr;
     HWND videoCapabilityStatus = nullptr;
@@ -4281,14 +4340,18 @@ struct SettingsDialogState {
     HWND skipStartupCheck = nullptr;
     HWND skipStartupHint = nullptr;
     HWND versionWatermark = nullptr;
+    HWND advancedToggle = nullptr;
     HWND startButton = nullptr;
     HWND cancelButton = nullptr;
     HWND tooltipWindow = nullptr;
     HWND activeTooltipTarget = nullptr;
     std::vector<HFONT> uiFonts;
     std::thread probeThread;
+    std::thread captureAudioProbeThread;
     std::atomic<bool> probeReady{false};
+    std::atomic<bool> captureAudioProbeReady{false};
     AudioClient3Support probe{};
+    InternalCaptureAudioProbe captureAudioProbe{};
     std::vector<UINT32> sharedPeriodChoices;
     std::vector<CaptureDeviceInfo> captureDevices;
     std::vector<CaptureDeviceInfo> captureAudioDevices;
@@ -4299,6 +4362,7 @@ struct SettingsDialogState {
     UINT32 selectedSharedPeriodFrames = 0;
     int selectedBufferMs = kRecommendedWasapiBufferMs;
     bool bufferItemsAreSharedFrames = false;
+    bool showAdvanced = false;
     bool accepted = false;
 };
 
@@ -4308,11 +4372,18 @@ static int SettingsPixels(int dips, UINT dpi) {
 }
 
 static constexpr int kSettingsClientWidthDip = 950;
-static constexpr int kSettingsClientHeightDip = 640;
+static constexpr int kSettingsBasicClientHeightDip = 510;
+static constexpr int kSettingsAdvancedClientHeightDip = 640;
 
-static SIZE SettingsDialogOuterSize(HWND hwnd, UINT dpi) {
+static int SettingsClientHeightDip(const SettingsDialogState* state) {
+    return state && state->showAdvanced
+        ? kSettingsAdvancedClientHeightDip : kSettingsBasicClientHeightDip;
+}
+
+static SIZE SettingsDialogOuterSize(HWND hwnd, UINT dpi,
+                                    const SettingsDialogState* state) {
     RECT rect{0, 0, SettingsPixels(kSettingsClientWidthDip, dpi),
-              SettingsPixels(kSettingsClientHeightDip, dpi)};
+              SettingsPixels(SettingsClientHeightDip(state), dpi)};
     const DWORD style =
         static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
     const DWORD exStyle =
@@ -4353,6 +4424,60 @@ static void ApplySettingsFont(SettingsDialogState* state, HWND hwnd,
 
 static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     if (!state) return;
+    if (!state->showAdvanced) {
+        const bool pixelPerfect = state->pixelCheck &&
+            SendMessageW(state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        const bool relativeSize = state->relativeSizeCheck &&
+            SendMessageW(state->relativeSizeCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        const int relativeY = pixelPerfect ? 346 : 382;
+        const bool showRelativeWarning = pixelPerfect && relativeSize;
+        const int borderlessY = showRelativeWarning
+            ? relativeY + 64 : relativeY + 34;
+
+        PlaceSettingsControl(state->audioLabel, 24, 24, 160, 24, dpi);
+        PlaceSettingsControl(state->audioCombo, 195, 20, 280, 120, dpi);
+        PlaceSettingsControl(state->audioOutputLabel, 24, 68, 160, 24, dpi);
+        PlaceSettingsControl(state->audioOutputCombo, 195, 64, 280, 220, dpi);
+        // Keep background mute beside the audio choices. Starting immediately
+        // on the next launch is an application-behavior preference, so it
+        // stays in the lower settings section with its explanatory text.
+        PlaceSettingsControl(state->muteBackgroundCheck, 24, 112, 451, 28, dpi);
+        // Leave a deliberate gap before application behavior preferences so
+        // language and quick start read as a separate category from audio.
+        PlaceSettingsControl(state->languageLabel, 24, 180, 160, 24, dpi);
+        PlaceSettingsControl(state->languageCombo, 195, 176, 280, 120, dpi);
+        PlaceSettingsControl(state->skipStartupCheck, 24, 224, 451, 28, dpi);
+        PlaceSettingsControl(state->skipStartupHint, 44, 252, 431, 42, dpi);
+        PlaceSettingsControl(state->advancedToggle, 24, 316, 190, 28, dpi);
+        PlaceSettingsControl(state->versionWatermark, 24, 466, 260, 20, dpi);
+
+        PlaceSettingsControl(state->presentationLabel, 505, 24, 95, 24, dpi);
+        PlaceSettingsControl(state->presentationHelp, 604, 20, 24, 24, dpi);
+        PlaceSettingsControl(state->presentationCombo, 630, 20, 295, 120, dpi);
+        PlaceSettingsControl(state->captureDeviceLabel, 505, 68, 120, 24, dpi);
+        PlaceSettingsControl(state->captureDeviceCombo, 630, 64, 295, 220, dpi);
+        PlaceSettingsControl(state->captureAudioDeviceLabel, 505, 112, 120, 24, dpi);
+        PlaceSettingsControl(state->captureAudioDeviceCombo, 630, 108, 295, 220, dpi);
+        PlaceSettingsControl(state->captureAudioStatus, 630, 112, 295, 24, dpi);
+        PlaceSettingsControl(state->videoLabel, 505, 156, 120, 24, dpi);
+        PlaceSettingsControl(state->videoCombo, 630, 152, 295, 120, dpi);
+        PlaceSettingsControl(state->pixelFormatLabel, 505, 200, 120, 24, dpi);
+        PlaceSettingsControl(state->pixelFormatCombo, 630, 196, 295, 160, dpi);
+        PlaceSettingsControl(state->frameRateLabel, 505, 244, 120, 24, dpi);
+        PlaceSettingsControl(state->frameRateCombo, 630, 240, 295, 200, dpi);
+        PlaceSettingsControl(state->videoCapabilityStatus, 505, 278, 420, 24, dpi);
+        PlaceSettingsControl(state->pixelCheck, 505, 312, 420, 28, dpi);
+        PlaceSettingsControl(state->scalingLabel, 505, 346, 120, 24, dpi);
+        PlaceSettingsControl(state->scalingCombo, 630, 342, 295, 120, dpi);
+        PlaceSettingsControl(state->relativeSizeCheck, 505, relativeY, 420, 28, dpi);
+        PlaceSettingsControl(state->relativeSizeWarning, 525, relativeY + 28,
+                             400, 28, dpi);
+        PlaceSettingsControl(state->borderlessCheck, 505, borderlessY, 420, 28, dpi);
+        PlaceSettingsControl(state->startButton, 745, 454, 80, 30, dpi);
+        PlaceSettingsControl(state->cancelButton, 835, 454, 80, 30, dpi);
+        return;
+    }
+
     PlaceSettingsControl(state->audioLabel, 24, 24, 160, 24, dpi);
     PlaceSettingsControl(state->audioCombo, 195, 20, 280, 120, dpi);
     PlaceSettingsControl(state->audioOutputLabel, 24, 68, 160, 24, dpi);
@@ -4364,18 +4489,28 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->volumeHudCombo, 195, 186, 280, 160, dpi);
     PlaceSettingsControl(state->volumeBoostCheck, 24, 230, 400, 28, dpi);
     PlaceSettingsControl(state->volumeBoostHelp, 438, 226, 24, 24, dpi);
-    PlaceSettingsControl(state->driftLabel, 24, 274, 140, 24, dpi);
-    PlaceSettingsControl(state->driftHelp, 168, 270, 24, 24, dpi);
-    PlaceSettingsControl(state->driftCombo, 195, 270, 280, 120, dpi);
-    PlaceSettingsControl(state->pcmQueueLabel, 24, 318, 160, 24, dpi);
-    PlaceSettingsControl(state->pcmQueueHelp, 168, 314, 24, 24, dpi);
-    PlaceSettingsControl(state->pcmQueueCombo, 195, 314, 280, 140, dpi);
-    PlaceSettingsControl(state->muteBackgroundCheck, 24, 358, 451, 28, dpi);
-    PlaceSettingsControl(state->languageLabel, 24, 392, 160, 24, dpi);
-    PlaceSettingsControl(state->languageCombo, 195, 388, 280, 120, dpi);
-    PlaceSettingsControl(state->skipStartupCheck, 24, 436, 451, 28, dpi);
-    PlaceSettingsControl(state->skipStartupHint, 44, 464, 431, 42, dpi);
+    PlaceSettingsControl(state->muteBackgroundCheck, 24, 274, 451, 28, dpi);
+    PlaceSettingsControl(state->driftLabel, 24, 318, 140, 24, dpi);
+    PlaceSettingsControl(state->driftHelp, 168, 314, 24, 24, dpi);
+    PlaceSettingsControl(state->driftCombo, 195, 314, 280, 120, dpi);
+    PlaceSettingsControl(state->pcmQueueLabel, 24, 362, 160, 24, dpi);
+    PlaceSettingsControl(state->pcmQueueHelp, 168, 358, 24, 24, dpi);
+    PlaceSettingsControl(state->pcmQueueCombo, 195, 358, 280, 140, dpi);
+    // Keep application behavior visually separate from the audio controls.
+    PlaceSettingsControl(state->languageLabel, 24, 412, 160, 24, dpi);
+    PlaceSettingsControl(state->languageCombo, 195, 408, 280, 120, dpi);
+    PlaceSettingsControl(state->skipStartupCheck, 24, 456, 451, 28, dpi);
+    PlaceSettingsControl(state->skipStartupHint, 44, 484, 431, 42, dpi);
+    PlaceSettingsControl(state->advancedToggle, 24, 540, 190, 28, dpi);
     PlaceSettingsControl(state->versionWatermark, 24, 596, 260, 20, dpi);
+
+    const bool pixelPerfect = state->pixelCheck &&
+        SendMessageW(state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const bool relativeSize = state->relativeSizeCheck &&
+        SendMessageW(state->relativeSizeCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const bool showRelativeWarning = pixelPerfect && relativeSize;
+    const int borderlessY = showRelativeWarning ? 448 : 412;
+    const int snapY = borderlessY + 34;
 
     PlaceSettingsControl(state->presentationLabel, 505, 24, 95, 24, dpi);
     PlaceSettingsControl(state->presentationHelp, 604, 20, 24, 24, dpi);
@@ -4384,6 +4519,7 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->captureDeviceCombo, 630, 64, 295, 220, dpi);
     PlaceSettingsControl(state->captureAudioDeviceLabel, 505, 112, 120, 24, dpi);
     PlaceSettingsControl(state->captureAudioDeviceCombo, 630, 108, 295, 220, dpi);
+    PlaceSettingsControl(state->captureAudioStatus, 630, 112, 295, 24, dpi);
     PlaceSettingsControl(state->videoLabel, 505, 156, 120, 24, dpi);
     PlaceSettingsControl(state->videoCombo, 630, 152, 295, 120, dpi);
     PlaceSettingsControl(state->pixelFormatLabel, 505, 200, 120, 24, dpi);
@@ -4391,17 +4527,70 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->frameRateLabel, 505, 244, 120, 24, dpi);
     PlaceSettingsControl(state->frameRateCombo, 630, 240, 295, 200, dpi);
     PlaceSettingsControl(state->videoCapabilityStatus, 505, 278, 420, 24, dpi);
-    PlaceSettingsControl(state->scalingLabel, 505, 310, 120, 24, dpi);
-    PlaceSettingsControl(state->scalingCombo, 630, 306, 295, 120, dpi);
-    PlaceSettingsControl(state->pixelCheck, 505, 344, 420, 28, dpi);
+    // Match the compact layout: choose pixel-perfect first, then its
+    // applicable scaling method immediately underneath.
+    PlaceSettingsControl(state->pixelCheck, 505, 310, 420, 28, dpi);
+    PlaceSettingsControl(state->scalingLabel, 505, 344, 120, 24, dpi);
+    PlaceSettingsControl(state->scalingCombo, 630, 340, 295, 120, dpi);
     PlaceSettingsControl(state->relativeSizeCheck, 505, 378, 420, 28, dpi);
     PlaceSettingsControl(state->relativeSizeWarning, 525, 406, 400, 36, dpi);
-    PlaceSettingsControl(state->borderlessCheck, 505, 448, 420, 28, dpi);
-    PlaceSettingsControl(state->windowSnapCheck, 505, 482, 420, 28, dpi);
-    PlaceSettingsControl(state->saveLogCheck, 505, 516, 420, 28, dpi);
-    PlaceSettingsControl(state->showConsoleCheck, 505, 550, 420, 28, dpi);
-    PlaceSettingsControl(state->startButton, 745, 582, 80, 30, dpi);
-    PlaceSettingsControl(state->cancelButton, 835, 582, 80, 30, dpi);
+    // Window behavior stays together; diagnostics are a separate group below.
+    PlaceSettingsControl(state->borderlessCheck, 505, borderlessY, 420, 28, dpi);
+    PlaceSettingsControl(state->windowSnapCheck, 505, snapY, 420, 28, dpi);
+    PlaceSettingsControl(state->saveLogCheck, 505, 524, 420, 28, dpi);
+    PlaceSettingsControl(state->showConsoleCheck, 505, 558, 420, 28, dpi);
+    PlaceSettingsControl(state->startButton, 745, 590, 80, 30, dpi);
+    PlaceSettingsControl(state->cancelButton, 835, 590, 80, 30, dpi);
+}
+
+static void SetSettingsControlVisible(HWND control, bool visible) {
+    if (!control) return;
+    ShowWindow(control, visible ? SW_SHOW : SW_HIDE);
+    EnableWindow(control, visible ? TRUE : FALSE);
+}
+
+static void UpdateScalingControlVisibility(SettingsDialogState* state) {
+    if (!state) return;
+    const bool pixelPerfect = state->pixelCheck &&
+        SendMessageW(state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const bool visible = state->showAdvanced || !pixelPerfect;
+    SetSettingsControlVisible(state->scalingLabel, visible);
+    SetSettingsControlVisible(state->scalingCombo, visible);
+}
+
+static void UpdateWindowBehaviorVisibility(SettingsDialogState* state) {
+    if (!state) return;
+    const bool pixelPerfect = state->pixelCheck &&
+        SendMessageW(state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const bool relativeSize = state->relativeSizeCheck &&
+        SendMessageW(state->relativeSizeCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+
+    // These are everyday window-behavior preferences, not advanced tuning.
+    // Only show the caveat when the currently selected combination needs it.
+    SetSettingsControlVisible(state->relativeSizeCheck, true);
+    SetSettingsControlVisible(state->borderlessCheck, true);
+    SetSettingsControlVisible(state->relativeSizeWarning,
+                              pixelPerfect && relativeSize);
+}
+
+static void UpdateAdvancedControlVisibility(SettingsDialogState* state) {
+    if (!state) return;
+    const bool visible = state->showAdvanced;
+    for (HWND control : {
+             state->bufferLabel, state->bufferCombo, state->audioStatus,
+             state->volumeHudLabel, state->volumeHudCombo,
+             state->volumeBoostCheck, state->volumeBoostHelp,
+             state->driftLabel, state->driftHelp, state->driftCombo,
+             state->pcmQueueLabel, state->pcmQueueHelp, state->pcmQueueCombo,
+             state->windowSnapCheck, state->saveLogCheck,
+             state->showConsoleCheck}) {
+        SetSettingsControlVisible(control, visible);
+    }
+    UpdateScalingControlVisibility(state);
+    UpdateWindowBehaviorVisibility(state);
+    SetWindowTextW(state->advancedToggle,
+                   UI_TEXT(visible ? L"⌄ 고급 설정 숨기기"
+                                   : L"▸ 고급 설정"));
 }
 
 static void TrackSettingsTooltip(HWND target, HWND tooltip, bool active) {
@@ -4697,6 +4886,58 @@ static std::wstring SelectedCaptureAudioDeviceId(
     return state->captureAudioDevices[static_cast<size_t>(index - 1)].id;
 }
 
+static void UpdateCaptureAudioSelectionUi(SettingsDialogState* state) {
+    if (!state || !state->captureAudioDeviceLabel ||
+        !state->captureAudioDeviceCombo || !state->captureAudioStatus) {
+        return;
+    }
+    const bool explicitSeparateDevice = !SelectedCaptureAudioDeviceId(state).empty();
+    const InternalCaptureAudioState probeState =
+        state->captureAudioProbeReady.load(std::memory_order_acquire)
+            ? state->captureAudioProbe.state
+            : InternalCaptureAudioState::Checking;
+
+    SetWindowTextW(state->captureAudioDeviceLabel,
+                   UI_TEXT(L"캡처 오디오 장치"));
+    if (explicitSeparateDevice ||
+        probeState == InternalCaptureAudioState::SeparateDeviceNeeded ||
+        probeState == InternalCaptureAudioState::Unknown) {
+        SetSettingsControlVisible(state->captureAudioDeviceCombo, true);
+        SetSettingsControlVisible(state->captureAudioStatus, false);
+        return;
+    }
+
+    SetSettingsControlVisible(state->captureAudioDeviceCombo, false);
+    SetSettingsControlVisible(state->captureAudioStatus, true);
+    if (probeState == InternalCaptureAudioState::Available) {
+        SetWindowTextW(state->captureAudioStatus,
+                       UI_TEXT(L"영상 장치 내부 오디오 감지됨 · 자동 사용"));
+    } else {
+        SetWindowTextW(state->captureAudioStatus,
+                       UI_TEXT(L"내부 오디오 확인 중…"));
+    }
+}
+
+static void StartCaptureAudioProbe(SettingsDialogState* state, HWND hwnd) {
+    if (!state || !hwnd) return;
+    if (state->captureAudioProbeThread.joinable()) {
+        state->captureAudioProbeThread.join();
+    }
+    state->captureAudioProbeReady.store(false, std::memory_order_release);
+    EnableWindow(state->captureDeviceCombo, FALSE);
+    UpdateCaptureAudioSelectionUi(state);
+    const std::wstring captureDeviceId = SelectedCaptureDeviceId(state);
+    state->captureAudioProbeThread = std::thread(
+        [state, hwnd, captureDeviceId]() {
+            const InternalCaptureAudioProbe probe =
+                ProbeInternalCaptureAudio(captureDeviceId);
+            state->captureAudioProbe = probe;
+            state->captureAudioProbeReady.store(true,
+                                                std::memory_order_release);
+            PostMessageW(hwnd, WM_CAPTURE_AUDIO_PROBE_COMPLETE, 0, 0);
+        });
+}
+
 static VideoPixelFormat SelectedPixelFormat(
     const SettingsDialogState* state) {
     if (!state || !state->pixelFormatCombo) return VideoPixelFormat::Auto;
@@ -4708,6 +4949,15 @@ static VideoPixelFormat SelectedPixelFormat(
         static_cast<WPARAM>(index), 0);
     return value == CB_ERR ? VideoPixelFormat::Auto
                            : static_cast<VideoPixelFormat>(value);
+}
+
+static bool HasRawLowLatencyVideoFormat(
+    const std::vector<PixelFormatSupport>& formats) {
+    return std::any_of(formats.begin(), formats.end(),
+                       [](const PixelFormatSupport& support) {
+                           return support.format == VideoPixelFormat::Nv12 ||
+                                  support.format == VideoPixelFormat::Yuy2;
+                       });
 }
 
 static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
@@ -4730,12 +4980,15 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
         message = UI_TEXT(L"지원 모드 없음: 다른 장치 또는 해상도를 선택하세요.");
     } else {
         message = UI_TEXT(L"자동 인식: ");
+        const bool rawAvailable = HasRawLowLatencyVideoFormat(
+            state->pixelFormats);
         bool firstFormat = true;
         for (const auto format : {VideoPixelFormat::Nv12,
                                   VideoPixelFormat::Yuy2,
                                   VideoPixelFormat::Mjpeg,
                                   VideoPixelFormat::H264,
                                   VideoPixelFormat::Mpeg4}) {
+            if (rawAvailable && IsCompressedVideoFormat(format)) continue;
             std::vector<int> frameRates;
             for (const auto& support : state->pixelFormats) {
                 if (support.format == format) {
@@ -4849,11 +5102,13 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
                  static_cast<WPARAM>(autoIndex),
                  static_cast<LPARAM>(VideoPixelFormat::Auto));
     LRESULT selectedIndex = autoIndex;
+    const bool rawAvailable = HasRawLowLatencyVideoFormat(state->pixelFormats);
     for (const auto format : {VideoPixelFormat::Nv12,
                               VideoPixelFormat::Yuy2,
                               VideoPixelFormat::Mjpeg,
                               VideoPixelFormat::H264,
                               VideoPixelFormat::Mpeg4}) {
+        if (rawAvailable && IsCompressedVideoFormat(format)) continue;
         const bool available = std::any_of(
             state->pixelFormats.begin(), state->pixelFormats.end(),
             [format](const PixelFormatSupport& support) {
@@ -5256,6 +5511,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 L"저장된 설정으로 바로 실행 · Shift 실행 또는 F2로 설정 열기"),
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
             44, 424, 431, 42, hwnd, nullptr, instance, nullptr);
+        state->advancedToggle = CreateWindowExW(
+            0, L"BUTTON", UI_TEXT(L"▸ 고급 설정"),
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+            24, 520, 190, 28, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_ADVANCED_TOGGLE)),
+            instance, nullptr);
         state->versionWatermark = CreateWindowExW(
             0, L"STATIC", kAppVersionLabel,
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
@@ -5342,6 +5604,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         }
         SendMessageW(state->captureAudioDeviceCombo, CB_SETCURSEL,
                      selectedCaptureAudioDevice, 0);
+        state->captureAudioStatus = CreateWindowExW(
+            0, L"STATIC", UI_TEXT(L"내부 오디오 확인 중…"),
+            WS_CHILD | SS_LEFTNOWORDWRAP,
+            550, 108, 245, 24, hwnd, nullptr, instance, nullptr);
 
         state->videoLabel = makeLabel(UI_TEXT(L"캡처 해상도"), 430, 156);
         state->videoCombo = CreateWindowExW(
@@ -5477,6 +5743,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         const UINT initialDpi = GetDpiForWindow(hwnd);
         ApplySettingsFont(state, hwnd, initialDpi);
         LayoutSettingsControls(state, initialDpi);
+        UpdateAdvancedControlVisibility(state);
         RedrawWindow(hwnd, nullptr, nullptr,
                      RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN |
                          RDW_UPDATENOW);
@@ -5487,6 +5754,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             state->probeReady.store(true, std::memory_order_release);
             PostMessageW(hwnd, WM_AUDIOCLIENT3_PROBE_COMPLETE, 0, 0);
         });
+        StartCaptureAudioProbe(state, hwnd);
         return 0;
     }
 
@@ -5520,7 +5788,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
     case WM_GETDPISCALEDSIZE:
         if (lParam) {
             *reinterpret_cast<SIZE*>(lParam) =
-                SettingsDialogOuterSize(hwnd, static_cast<UINT>(wParam));
+                SettingsDialogOuterSize(hwnd, static_cast<UINT>(wParam), state);
             return TRUE;
         }
         break;
@@ -5538,6 +5806,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         if (SettingsUsesSharedMode(state)) {
             RememberCurrentBufferChoice(state);
             PopulateSettingsBufferCombo(state);
+        }
+        return 0;
+
+    case WM_CAPTURE_AUDIO_PROBE_COMPLETE:
+        if (state) {
+            EnableWindow(state->captureDeviceCombo, TRUE);
+            UpdateCaptureAudioSelectionUi(state);
         }
         return 0;
 
@@ -5598,10 +5873,54 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             });
             return 0;
         }
-        if ((LOWORD(wParam) == IDC_SETTINGS_CAPTURE_DEVICE ||
-             LOWORD(wParam) == IDC_SETTINGS_VIDEO) &&
+        if (LOWORD(wParam) == IDC_SETTINGS_CAPTURE_DEVICE &&
             HIWORD(wParam) == CBN_SELCHANGE) {
             PopulatePixelFormatCombo(state);
+            StartCaptureAudioProbe(state, hwnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_VIDEO &&
+            HIWORD(wParam) == CBN_SELCHANGE) {
+            PopulatePixelFormatCombo(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_CAPTURE_AUDIO_DEVICE &&
+            HIWORD(wParam) == CBN_SELCHANGE) {
+            UpdateCaptureAudioSelectionUi(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_PIXEL &&
+            HIWORD(wParam) == BN_CLICKED) {
+            LayoutSettingsControls(state, GetDpiForWindow(hwnd));
+            UpdateScalingControlVisibility(state);
+            UpdateWindowBehaviorVisibility(state);
+            RedrawWindow(hwnd, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN |
+                             RDW_UPDATENOW);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_RELATIVE_SIZE &&
+            HIWORD(wParam) == BN_CLICKED) {
+            LayoutSettingsControls(state, GetDpiForWindow(hwnd));
+            UpdateWindowBehaviorVisibility(state);
+            RedrawWindow(hwnd, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN |
+                             RDW_UPDATENOW);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_ADVANCED_TOGGLE &&
+            HIWORD(wParam) == BN_CLICKED) {
+            state->showAdvanced = !state->showAdvanced;
+            const UINT dpi = GetDpiForWindow(hwnd);
+            LayoutSettingsControls(state, dpi);
+            UpdateAdvancedControlVisibility(state);
+            const SIZE outer = SettingsDialogOuterSize(hwnd, dpi, state);
+            SetWindowPos(hwnd, nullptr, 0, 0, outer.cx, outer.cy,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            UpdateCaptureAudioSelectionUi(state);
+            RedrawWindow(hwnd, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN |
+                             RDW_UPDATENOW);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_PIXEL_FORMAT &&
@@ -5695,7 +6014,7 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
     const DWORD settingsExStyle = WS_EX_DLGMODALFRAME;
     RECT settingsRect{0, 0,
                       SettingsPixels(kSettingsClientWidthDip, settingsDpi),
-                      SettingsPixels(kSettingsClientHeightDip, settingsDpi)};
+                      SettingsPixels(SettingsClientHeightDip(&state), settingsDpi)};
     AdjustWindowRectExForDpi(&settingsRect, settingsStyle, FALSE,
                              settingsExStyle, settingsDpi);
     const SIZE settingsOuter{settingsRect.right - settingsRect.left,
@@ -5737,6 +6056,9 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
         DispatchMessageW(&msg);
     }
     if (state.probeThread.joinable()) state.probeThread.join();
+    if (state.captureAudioProbeThread.joinable()) {
+        state.captureAudioProbeThread.join();
+    }
     for (HFONT font : state.uiFonts) DeleteObject(font);
     return state.accepted;
 }

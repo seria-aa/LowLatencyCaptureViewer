@@ -10,9 +10,9 @@ are supported experimentally.
 
 No mpv, FFmpeg, third-party codec pack, or companion executable is required.
 
-> **v1.0.6.1 Beta:** Adds experimental MJPEG, H.264/AVC, and MPEG-4 capture
-> compatibility through Windows Media Foundation. These modes are opt-in and
-> require real-device testing; NV12/YUY2 remain the tested low-latency path.
+> **v1.0.6.2 Beta:** Simplifies the startup settings into essential and
+> advanced controls, and preflights whether the selected video filter exposes
+> built-in audio. NV12/YUY2 remain the tested low-latency path.
 
 ## Highlights
 
@@ -49,11 +49,11 @@ device reconnect are not supported.
 
 ## Install and run
 
-1. Run `LowLatencyCaptureViewer_v1.0.6.1_Setup.exe` and follow the wizard.
+1. Run `LowLatencyCaptureViewer_v1.0.6.2_Setup.exe` and follow the wizard.
 2. Launch **Low Latency Capture Viewer** from the Start menu or the installed
    executable.
 
-A portable `LowLatencyCaptureViewer_v1.0.6.1_x64.zip` is also available. Extract
+A portable `LowLatencyCaptureViewer_v1.0.6.2_x64.zip` is also available. Extract
 it anywhere and run `LowLatencyCaptureViewer.exe`.
 
 Settings and diagnostic logs are stored per user in
