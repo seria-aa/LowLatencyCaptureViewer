@@ -4,14 +4,16 @@
 
 A Windows x64 viewer for low-latency HDMI capture. It captures directly from a
 DirectShow capture card, renders video with D3D11, and sends audio directly to
-WASAPI. It is built and tested around the AVerMedia GC573; compatible NV12/YUY2
-DirectShow cards are supported experimentally.
+WASAPI. It is built and tested around the AVerMedia GC573; other compatible
+NV12/YUY2 DirectShow cards, including USB devices with separate audio filters,
+are supported experimentally.
 
 No mpv, FFmpeg, decoder, or companion executable is required.
 
 ## Highlights
 
-- Single DirectShow graph for video and audio capture
+- Single DirectShow graph for video and audio capture, with automatic or manual
+  selection of separately exposed USB audio filters
 - Latest-frame rendering: stale video samples are discarded instead of queued
 - D3D11 Video Processor, flip-discard swapchain, and maximum frame latency of 1
 - Selectable immediate presentation or VSync
@@ -27,21 +29,23 @@ No mpv, FFmpeg, decoder, or companion executable is required.
 - Windows 10 or 11 x64
 - A DirectShow capture-card driver
 - A supported video mode: progressive, uncompressed NV12 or YUY2
-- A 48 kHz stereo PCM audio pin on the same capture filter
+- A 48 kHz stereo PCM audio pin on the same capture filter or a separate
+  DirectShow audio-input filter
+- Clock-drift correction is recommended for long sessions when video and audio
+  are sourced from separate device filters
 - The x64 release package is self-contained and does not require a separate
   Visual C++ Redistributable installation.
 
 GC573 is the recommended and tested device. Other cards are experimental;
-compressed formats, P010, separate USB-audio filters, and automatic device
-reconnect are not supported.
+compressed formats, P010, and automatic device reconnect are not supported.
 
 ## Install and run
 
-1. Run `LowLatencyCaptureViewer_v1.0.2_Setup.exe` and follow the wizard.
+1. Run `LowLatencyCaptureViewer_v1.0.3_Setup.exe` and follow the wizard.
 2. Launch **Low Latency Capture Viewer** from the Start menu or the installed
    executable.
 
-A portable `LowLatencyCaptureViewer_v1.0.2_x64.zip` is also available. Extract
+A portable `LowLatencyCaptureViewer_v1.0.3_x64.zip` is also available. Extract
 it anywhere and run `LowLatencyCaptureViewer.exe`.
 
 Settings and diagnostic logs are stored per user in
@@ -75,6 +79,12 @@ boundary. This happens only in the settings dialog and does not add work to
 the active capture or render path. The settings window shows the detected
 combinations, and disables Start when the selected device has no supported
 uncompressed mode.
+
+`Capture audio device` uses an audio pin on the selected video device first.
+For USB capture devices that expose audio separately, it then looks for a
+matching DirectShow audio-input device by name. If automatic matching is not
+enough, select that USB audio input manually. Diagnostic logs record the failed
+initialization stage and enumerate the filter pins/media types for diagnosis.
 
 For this viewer, **NV12 is the preferred low-latency format**. Its 12-bit-per-
 pixel layout transfers 25% less frame data than 16-bit-per-pixel YUY2 during the
