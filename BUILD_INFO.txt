@@ -1,4 +1,10 @@
-Low Latency Capture Viewer v0.18.0 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v0.18.1 x64 (continued from the v0.14.2 rework)
+
+v0.18.1 settings-help hotfix
+-----------------------------
+- Each settings ? button now activates its own tooltip and detail text. Moving
+  between help buttons reliably closes the previous tooltip before showing the
+  new one.
 
 v0.18.0 settings clarity and monitor defaults
 ----------------------------------------------

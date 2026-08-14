@@ -1,4 +1,10 @@
-Low Latency Capture Viewer v0.18.0 design (continued from v0.14.2)
+Low Latency Capture Viewer v0.18.1 design (continued from v0.14.2)
+
+v0.18.1 tooltip routing hotfix
+------------------------------
+- Tooltip activation now carries the hovered help-control HWND instead of the
+  drift-control HWND. The dialog tracks the active target so changing or
+  leaving a help control hides the correct tooltip.
 
 v0.18.0 settings guidance
 -------------------------
