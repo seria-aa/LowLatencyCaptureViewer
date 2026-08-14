@@ -16,6 +16,7 @@ No mpv, FFmpeg, decoder, or companion executable is required.
 - D3D11 Video Processor, flip-discard swapchain, and maximum frame latency of 1
 - Selectable immediate presentation or VSync
 - WASAPI Shared or Exclusive output, with default-device tracking or a fixed endpoint
+- IAudioClient3 shared-mode period negotiation with automatic classic-WASAPI fallback
 - Independent PCM safety target and optional clock-drift correction
 - Automatic mode detection per selected capture device and resolution; choose from its available pixel formats and frame rates
 - Pixel-perfect 1:1 mode, aspect-ratio-locked resizing, multi-monitor DPI support, and edge snap
@@ -61,6 +62,20 @@ disables Start when the selected device has no supported uncompressed mode.
 disables manual resizing. With it off, the window can be resized while keeping
 the video aspect ratio. Monitor-relative sizing is independent and can change
 the 1:1 size after moving to a differently sized display.
+
+## Low-latency audio
+
+When **WASAPI Shared** is selected, the settings window checks whether the
+chosen endpoint supports `IAudioClient3`. When available, the viewer reads the
+endpoint's supported shared engine periods and starts an event-driven shared
+stream with the closest valid low-latency period using
+`InitializeSharedAudioStream`. It never assumes that a requested 5 or 10 ms
+period is actually available: the supported range is shown in the settings
+window and the active period is reported in the Tab overlay.
+
+If `IAudioClient3` is unavailable for the endpoint or PCM format, the viewer
+automatically falls back to classic WASAPI Shared mode. Exclusive mode remains
+a separate direct-endpoint option; it is not an `IAudioClient3` requirement.
 
 ## Controls
 
