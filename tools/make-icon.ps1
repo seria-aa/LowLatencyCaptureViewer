@@ -29,38 +29,36 @@ function New-IconPng([int]$size) {
     $graphics.Clear([System.Drawing.Color]::Transparent)
     $scale = $size / 256.0
 
+    # Graphite + Coral: a compact capture frame with a single live-signal line.
+    # The icon deliberately avoids small decorative elements so it stays readable at 16 px.
     $outer = New-RoundedPath (12 * $scale) (12 * $scale) (232 * $scale) (232 * $scale) (48 * $scale)
-    $graphics.FillPath([System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 9, 20, 42)), $outer)
-    $graphics.DrawPath([System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 53, 224, 220), (8 * $scale)), $outer)
+    $graphics.FillPath([System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 32, 32, 33)), $outer)
 
-    $screen = New-RoundedPath (43 * $scale) (48 * $scale) (170 * $scale) (130 * $scale) (13 * $scale)
-    $graphics.FillPath([System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 18, 54, 86)), $screen)
-    $graphics.DrawPath([System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 104, 247, 235), (6 * $scale)), $screen)
+    $framePen = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 242, 239, 232), (15 * $scale))
+    $framePen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $framePen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $graphics.DrawLine($framePen, (76 * $scale), (88 * $scale), (76 * $scale), (72 * $scale))
+    $graphics.DrawLine($framePen, (76 * $scale), (72 * $scale), (112 * $scale), (72 * $scale))
+    $graphics.DrawLine($framePen, (180 * $scale), (88 * $scale), (180 * $scale), (72 * $scale))
+    $graphics.DrawLine($framePen, (180 * $scale), (72 * $scale), (144 * $scale), (72 * $scale))
+    $graphics.DrawLine($framePen, (76 * $scale), (168 * $scale), (76 * $scale), (184 * $scale))
+    $graphics.DrawLine($framePen, (76 * $scale), (184 * $scale), (112 * $scale), (184 * $scale))
+    $graphics.DrawLine($framePen, (180 * $scale), (168 * $scale), (180 * $scale), (184 * $scale))
+    $graphics.DrawLine($framePen, (180 * $scale), (184 * $scale), (144 * $scale), (184 * $scale))
 
-    $standPen = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 104, 247, 235), (7 * $scale))
-    $graphics.DrawLine($standPen, (128 * $scale), (181 * $scale), (128 * $scale), (205 * $scale))
-    $graphics.DrawLine($standPen, (89 * $scale), (207 * $scale), (167 * $scale), (207 * $scale))
-
-    $wavePen = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 42, 189, 255), (7 * $scale))
-    $wavePen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $wavePen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
-    [System.Drawing.PointF[]]$points = @(
-        [System.Drawing.PointF]::new((60 * $scale), (128 * $scale)),
-        [System.Drawing.PointF]::new((79 * $scale), (110 * $scale)),
-        [System.Drawing.PointF]::new((98 * $scale), (128 * $scale))
+    $signalPen = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 255, 111, 82), (14 * $scale))
+    $signalPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $signalPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $signalPen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+    [System.Drawing.PointF[]]$signal = @(
+        [System.Drawing.PointF]::new((84 * $scale), (128 * $scale)),
+        [System.Drawing.PointF]::new((109 * $scale), (128 * $scale)),
+        [System.Drawing.PointF]::new((124 * $scale), (97 * $scale)),
+        [System.Drawing.PointF]::new((144 * $scale), (159 * $scale)),
+        [System.Drawing.PointF]::new((157 * $scale), (128 * $scale)),
+        [System.Drawing.PointF]::new((176 * $scale), (128 * $scale))
     )
-    $graphics.DrawLines($wavePen, $points)
-
-    [System.Drawing.PointF[]]$bolt = @(
-        [System.Drawing.PointF]::new((151 * $scale), (64 * $scale)),
-        [System.Drawing.PointF]::new((116 * $scale), (131 * $scale)),
-        [System.Drawing.PointF]::new((140 * $scale), (127 * $scale)),
-        [System.Drawing.PointF]::new((122 * $scale), (191 * $scale)),
-        [System.Drawing.PointF]::new((174 * $scale), (112 * $scale)),
-        [System.Drawing.PointF]::new((147 * $scale), (116 * $scale))
-    )
-    $graphics.FillPolygon([System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 255, 210, 74)), $bolt)
-    $graphics.DrawPolygon([System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 255, 244, 170), (3 * $scale)), $bolt)
+    $graphics.DrawLines($signalPen, $signal)
 
     $stream = [System.IO.MemoryStream]::new()
     $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)

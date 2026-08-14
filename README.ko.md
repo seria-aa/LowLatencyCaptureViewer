@@ -7,7 +7,11 @@ Windows x64용 초저지연 HDMI 캡처 뷰어입니다. DirectShow 캡처카드
 AVerMedia GC573를 기준으로 개발·검증했습니다. 다른 DirectShow 캡처보드는
 영상 필터와 오디오 필터가 분리된 USB 장치까지 실험적으로 지원합니다.
 
-mpv, FFmpeg, 디코더, 별도 실행 파일은 필요하지 않습니다.
+mpv, FFmpeg, 서드파티 코덱 팩, 별도 실행 파일은 필요하지 않습니다.
+
+> **v1.0.6.1 Beta:** Windows Media Foundation 기반의 MJPEG, H.264/AVC,
+> MPEG-4 압축 캡처 호환성을 실험적으로 추가했습니다. 이 모드는 직접 선택하는
+> 베타 기능이며 실제 장치 검증이 필요합니다. 검증된 최저지연 경로는 NV12/YUY2입니다.
 
 ## 주요 기능
 
@@ -21,6 +25,8 @@ mpv, FFmpeg, 디코더, 별도 실행 파일은 필요하지 않습니다.
 - IAudioClient3 기반 Shared 저지연 period 협상 및 기존 WASAPI 자동 대체 경로
 - PCM 안전 대기량과 클록 드리프트 보정을 독립적으로 설정
 - 선택한 장치·해상도별 지원 모드를 자동 인식하고 픽셀 포맷·프레임을 선택
+- 장치가 제공하는 경우 MJPEG, H.264/AVC, MPEG-4를 Windows Media Foundation으로
+  디코딩하는 실험적 호환 모드
 - 픽셀 퍼펙트 1:1, 비율 고정 창 크기 조절, 멀티 모니터 DPI, 가장자리 스냅
 - Tab 실시간 정보창, 선택적 진단 로그, 볼륨 HUD, 백그라운드 자동 음소거
 
@@ -28,23 +34,24 @@ mpv, FFmpeg, 디코더, 별도 실행 파일은 필요하지 않습니다.
 
 - Windows 10/11 x64
 - DirectShow 캡처카드 드라이버
-- progressive 비압축 NV12 또는 YUY2 영상 모드
+- progressive NV12 또는 YUY2 영상 모드. 실험적으로 MJPEG, H.264/AVC, MPEG-4
+  모드도 장치가 제공하면 선택할 수 있습니다.
 - 같은 캡처 필터 또는 별도 DirectShow 오디오 입력 필터의 48 kHz 스테레오 PCM
 - 비디오 장치와 별도 오디오 장치를 함께 쓸 경우, 장시간 사용에는 클록 드리프트
   보정 사용을 권장
 - x64 릴리스 패키지는 Visual C++ Redistributable를 별도로 설치하지 않아도
   실행되도록 포함되어 있습니다.
 
-GC573가 테스트·권장 장치입니다. 다른 장치는 실험적이며, 압축 포맷, P010,
-자동 장치 재연결은 지원하지 않습니다.
+GC573가 테스트·권장 장치입니다. 다른 장치는 실험적입니다. 압축 포맷은 베타
+호환 모드이며, P010과 자동 장치 재연결은 지원하지 않습니다.
 
 ## 설치 및 실행
 
-1. `LowLatencyCaptureViewer_v1.0.6_Setup.exe`를 실행하고 설치합니다.
+1. `LowLatencyCaptureViewer_v1.0.6.1_Setup.exe`를 실행하고 설치합니다.
 2. 시작 메뉴의 **Low Latency Capture Viewer** 또는 설치된 실행 파일을
    실행합니다.
 
-포터블판 `LowLatencyCaptureViewer_v1.0.6_x64.zip`도 함께 제공합니다. 원하는
+포터블판 `LowLatencyCaptureViewer_v1.0.6.1_x64.zip`도 함께 제공합니다. 원하는
 폴더에 압축을 풀고 `LowLatencyCaptureViewer.exe`를 실행하면 됩니다.
 
 설정과 진단 로그는 사용자별로

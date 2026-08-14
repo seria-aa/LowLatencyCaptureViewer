@@ -1,4 +1,4 @@
-Low Latency Capture Viewer v1.0.6 design (continued from v0.14.2)
+Low Latency Capture Viewer v1.0.6.1 Beta design (continued from v0.14.2)
 
 v1.0.1 language selection
 -------------------------

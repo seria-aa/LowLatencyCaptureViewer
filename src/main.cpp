@@ -33,6 +33,10 @@
 #include <shellscalingapi.h>
 #include <commctrl.h>
 #include <functiondiscoverykeys_devpkey.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mftransform.h>
+#include <mferror.h>
 
 #include <atomic>
 #include <chrono>
@@ -81,6 +85,12 @@ static const CLSID CLSID_SampleGrabber =
 static const CLSID CLSID_NullRenderer =
 {0xC1F400A4,0x3F08,0x11D3,{0x9F,0x0B,0x00,0x60,0x08,0x03,0x9E,0x37}};
 
+// wmcodecdsp.h declares MEDIASUBTYPE_AVC1 as an imported symbol. Keep the
+// FOURCC GUID local so AVC1-only UVC devices do not add a runtime dependency
+// on a legacy Windows Media codec library.
+static const GUID kMediaSubtypeAvc1 =
+{0x31435641,0x0000,0x0010,{0x80,0x00,0x00,0xaa,0x00,0x38,0x9b,0x71}};
+
 // -----------------------------------------------------------------------------
 // User-tested settings.
 // -----------------------------------------------------------------------------
@@ -92,8 +102,10 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
+constexpr wchar_t kAppVersionLabel[] = L"v1.0.6.1 Beta";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
+constexpr int kMaximumVolumePercent = 200;
 static constexpr int kWasapiBufferOptionsMs[] = {5, 10, 15, 20, 30, 40};
 constexpr int kRecommendedWasapiBufferMs = 20;
 static constexpr int kPcmQueueOptionsMs[] = {10, 15, 20, 30};
@@ -136,6 +148,9 @@ enum class VideoPixelFormat {
     Auto,
     Nv12,
     Yuy2,
+    Mjpeg,
+    H264,
+    Mpeg4,
 };
 
 enum class UiLanguage {
@@ -168,6 +183,7 @@ struct AppSettings {
     DriftCorrectionMode driftCorrection = DriftCorrectionMode::Off;
     int pcmQueueTargetMs = kLowestPcmQueueMs;
     int volumePercent = 100;
+    bool allowVolumeBoost = false;
     VolumeHudPosition volumeHudPosition = VolumeHudPosition::TopLeft;
     bool muteWhenBackground = false;
     PresentationMode presentationMode = PresentationMode::AllowTearing;
@@ -244,6 +260,9 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"자동 선택 (권장 프레임)", L"Auto select (recommended frame rate)"},
         {L"지원 포맷 없음", L"No supported format"},
         {L"자동 선택 (NV12 우선 · 권장)", L"Auto select (NV12 first · recommended)"},
+        {L"MJPEG (실험적 압축 호환)", L"MJPEG (experimental compressed compatibility)"},
+        {L"H.264 / AVC (실험적 압축 호환)", L"H.264 / AVC (experimental compressed compatibility)"},
+        {L"MPEG-4 (실험적 압축 호환)", L"MPEG-4 (experimental compressed compatibility)"},
         {L"오디오 출력 모드", L"Audio output mode"},
         {L"WASAPI Shared (호환성 우선 · 권장)", L"WASAPI Shared (compatibility · recommended)"},
         {L"WASAPI Exclusive (지연 최소화 · 장치 독점)", L"WASAPI Exclusive (minimum latency · exclusive device)"},
@@ -252,6 +271,7 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L" (현재 기본)", L" (current default)"},
         {L"WASAPI 출력 버퍼", L"WASAPI output buffer"},
         {L"볼륨 HUD 위치", L"Volume HUD position"},
+        {L"100% 이상 볼륨 증폭 허용 (최대 200%)", L"Allow volume boost above 100% (up to 200%)"},
         {L"좌측 상단 (기본)", L"Top-left (default)"},
         {L"우측 상단", L"Top-right"},
         {L"좌측 하단", L"Bottom-left"},
@@ -322,6 +342,7 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"PCM 연산 우회", L"PCM processing bypassed"},
         {L"음소거", L"Muted"},
         {L"PCM 감쇠 적용", L"PCM attenuation applied"},
+        {L"PCM 증폭 적용", L"PCM boost applied"},
         {L"자동 리샘플링", L"Automatic resampling"},
         {L"끔 (원본 PCM)", L"Off (unaltered PCM)"},
         {L"Pixel-perfect 시작 · Monitor-relative 이동", L"Pixel-perfect start · monitor-relative move"},
@@ -436,6 +457,9 @@ static int TeeFwprintf(FILE* stream, const wchar_t* format, ...) {
 
 static const wchar_t* PixelFormatName(VideoPixelFormat format) {
     switch (format) {
+    case VideoPixelFormat::Mjpeg: return L"MJPEG";
+    case VideoPixelFormat::H264: return L"H.264";
+    case VideoPixelFormat::Mpeg4: return L"MPEG-4";
     case VideoPixelFormat::Yuy2: return L"YUY2";
     case VideoPixelFormat::Nv12: return L"NV12";
     default: return L"Auto";
@@ -443,13 +467,40 @@ static const wchar_t* PixelFormatName(VideoPixelFormat format) {
 }
 
 static const GUID& PixelFormatSubtype(VideoPixelFormat format) {
-    return format == VideoPixelFormat::Yuy2
-               ? MEDIASUBTYPE_YUY2 : MEDIASUBTYPE_NV12;
+    switch (format) {
+    case VideoPixelFormat::Mjpeg: return MEDIASUBTYPE_MJPG;
+    case VideoPixelFormat::H264: return MEDIASUBTYPE_H264;
+    case VideoPixelFormat::Mpeg4: return MFVideoFormat_MP4V;
+    case VideoPixelFormat::Yuy2: return MEDIASUBTYPE_YUY2;
+    default: return MEDIASUBTYPE_NV12;
+    }
+}
+
+static bool IsCompressedVideoFormat(VideoPixelFormat format) {
+    return format == VideoPixelFormat::Mjpeg ||
+           format == VideoPixelFormat::H264 ||
+           format == VideoPixelFormat::Mpeg4;
+}
+
+static VideoPixelFormat VideoPixelFormatFromSubtype(const GUID& subtype) {
+    if (subtype == MEDIASUBTYPE_NV12) return VideoPixelFormat::Nv12;
+    if (subtype == MEDIASUBTYPE_YUY2) return VideoPixelFormat::Yuy2;
+    if (subtype == MEDIASUBTYPE_MJPG || subtype == MFVideoFormat_MJPG) {
+        return VideoPixelFormat::Mjpeg;
+    }
+    if (subtype == MEDIASUBTYPE_H264 || subtype == kMediaSubtypeAvc1 ||
+        subtype == MFVideoFormat_H264) {
+        return VideoPixelFormat::H264;
+    }
+    if (subtype == MFVideoFormat_MP4V) return VideoPixelFormat::Mpeg4;
+    return VideoPixelFormat::Auto;
 }
 
 static DXGI_FORMAT PixelFormatDxgi(VideoPixelFormat format) {
-    return format == VideoPixelFormat::Yuy2
-               ? DXGI_FORMAT_YUY2 : DXGI_FORMAT_NV12;
+    switch (format) {
+    case VideoPixelFormat::Yuy2: return DXGI_FORMAT_YUY2;
+    default: return DXGI_FORMAT_NV12;
+    }
 }
 
 static bool OsdTrackingActive() {
@@ -882,6 +933,7 @@ static void LoadSettings() {
     wchar_t driftCorrection[32]{};
     wchar_t pcmQueueTargetMs[16]{};
     wchar_t volume[16]{};
+    wchar_t allowVolumeBoost[8]{};
     wchar_t volumeHudPosition[32]{};
     wchar_t muteWhenBackground[8]{};
     wchar_t audioOutputDeviceId[1024]{};
@@ -924,6 +976,9 @@ static void LoadSettings() {
                              path.c_str());
     GetPrivateProfileStringW(L"Audio", L"Volume", L"100", volume,
                              ARRAYSIZE(volume), path.c_str());
+    GetPrivateProfileStringW(L"Audio", L"AllowVolumeBoost", L"0",
+                             allowVolumeBoost, ARRAYSIZE(allowVolumeBoost),
+                             path.c_str());
     GetPrivateProfileStringW(L"Audio", L"VolumeHudPosition", L"TopLeft",
                              volumeHudPosition,
                              ARRAYSIZE(volumeHudPosition), path.c_str());
@@ -1015,10 +1070,14 @@ static void LoadSettings() {
             }
         }
     }
+    g_settings.allowVolumeBoost =
+        wcstol(allowVolumeBoost, nullptr, 10) != 0;
     const int loadedVolume = std::clamp(
-        static_cast<int>(wcstol(volume, nullptr, 10)), 0, 100);
+        static_cast<int>(wcstol(volume, nullptr, 10)), 0,
+        g_settings.allowVolumeBoost ? kMaximumVolumePercent : 100);
     g_settings.volumePercent =
-        std::clamp(((loadedVolume + 2) / 5) * 5, 0, 100);
+        std::clamp(((loadedVolume + 2) / 5) * 5, 0,
+                   g_settings.allowVolumeBoost ? kMaximumVolumePercent : 100);
     if (_wcsicmp(volumeHudPosition, L"TopRight") == 0) {
         g_settings.volumeHudPosition = VolumeHudPosition::TopRight;
     } else if (_wcsicmp(volumeHudPosition, L"BottomLeft") == 0) {
@@ -1044,6 +1103,14 @@ static void LoadSettings() {
         g_settings.pixelFormat = VideoPixelFormat::Nv12;
     } else if (_wcsicmp(pixelFormat, L"YUY2") == 0) {
         g_settings.pixelFormat = VideoPixelFormat::Yuy2;
+    } else if (_wcsicmp(pixelFormat, L"MJPEG") == 0) {
+        g_settings.pixelFormat = VideoPixelFormat::Mjpeg;
+    } else if (_wcsicmp(pixelFormat, L"H.264") == 0 ||
+               _wcsicmp(pixelFormat, L"H264") == 0) {
+        g_settings.pixelFormat = VideoPixelFormat::H264;
+    } else if (_wcsicmp(pixelFormat, L"MPEG-4") == 0 ||
+               _wcsicmp(pixelFormat, L"MP4V") == 0) {
+        g_settings.pixelFormat = VideoPixelFormat::Mpeg4;
     } else {
         g_settings.pixelFormat = VideoPixelFormat::Auto;
     }
@@ -1113,6 +1180,9 @@ static void SaveSettings() {
     wchar_t volume[16]{};
     swprintf_s(volume, L"%d", g_settings.volumePercent);
     WritePrivateProfileStringW(L"Audio", L"Volume", volume, path.c_str());
+    WritePrivateProfileStringW(L"Audio", L"AllowVolumeBoost",
+                               g_settings.allowVolumeBoost ? L"1" : L"0",
+                               path.c_str());
     const wchar_t* hudPosition = L"TopLeft";
     switch (g_settings.volumeHudPosition) {
     case VolumeHudPosition::TopRight: hudPosition = L"TopRight"; break;
@@ -2323,8 +2393,11 @@ public:
     }
 
     void push(IMediaSample* sample) {
-        if (!sample || sample->GetActualDataLength() <
-                           static_cast<long>(expectedBytes_)) return;
+        if (!sample || sample->GetActualDataLength() <= 0 ||
+            (expectedBytes_ != 0 && sample->GetActualDataLength() <
+                                      static_cast<long>(expectedBytes_))) {
+            return;
+        }
         const int64_t arrivalUs =
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -2423,19 +2496,320 @@ static void DeleteMediaType(AM_MEDIA_TYPE* mediaType) {
     CoTaskMemFree(mediaType);
 }
 
+// Experimental compressed compatibility path. DirectShow still owns device
+// capture and supplies the newest compressed access unit; a synchronous Media
+// Foundation decoder expands it to NV12 for the existing D3D11 renderer.
+// Keeping only the newest sample before decode prevents application-side
+// queues from accumulating when a decoder cannot keep up.
+class MediaFoundationCompressedDecoder {
+public:
+    ~MediaFoundationCompressedDecoder() { reset(); }
+
+    HRESULT initialize(VideoPixelFormat inputFormat, int width, int height,
+                       int fps, const AM_MEDIA_TYPE* captureType) {
+        reset();
+        if (!IsCompressedVideoFormat(inputFormat) || width <= 0 ||
+            height <= 0 || fps <= 0) {
+            return E_INVALIDARG;
+        }
+
+        HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+        if (FAILED(hr)) return hr;
+        mfStarted_ = true;
+
+        IMFMediaType* inputType = nullptr;
+        hr = MFCreateMediaType(&inputType);
+        if (SUCCEEDED(hr)) hr = inputType->SetGUID(MF_MT_MAJOR_TYPE,
+                                                    MFMediaType_Video);
+        if (SUCCEEDED(hr)) hr = inputType->SetGUID(MF_MT_SUBTYPE,
+                                                    PixelFormatSubtype(inputFormat));
+        if (SUCCEEDED(hr)) hr = MFSetAttributeSize(inputType, MF_MT_FRAME_SIZE,
+                                                    width, height);
+        if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(inputType, MF_MT_FRAME_RATE,
+                                                     fps, 1);
+        if (SUCCEEDED(hr)) hr = inputType->SetUINT32(
+            MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+        if (SUCCEEDED(hr)) hr = inputType->SetUINT32(
+            MF_MT_ALL_SAMPLES_INDEPENDENT,
+            inputFormat == VideoPixelFormat::Mjpeg ? TRUE : FALSE);
+        if (SUCCEEDED(hr)) {
+            CopyMpegSequenceHeader(captureType, inputType);
+        }
+        if (FAILED(hr)) {
+            SafeRelease(inputType);
+            reset();
+            return hr;
+        }
+
+        MFT_REGISTER_TYPE_INFO inputInfo{};
+        inputInfo.guidMajorType = MFMediaType_Video;
+        inputInfo.guidSubtype = PixelFormatSubtype(inputFormat);
+        MFT_REGISTER_TYPE_INFO outputInfo{};
+        outputInfo.guidMajorType = MFMediaType_Video;
+        outputInfo.guidSubtype = MFVideoFormat_NV12;
+        IMFActivate** activations = nullptr;
+        UINT32 activationCount = 0;
+        hr = MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER,
+                       MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT |
+                           MFT_ENUM_FLAG_SORTANDFILTER,
+                       &inputInfo, &outputInfo, &activations, &activationCount);
+        if (FAILED(hr) || activationCount == 0) {
+            if (SUCCEEDED(hr)) hr = MF_E_TOPO_CODEC_NOT_FOUND;
+            SafeRelease(inputType);
+            if (activations) CoTaskMemFree(activations);
+            reset();
+            return hr;
+        }
+
+        HRESULT finalHr = MF_E_TOPO_CODEC_NOT_FOUND;
+        for (UINT32 i = 0; i < activationCount; ++i) {
+            IMFTransform* candidate = nullptr;
+            const HRESULT activateHr = activations[i]->ActivateObject(
+                IID_PPV_ARGS(&candidate));
+            if (SUCCEEDED(activateHr)) {
+                IMFAttributes* attributes = nullptr;
+                if (SUCCEEDED(candidate->QueryInterface(IID_PPV_ARGS(&attributes)))) {
+                    attributes->SetUINT32(MF_LOW_LATENCY, TRUE);
+                    SafeRelease(attributes);
+                }
+                HRESULT candidateHr = candidate->SetInputType(0, inputType, 0);
+                if (SUCCEEDED(candidateHr)) {
+                    candidateHr = SetNv12OutputType(candidate);
+                }
+                if (SUCCEEDED(candidateHr)) {
+                    candidateHr = candidate->GetOutputStreamInfo(0, &outputInfo_);
+                }
+                if (SUCCEEDED(candidateHr)) {
+                    transform_ = candidate;
+                    candidate = nullptr;
+                    width_ = width;
+                    height_ = height;
+                    UINT32 defaultStride = 0;
+                    if (outputType_) {
+                        outputType_->GetUINT32(MF_MT_DEFAULT_STRIDE,
+                                                &defaultStride);
+                    }
+                    stride_ = defaultStride
+                        ? static_cast<LONG>(defaultStride)
+                        : static_cast<LONG>(width_);
+                    bufferBytes_ = (std::max)(outputInfo_.cbSize,
+                        static_cast<DWORD>(width_) * static_cast<DWORD>(height_) *
+                            3u / 2u);
+                    transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+                    transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+                    fwprintf(stderr,
+                             L"[video] Media Foundation compressed decoder: %s -> NV12, "
+                             L"synchronous low-latency mode, output stride %ld.\n",
+                             PixelFormatName(inputFormat), stride_);
+                    finalHr = S_OK;
+                } else {
+                    finalHr = candidateHr;
+                }
+            } else {
+                finalHr = activateHr;
+            }
+            SafeRelease(candidate);
+            activations[i]->Release();
+        }
+        CoTaskMemFree(activations);
+        SafeRelease(inputType);
+        if (FAILED(finalHr)) reset();
+        return finalHr;
+    }
+
+    // Returns S_OK without an output frame while the decoder is waiting for
+    // enough input. When several frames become available, only the newest is
+    // returned to the caller.
+    HRESULT decode(IMediaSample* directShowSample, IMFMediaBuffer** output) {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (!transform_ || !directShowSample) return MF_E_NOT_INITIALIZED;
+
+        BYTE* source = nullptr;
+        const long sourceLength = directShowSample->GetActualDataLength();
+        HRESULT hr = directShowSample->GetPointer(&source);
+        if (FAILED(hr) || !source || sourceLength <= 0) {
+            return FAILED(hr) ? hr : E_FAIL;
+        }
+
+        IMFSample* inputSample = nullptr;
+        IMFMediaBuffer* inputBuffer = nullptr;
+        hr = MFCreateSample(&inputSample);
+        if (SUCCEEDED(hr)) hr = MFCreateMemoryBuffer(
+            static_cast<DWORD>(sourceLength), &inputBuffer);
+        BYTE* destination = nullptr;
+        if (SUCCEEDED(hr)) hr = inputBuffer->Lock(&destination, nullptr, nullptr);
+        if (SUCCEEDED(hr)) {
+            memcpy(destination, source, static_cast<size_t>(sourceLength));
+            inputBuffer->Unlock();
+            destination = nullptr;
+            hr = inputBuffer->SetCurrentLength(static_cast<DWORD>(sourceLength));
+        }
+        if (SUCCEEDED(hr)) hr = inputSample->AddBuffer(inputBuffer);
+        REFERENCE_TIME start = 0;
+        REFERENCE_TIME stop = 0;
+        if (SUCCEEDED(directShowSample->GetTime(&start, &stop))) {
+            inputSample->SetSampleTime(start);
+            if (stop > start) inputSample->SetSampleDuration(stop - start);
+        }
+        if (FAILED(hr)) {
+            if (destination) inputBuffer->Unlock();
+            SafeRelease(inputBuffer);
+            SafeRelease(inputSample);
+            return hr;
+        }
+
+        IMFMediaBuffer* newest = nullptr;
+        for (;;) {
+            hr = transform_->ProcessInput(0, inputSample, 0);
+            if (hr != MF_E_NOTACCEPTING) break;
+            HRESULT drainHr = PullOutput(&newest);
+            if (drainHr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+                hr = MF_E_NOTACCEPTING;
+                break;
+            }
+            if (FAILED(drainHr)) {
+                hr = drainHr;
+                break;
+            }
+        }
+        SafeRelease(inputBuffer);
+        SafeRelease(inputSample);
+        if (FAILED(hr)) {
+            SafeRelease(newest);
+            return hr;
+        }
+
+        for (;;) {
+            HRESULT outputHr = PullOutput(&newest);
+            if (outputHr == MF_E_TRANSFORM_NEED_MORE_INPUT) break;
+            if (FAILED(outputHr)) {
+                SafeRelease(newest);
+                return outputHr;
+            }
+        }
+        *output = newest;
+        return S_OK;
+    }
+
+    LONG stride() const { return stride_; }
+
+    void reset() {
+        if (transform_) {
+            transform_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+            transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+        }
+        SafeRelease(outputType_);
+        SafeRelease(transform_);
+        outputInfo_ = {};
+        bufferBytes_ = 0;
+        stride_ = 0;
+        width_ = 0;
+        height_ = 0;
+        if (mfStarted_) {
+            MFShutdown();
+            mfStarted_ = false;
+        }
+    }
+
+private:
+    static void CopyMpegSequenceHeader(const AM_MEDIA_TYPE* captureType,
+                                       IMFMediaType* destination) {
+        if (!captureType || !destination ||
+            captureType->formattype != FORMAT_MPEG2Video ||
+            captureType->cbFormat < FIELD_OFFSET(MPEG2VIDEOINFO,
+                                                  dwSequenceHeader)) {
+            return;
+        }
+        const auto* info = reinterpret_cast<const MPEG2VIDEOINFO*>(
+            captureType->pbFormat);
+        const size_t available = captureType->cbFormat -
+            FIELD_OFFSET(MPEG2VIDEOINFO, dwSequenceHeader);
+        if (!info->cbSequenceHeader || info->cbSequenceHeader > available) return;
+        destination->SetBlob(MF_MT_MPEG_SEQUENCE_HEADER,
+                             reinterpret_cast<const UINT8*>(
+                                 info->dwSequenceHeader),
+                             info->cbSequenceHeader);
+    }
+
+    HRESULT SetNv12OutputType(IMFTransform* transform) {
+        SafeRelease(outputType_);
+        for (DWORD index = 0;; ++index) {
+            IMFMediaType* candidate = nullptr;
+            HRESULT hr = transform->GetOutputAvailableType(0, index, &candidate);
+            if (FAILED(hr)) return hr;
+            GUID subtype{};
+            const HRESULT subtypeHr = candidate->GetGUID(MF_MT_SUBTYPE, &subtype);
+            if (SUCCEEDED(subtypeHr) && subtype == MFVideoFormat_NV12) {
+                hr = transform->SetOutputType(0, candidate, 0);
+                if (SUCCEEDED(hr)) {
+                    outputType_ = candidate;
+                    return S_OK;
+                }
+            }
+            SafeRelease(candidate);
+        }
+    }
+
+    HRESULT PullOutput(IMFMediaBuffer** newest) {
+        if (!newest) return E_POINTER;
+        IMFSample* suppliedSample = nullptr;
+        MFT_OUTPUT_DATA_BUFFER output{};
+        if ((outputInfo_.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0) {
+            HRESULT hr = MFCreateSample(&suppliedSample);
+            if (SUCCEEDED(hr)) {
+                IMFMediaBuffer* suppliedBuffer = nullptr;
+                hr = MFCreateMemoryBuffer(bufferBytes_, &suppliedBuffer);
+                if (SUCCEEDED(hr)) hr = suppliedSample->AddBuffer(suppliedBuffer);
+                SafeRelease(suppliedBuffer);
+            }
+            if (FAILED(hr)) {
+                SafeRelease(suppliedSample);
+                return hr;
+            }
+            output.pSample = suppliedSample;
+        }
+        DWORD status = 0;
+        HRESULT hr = transform_->ProcessOutput(0, 1, &output, &status);
+        SafeRelease(output.pEvents);
+        if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
+            SafeRelease(output.pSample);
+            return SetNv12OutputType(transform_);
+        }
+        if (SUCCEEDED(hr) && output.pSample) {
+            IMFMediaBuffer* buffer = nullptr;
+            hr = output.pSample->ConvertToContiguousBuffer(&buffer);
+            if (SUCCEEDED(hr)) {
+                SafeRelease(*newest);
+                *newest = buffer;
+            }
+        }
+        SafeRelease(output.pSample);
+        return hr;
+    }
+
+    IMFTransform* transform_ = nullptr;
+    IMFMediaType* outputType_ = nullptr;
+    MFT_OUTPUT_STREAM_INFO outputInfo_{};
+    DWORD bufferBytes_ = 0;
+    LONG stride_ = 0;
+    int width_ = 0;
+    int height_ = 0;
+    bool mfStarted_ = false;
+};
+
 static bool VideoFormatDetails(const AM_MEDIA_TYPE* mediaType, int& width,
                                int& height, REFERENCE_TIME& frameDuration,
                                DWORD& imageBytes,
                                VideoPixelFormat* pixelFormat = nullptr) {
-    if (!mediaType || mediaType->majortype != MEDIATYPE_Video ||
-        (mediaType->subtype != MEDIASUBTYPE_NV12 &&
-         mediaType->subtype != MEDIASUBTYPE_YUY2)) {
+    if (!mediaType || mediaType->majortype != MEDIATYPE_Video) {
         return false;
     }
+    const VideoPixelFormat detected =
+        VideoPixelFormatFromSubtype(mediaType->subtype);
+    if (detected == VideoPixelFormat::Auto) return false;
     if (pixelFormat) {
-        *pixelFormat = mediaType->subtype == MEDIASUBTYPE_YUY2
-                           ? VideoPixelFormat::Yuy2
-                           : VideoPixelFormat::Nv12;
+        *pixelFormat = detected;
     }
     const BITMAPINFOHEADER* bitmap = nullptr;
     frameDuration = 0;
@@ -2451,6 +2825,13 @@ static bool VideoFormatDetails(const AM_MEDIA_TYPE* mediaType, int& width,
             reinterpret_cast<const VIDEOINFOHEADER*>(mediaType->pbFormat);
         bitmap = &info->bmiHeader;
         frameDuration = info->AvgTimePerFrame;
+    } else if (mediaType->formattype == FORMAT_MPEG2Video &&
+               mediaType->cbFormat >=
+                   FIELD_OFFSET(MPEG2VIDEOINFO, dwSequenceHeader)) {
+        const auto* info =
+            reinterpret_cast<const MPEG2VIDEOINFO*>(mediaType->pbFormat);
+        bitmap = &info->hdr.bmiHeader;
+        frameDuration = info->hdr.AvgTimePerFrame;
     }
     if (!bitmap) return false;
     width = static_cast<int>(bitmap->biWidth);
@@ -2501,8 +2882,12 @@ static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
                             ? static_cast<int>((10'000'000 + duration / 2) /
                                                duration)
                             : 0;
-        const bool formatMatches =
-            wantedFormat == VideoPixelFormat::Auto || format == wantedFormat;
+        // Compressed capture is opt-in. Auto preserves the original raw
+        // NV12/YUY2 path even when the device advertises alternatives.
+        const bool formatMatches = wantedFormat == VideoPixelFormat::Auto
+            ? format == VideoPixelFormat::Nv12 ||
+              format == VideoPixelFormat::Yuy2
+            : format == wantedFormat;
         if (details && formatMatches && width == wantedWidth &&
             height == wantedHeight && fps > 0) {
             candidates.push_back({candidate, fps, bytes, format});
@@ -2525,7 +2910,17 @@ static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
                                  const FormatCandidate& b) {
             if (wantedFormat == VideoPixelFormat::Auto &&
                 a.format != b.format) {
-                return a.format == VideoPixelFormat::Nv12;
+                const auto rank = [](VideoPixelFormat format) {
+                    switch (format) {
+                    case VideoPixelFormat::Nv12: return 0;
+                    case VideoPixelFormat::Yuy2: return 1;
+                    case VideoPixelFormat::Mjpeg: return 2;
+                    case VideoPixelFormat::H264: return 3;
+                    case VideoPixelFormat::Mpeg4: return 4;
+                    default: return 5;
+                    }
+                };
+                return rank(a.format) < rank(b.format);
             }
             if (a.fps == wantedFps || b.fps == wantedFps) {
                 return a.fps == wantedFps && b.fps != wantedFps;
@@ -2550,7 +2945,7 @@ static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
         imageBytes = selected->imageBytes;
         configuredFps = selected->fps;
         configuredFormat = selected->format;
-        if (!imageBytes) {
+        if (!imageBytes && !IsCompressedVideoFormat(configuredFormat)) {
             imageBytes = static_cast<DWORD>(
                 configuredFormat == VideoPixelFormat::Yuy2
                     ? wantedWidth * wantedHeight * 2
@@ -2565,10 +2960,10 @@ static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
                                              VideoPixelFormat::Yuy2
             ? static_cast<UINT32>(wantedWidth * 2)
             : static_cast<UINT32>(wantedWidth);
-        stride = static_cast<UINT32>(derivedStride >=
-                                             minimumStride
-                                         ? derivedStride
-                                         : minimumStride);
+        stride = IsCompressedVideoFormat(configuredFormat)
+            ? 0
+            : static_cast<UINT32>(derivedStride >= minimumStride
+                                      ? derivedStride : minimumStride);
         if (configuredFps != wantedFps) {
             fwprintf(stderr,
                      L"[video] requested %s %dx%d @ %d unavailable; "
@@ -2580,6 +2975,17 @@ static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
     for (auto& candidate : candidates) {
         DeleteMediaType(candidate.mediaType);
     }
+    SafeRelease(config);
+    return hr;
+}
+
+static HRESULT GetActiveVideoPinFormat(IPin* videoPin,
+                                       AM_MEDIA_TYPE** mediaType) {
+    if (!videoPin || !mediaType) return E_POINTER;
+    *mediaType = nullptr;
+    IAMStreamConfig* config = nullptr;
+    HRESULT hr = videoPin->QueryInterface(IID_PPV_ARGS(&config));
+    if (SUCCEEDED(hr)) hr = config->GetFormat(mediaType);
     SafeRelease(config);
     return hr;
 }
@@ -2634,7 +3040,17 @@ static std::vector<PixelFormatSupport> ProbePixelFormats(
               [](const PixelFormatSupport& left,
                  const PixelFormatSupport& right) {
                   if (left.format != right.format) {
-                      return left.format == VideoPixelFormat::Nv12;
+                      const auto rank = [](VideoPixelFormat format) {
+                          switch (format) {
+                          case VideoPixelFormat::Nv12: return 0;
+                          case VideoPixelFormat::Yuy2: return 1;
+                          case VideoPixelFormat::Mjpeg: return 2;
+                          case VideoPixelFormat::H264: return 3;
+                          case VideoPixelFormat::Mpeg4: return 4;
+                          default: return 5;
+                          }
+                      };
+                      return rank(left.format) < rank(right.format);
                   }
                   return left.selectedFps > right.selectedFps;
               });
@@ -3214,9 +3630,12 @@ struct DirectD3D11Renderer {
         volumeCacheTarget->FillRectangle(
             volumeBarBackground, volumeCacheBarBackgroundBrush);
         D2D1_RECT_F volumeBar = volumeBarBackground;
+        const int volumeBarMaximum = g_settings.allowVolumeBoost
+            ? kMaximumVolumePercent : 100;
         volumeBar.right = volumeBar.left +
             (volumeBarBackground.right - volumeBarBackground.left) *
-                g_volumePercent.load(std::memory_order_acquire) / 100.0f;
+                g_volumePercent.load(std::memory_order_acquire) /
+                static_cast<float>(volumeBarMaximum);
         if (volumeBar.right > volumeBar.left) {
             volumeCacheTarget->FillRectangle(volumeBar,
                                              volumeCacheBarBrush);
@@ -3386,10 +3805,12 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
     IPin* audioGrabberOut = nullptr;
     IPin* audioNullIn = nullptr;
     SampleGrabberCB* audioCallback = nullptr;
+    AM_MEDIA_TYPE* activeVideoType = nullptr;
     HANDLE frameEvent = nullptr;
     bool initialized = false;
     const wchar_t* initializationStage = L"create DirectShow graph";
     DirectD3D11Renderer renderer;
+    MediaFoundationCompressedDecoder compressedDecoder;
 
     do {
         initializationStage = L"create DirectShow graph";
@@ -3423,9 +3844,15 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                                imageBytes, stride, configuredFps,
                                configuredFormat);
         if (FAILED(hr)) {
-            LogHr(L"ConfigureVideoPin(uncompressed exact format)", hr);
+            LogHr(L"ConfigureVideoPin(exact format)", hr);
             break;
         }
+        initializationStage = L"read active video capture format";
+        hr = GetActiveVideoPinFormat(videoPin, &activeVideoType);
+        if (FAILED(hr) || !activeVideoType) break;
+        const bool compressedVideo = IsCompressedVideoFormat(configuredFormat);
+        const VideoPixelFormat rendererInputFormat = compressedVideo
+            ? VideoPixelFormat::Nv12 : configuredFormat;
         g_activePixelFormat.store(static_cast<int>(configuredFormat),
                                   std::memory_order_release);
 
@@ -3433,16 +3860,26 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                                    std::memory_order_release);
         initializationStage = L"initialize D3D11 video renderer";
         hr = renderer.initialize(host, preset.width, preset.height,
-                                 configuredFps, configuredFormat);
+                                 configuredFps, rendererInputFormat);
         if (FAILED(hr)) {
             LogHr(L"DirectD3D11Renderer::initialize", hr);
             break;
+        }
+        if (compressedVideo) {
+            initializationStage = L"initialize Media Foundation compressed decoder";
+            hr = compressedDecoder.initialize(configuredFormat, preset.width,
+                                              preset.height, configuredFps,
+                                              activeVideoType);
+            if (FAILED(hr)) {
+                LogHr(L"Media Foundation compressed decoder", hr);
+                break;
+            }
         }
         UpdateConfiguredVideoTitle(host, configuredFps);
 
         frameEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!frameEvent) { hr = HRESULT_FROM_WIN32(GetLastError()); break; }
-        LatestNv12Sample latest(imageBytes, frameEvent);
+        LatestNv12Sample latest(compressedVideo ? 0 : imageBytes, frameEvent);
 
         initializationStage = L"build video sample path";
         hr = CoCreateInstance(CLSID_SampleGrabber, nullptr,
@@ -3457,7 +3894,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         if (FAILED(hr)) break;
         AM_MEDIA_TYPE requested{};
         requested.majortype = MEDIATYPE_Video;
-        requested.subtype = PixelFormatSubtype(configuredFormat);
+        requested.subtype = activeVideoType->subtype;
         requested.formattype = GUID_NULL;
         hr = grabber->SetMediaType(&requested);
         if (FAILED(hr)) break;
@@ -3483,7 +3920,6 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                                              nullptr))) break;
         if (FAILED(hr = graph->ConnectDirect(grabberOut, nullIn,
                                              nullptr))) break;
-
         // Prefer an audio pin on the selected video filter. Many USB UVC
         // capture devices instead expose their capture audio as a separate
         // DirectShow audio-input filter, which is added to this same graph.
@@ -3584,9 +4020,15 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         fwprintf(stderr,
                  L"[video] upload ring: %u %s GPU surfaces; update: %s\n",
                  DirectD3D11Renderer::kUploadSurfaceCount,
-                 PixelFormatName(configuredFormat),
+                 PixelFormatName(rendererInputFormat),
                  renderer.discardUpdateAvailable
                      ? L"D3D11.1 discard" : L"D3D11 fallback");
+        if (compressedVideo) {
+            fwprintf(stderr,
+                     L"[video] experimental compressed path: %s capture -> "
+                     L"Media Foundation NV12 decode -> D3D11; latest frame only.\n",
+                     PixelFormatName(configuredFormat));
+        }
 
         auto recoverRenderer = [&](const wchar_t* failedStage,
                                    HRESULT failure) {
@@ -3605,7 +4047,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                 if (retryDelaysMs[attempt]) Sleep(retryDelaysMs[attempt]);
                 const HRESULT recoveryHr = renderer.initialize(
                     host, preset.width, preset.height, configuredFps,
-                    configuredFormat);
+                    rendererInputFormat);
                 if (SUCCEEDED(recoveryHr)) {
                     const bool recoveredTearing = renderer.allowTearing &&
                         g_settings.presentationMode ==
@@ -3647,16 +4089,43 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             IMediaSample* videoSample = latest.takeLatest(arrivalUs);
             if (!videoSample) continue;
             BYTE* sampleData = nullptr;
-            hr = videoSample->GetPointer(&sampleData);
-            if (SUCCEEDED(hr) && sampleData) {
-                renderer.upload(sampleData, stride);
+            IMFMediaBuffer* decodedBuffer = nullptr;
+            if (compressedVideo) {
+                hr = compressedDecoder.decode(videoSample, &decodedBuffer);
+                if (SUCCEEDED(hr) && decodedBuffer) {
+                    DWORD maximum = 0;
+                    DWORD current = 0;
+                    hr = decodedBuffer->Lock(&sampleData, &maximum, &current);
+                    if (SUCCEEDED(hr) && sampleData && current != 0 &&
+                        compressedDecoder.stride() > 0) {
+                        renderer.upload(sampleData,
+                                        static_cast<UINT32>(
+                                            compressedDecoder.stride()));
+                    } else if (SUCCEEDED(hr)) {
+                        hr = E_FAIL;
+                    }
+                    if (sampleData) decodedBuffer->Unlock();
+                }
+            } else {
+                hr = videoSample->GetPointer(&sampleData);
+                if (SUCCEEDED(hr) && sampleData) {
+                    renderer.upload(sampleData, stride);
+                }
             }
             videoSample->Release();
+            const bool hasDecodedFrame = decodedBuffer != nullptr;
+            SafeRelease(decodedBuffer);
             if (FAILED(hr)) {
-                LogHr(L"D3D11 video transfer", hr);
+                LogHr(compressedVideo ? L"Media Foundation video decode/transfer"
+                                      : L"D3D11 video transfer", hr);
                 initialized = false;
                 break;
             }
+            // A compressed decoder can retain an access unit while waiting for
+            // a complete picture. There is nothing to present until it emits
+            // an NV12 frame; the next capture callback still replaces stale
+            // compressed input rather than extending an application queue.
+            if (compressedVideo && !hasDecodedFrame) continue;
             hr = renderer.presentUploaded();
             if (hr == DXGI_STATUS_OCCLUDED) {
                 continue;
@@ -3712,6 +4181,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
     SafeRelease(nullRenderer);
     SafeRelease(grabber);
     SafeRelease(grabberFilter);
+    DeleteMediaType(activeVideoType);
     SafeRelease(videoPin);
     SafeRelease(audioPin);
     SafeRelease(audioCapture);
@@ -3720,6 +4190,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
     SafeRelease(control);
     SafeRelease(graph);
     renderer.reset();
+    compressedDecoder.reset();
     if (videoMmcss) AvRevertMmThreadCharacteristics(videoMmcss);
     CoUninitialize();
     return initialized;
@@ -3757,6 +4228,8 @@ constexpr int IDC_SETTINGS_SHOW_CONSOLE = 2025;
 constexpr int IDC_SETTINGS_CAPTURE_AUDIO_DEVICE = 2026;
 constexpr int IDC_SETTINGS_SCALING = 2027;
 constexpr int IDC_SETTINGS_SKIP_STARTUP = 2028;
+constexpr int IDC_SETTINGS_VOLUME_BOOST = 2029;
+constexpr int IDC_SETTINGS_VOLUME_BOOST_HELP = 2030;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
@@ -3768,6 +4241,8 @@ struct SettingsDialogState {
     HWND bufferLabel = nullptr;
     HWND audioOutputLabel = nullptr;
     HWND volumeHudLabel = nullptr;
+    HWND volumeBoostCheck = nullptr;
+    HWND volumeBoostHelp = nullptr;
     HWND driftLabel = nullptr;
     HWND driftHelp = nullptr;
     HWND pcmQueueLabel = nullptr;
@@ -3805,6 +4280,7 @@ struct SettingsDialogState {
     HWND showConsoleCheck = nullptr;
     HWND skipStartupCheck = nullptr;
     HWND skipStartupHint = nullptr;
+    HWND versionWatermark = nullptr;
     HWND startButton = nullptr;
     HWND cancelButton = nullptr;
     HWND tooltipWindow = nullptr;
@@ -3886,17 +4362,20 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->audioStatus, 24, 148, 451, 28, dpi);
     PlaceSettingsControl(state->volumeHudLabel, 24, 190, 160, 24, dpi);
     PlaceSettingsControl(state->volumeHudCombo, 195, 186, 280, 160, dpi);
-    PlaceSettingsControl(state->driftLabel, 24, 234, 140, 24, dpi);
-    PlaceSettingsControl(state->driftHelp, 168, 230, 24, 24, dpi);
-    PlaceSettingsControl(state->driftCombo, 195, 230, 280, 120, dpi);
-    PlaceSettingsControl(state->pcmQueueLabel, 24, 278, 160, 24, dpi);
-    PlaceSettingsControl(state->pcmQueueHelp, 168, 274, 24, 24, dpi);
-    PlaceSettingsControl(state->pcmQueueCombo, 195, 274, 280, 140, dpi);
-    PlaceSettingsControl(state->muteBackgroundCheck, 24, 318, 451, 28, dpi);
-    PlaceSettingsControl(state->languageLabel, 24, 352, 160, 24, dpi);
-    PlaceSettingsControl(state->languageCombo, 195, 348, 280, 120, dpi);
-    PlaceSettingsControl(state->skipStartupCheck, 24, 396, 451, 28, dpi);
-    PlaceSettingsControl(state->skipStartupHint, 44, 424, 431, 42, dpi);
+    PlaceSettingsControl(state->volumeBoostCheck, 24, 230, 400, 28, dpi);
+    PlaceSettingsControl(state->volumeBoostHelp, 438, 226, 24, 24, dpi);
+    PlaceSettingsControl(state->driftLabel, 24, 274, 140, 24, dpi);
+    PlaceSettingsControl(state->driftHelp, 168, 270, 24, 24, dpi);
+    PlaceSettingsControl(state->driftCombo, 195, 270, 280, 120, dpi);
+    PlaceSettingsControl(state->pcmQueueLabel, 24, 318, 160, 24, dpi);
+    PlaceSettingsControl(state->pcmQueueHelp, 168, 314, 24, 24, dpi);
+    PlaceSettingsControl(state->pcmQueueCombo, 195, 314, 280, 140, dpi);
+    PlaceSettingsControl(state->muteBackgroundCheck, 24, 358, 451, 28, dpi);
+    PlaceSettingsControl(state->languageLabel, 24, 392, 160, 24, dpi);
+    PlaceSettingsControl(state->languageCombo, 195, 388, 280, 120, dpi);
+    PlaceSettingsControl(state->skipStartupCheck, 24, 436, 451, 28, dpi);
+    PlaceSettingsControl(state->skipStartupHint, 44, 464, 431, 42, dpi);
+    PlaceSettingsControl(state->versionWatermark, 24, 596, 260, 20, dpi);
 
     PlaceSettingsControl(state->presentationLabel, 505, 24, 95, 24, dpi);
     PlaceSettingsControl(state->presentationHelp, 604, 20, 24, 24, dpi);
@@ -3969,13 +4448,15 @@ static bool IsSettingsHelpControl(const SettingsDialogState* state,
                                   HWND target) {
     return state && (target == state->driftHelp ||
                      target == state->pcmQueueHelp ||
-                     target == state->presentationHelp);
+                     target == state->presentationHelp ||
+                     target == state->volumeBoostHelp);
 }
 
 enum class SettingsHelpTopic {
     Drift,
     PcmQueue,
     Presentation,
+    VolumeBoost,
 };
 
 static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
@@ -4011,6 +4492,13 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
                    L"display latency but can show tearing.\n\n"
                    L"VSync follows the monitor refresh and reduces tearing, but may wait for the next "
                    L"refresh interval and can have different pacing on mixed-refresh monitors.";
+        case SettingsHelpTopic::VolumeBoost:
+            return L"Volume boost above 100%\n\n"
+                   L"Allows the mouse wheel to raise the app volume up to 200%. "
+                   L"100% is the original PCM level; values above it apply digital gain only inside this app.\n\n"
+                   L"No audio buffer or frame queue is added, so this option does not add audio latency. "
+                   L"At high source volumes, boosting can clip peaks and cause distortion. Keep it off unless "
+                   L"the capture audio is genuinely too quiet.";
         }
     }
     switch (topic) {
@@ -4042,6 +4530,12 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
                L"VSync: 모니터 주기에 맞춰 표시해 찢어짐을 줄입니다. 대신 다음 표시 주기까지 "
                L"기다릴 수 있어 지연이 늘어날 수 있고, 주사율이 다른 모니터에서는 프레임 페이싱이 "
                L"달라질 수 있습니다.";
+    case SettingsHelpTopic::VolumeBoost:
+        return L"100% 이상 볼륨 증폭 안내\n\n"
+               L"마우스 휠로 앱 음량을 최대 200%까지 올릴 수 있게 합니다. 100%는 원본 PCM 크기이고, "
+               L"그 이상은 이 앱 안에서만 디지털 증폭을 적용합니다.\n\n"
+               L"추가 오디오 버퍼나 프레임 큐를 만들지 않으므로 오디오 지연은 늘지 않습니다. 다만 원본 "
+               L"소리가 이미 큰 경우에는 피크가 잘려 왜곡될 수 있으니, 실제로 음량이 부족할 때만 켜세요.";
     }
     return L"";
 }
@@ -4238,7 +4732,10 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
         message = UI_TEXT(L"자동 인식: ");
         bool firstFormat = true;
         for (const auto format : {VideoPixelFormat::Nv12,
-                                  VideoPixelFormat::Yuy2}) {
+                                  VideoPixelFormat::Yuy2,
+                                  VideoPixelFormat::Mjpeg,
+                                  VideoPixelFormat::H264,
+                                  VideoPixelFormat::Mpeg4}) {
             std::vector<int> frameRates;
             for (const auto& support : state->pixelFormats) {
                 if (support.format == format) {
@@ -4353,7 +4850,10 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
                  static_cast<LPARAM>(VideoPixelFormat::Auto));
     LRESULT selectedIndex = autoIndex;
     for (const auto format : {VideoPixelFormat::Nv12,
-                              VideoPixelFormat::Yuy2}) {
+                              VideoPixelFormat::Yuy2,
+                              VideoPixelFormat::Mjpeg,
+                              VideoPixelFormat::H264,
+                              VideoPixelFormat::Mpeg4}) {
         const bool available = std::any_of(
             state->pixelFormats.begin(), state->pixelFormats.end(),
             [format](const PixelFormatSupport& support) {
@@ -4361,7 +4861,14 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
             });
         if (!available) continue;
         const wchar_t* label = format == VideoPixelFormat::Nv12
-            ? L"NV12 8-bit 4:2:0" : L"YUY2 8-bit 4:2:2";
+            ? L"NV12 8-bit 4:2:0"
+            : format == VideoPixelFormat::Yuy2
+                ? L"YUY2 8-bit 4:2:2"
+                : format == VideoPixelFormat::Mjpeg
+                        ? UI_TEXT(L"MJPEG (실험적 압축 호환)")
+                        : format == VideoPixelFormat::H264
+                            ? UI_TEXT(L"H.264 / AVC (실험적 압축 호환)")
+                            : UI_TEXT(L"MPEG-4 (실험적 압축 호환)");
         const LRESULT index = SendMessageW(
             state->pixelFormatCombo, CB_ADDSTRING, 0,
             reinterpret_cast<LPARAM>(label));
@@ -4475,6 +4982,14 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->skipStartupCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.muteWhenBackground = SendMessageW(
             state->muteBackgroundCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_settings.allowVolumeBoost = SendMessageW(
+            state->volumeBoostCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        if (!g_settings.allowVolumeBoost &&
+            g_volumePercent.load(std::memory_order_acquire) > 100) {
+            g_volumePercent.store(100, std::memory_order_release);
+        }
+        g_settings.volumePercent = g_volumePercent.load(
+            std::memory_order_acquire);
         g_settings.pixelPerfect = SendMessageW(
             state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.relativeWindowSize = SendMessageW(
@@ -4609,11 +5124,32 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             state->volumeHudCombo, CB_SETCURSEL,
             static_cast<WPARAM>(g_settings.volumeHudPosition), 0);
 
-        state->driftLabel = makeLabel(UI_TEXT(L"클록 드리프트 보정"), 24, 186);
+        state->volumeBoostCheck = CreateWindowExW(
+            0, L"BUTTON", UI_TEXT(L"100% 이상 볼륨 증폭 허용 (최대 200%)"),
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+            24, 230, 400, 28, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_VOLUME_BOOST)),
+            instance, nullptr);
+        SendMessageW(state->volumeBoostCheck, BM_SETCHECK,
+                     g_settings.allowVolumeBoost
+                         ? BST_CHECKED : BST_UNCHECKED, 0);
+        state->volumeBoostHelp = CreateWindowExW(
+            0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                BS_PUSHBUTTON,
+            438, 226, 24, 24, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_VOLUME_BOOST_HELP)),
+            instance, nullptr);
+        AddSettingsTooltip(
+            state, hwnd, state->volumeBoostHelp,
+            SettingsHelpText(SettingsHelpTopic::VolumeBoost));
+
+        state->driftLabel = makeLabel(UI_TEXT(L"클록 드리프트 보정"), 24, 226);
         state->driftHelp = CreateWindowExW(
             0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
                 BS_PUSHBUTTON,
-            162, 182, 24, 24, hwnd,
+            162, 222, 24, 24, hwnd,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(IDC_SETTINGS_DRIFT_HELP)),
             instance, nullptr);
@@ -4623,7 +5159,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         state->driftCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            192, 182, 228, 120, hwnd,
+            192, 222, 228, 120, hwnd,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(IDC_SETTINGS_DRIFT)),
             instance, nullptr);
@@ -4639,11 +5175,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 ? 1 : 0,
             0);
 
-        state->pcmQueueLabel = makeLabel(UI_TEXT(L"PCM 버퍼 목표"), 24, 230);
+        state->pcmQueueLabel = makeLabel(UI_TEXT(L"PCM 버퍼 목표"), 24, 274);
         state->pcmQueueHelp = CreateWindowExW(
             0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
                 BS_PUSHBUTTON,
-            162, 226, 24, 24, hwnd,
+            162, 270, 24, 24, hwnd,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(IDC_SETTINGS_PCM_QUEUE_HELP)),
             instance, nullptr);
@@ -4653,7 +5189,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         state->pcmQueueCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            180, 226, 210, 140, hwnd,
+            180, 270, 210, 140, hwnd,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(IDC_SETTINGS_PCM_QUEUE)),
             instance, nullptr);
@@ -4680,7 +5216,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         state->muteBackgroundCheck = CreateWindowExW(
             0, L"BUTTON", UI_TEXT(L"백그라운드에서 자동 음소거"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            24, 318, 390, 28, hwnd,
+            24, 358, 390, 28, hwnd,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(IDC_SETTINGS_MUTE_BACKGROUND)),
             instance, nullptr);
@@ -4689,11 +5225,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                          ? BST_CHECKED : BST_UNCHECKED, 0);
 
         state->languageLabel = makeLabel(
-            UI_TEXT(L"언어 / Language"), 24, 352);
+            UI_TEXT(L"언어 / Language"), 24, 392);
         state->languageCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            180, 348, 210, 120, hwnd,
+            180, 388, 210, 120, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_LANGUAGE)),
             instance, nullptr);
         SendMessageW(state->languageCombo, CB_ADDSTRING, 0,
@@ -4708,7 +5244,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         state->skipStartupCheck = CreateWindowExW(
             0, L"BUTTON", UI_TEXT(L"다음 실행부터 바로 시작"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            24, 396, 451, 28, hwnd,
+            24, 436, 451, 28, hwnd,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(IDC_SETTINGS_SKIP_STARTUP)),
             instance, nullptr);
@@ -4720,6 +5256,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 L"저장된 설정으로 바로 실행 · Shift 실행 또는 F2로 설정 열기"),
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
             44, 424, 431, 42, hwnd, nullptr, instance, nullptr);
+        state->versionWatermark = CreateWindowExW(
+            0, L"STATIC", kAppVersionLabel,
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
+            24, 596, 260, 20, hwnd, nullptr, instance, nullptr);
+        EnableWindow(state->versionWatermark, FALSE);
 
         state->presentationLabel = makeLabel(UI_TEXT(L"화면 표시 방식"), 24, 274);
         state->presentationCombo = CreateWindowExW(
@@ -5074,6 +5615,14 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 hwnd,
                 SettingsHelpText(SettingsHelpTopic::Presentation),
                 UI_TEXT(L"화면 표시 방식"), MB_OK | MB_ICONINFORMATION);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_VOLUME_BOOST_HELP &&
+            HIWORD(wParam) == BN_CLICKED) {
+            MessageBoxW(
+                hwnd,
+                SettingsHelpText(SettingsHelpTopic::VolumeBoost),
+                UI_TEXT(L"100% 이상 볼륨 증폭"), MB_OK | MB_ICONINFORMATION);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_PCM_QUEUE_HELP &&
@@ -5842,8 +6391,24 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     const std::wstring outputName = compactName(ActiveAudioOutputName(), 26);
     const VideoPixelFormat activeFormat = static_cast<VideoPixelFormat>(
         g_activePixelFormat.load(std::memory_order_acquire));
-    const wchar_t* chromaText = activeFormat == VideoPixelFormat::Yuy2
-                                    ? L"4:2:2" : L"4:2:0";
+    const bool compressedVideo = IsCompressedVideoFormat(activeFormat);
+    const wchar_t* chromaText = compressedVideo
+                                    ? L"decode→4:2:0"
+                                    : activeFormat == VideoPixelFormat::Yuy2
+                                          ? L"4:2:2" : L"4:2:0";
+    const wchar_t* bitDepthText = compressedVideo
+                                      ? L"compressed"
+                                      : L"8-bit";
+    const wchar_t* qualityText = compressedVideo
+        ? (IsEnglishUi()
+            ? L"Experimental compressed input · Media Foundation decode · NV12 D3D11 output"
+            : L"실험적 압축 입력 · Media Foundation 디코드 · NV12 D3D11 출력")
+        : IsEnglishUi()
+        ? L"BT.709 · Limited range · D3D11 Video Processor"
+        : L"BT.709 · Limited range · D3D11 Video Processor";
+    const wchar_t* videoPath = compressedVideo
+        ? L"DirectShow → Media Foundation → D3D11"
+        : L"DirectShow → D3D11";
     const int configuredFps =
         g_videoConfiguredFps.load(std::memory_order_acquire) > 0
             ? g_videoConfiguredFps.load(std::memory_order_relaxed)
@@ -5981,7 +6546,9 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         ? UI_TEXT(L"백그라운드 음소거 중")
         : logicalVolume == 100
               ? UI_TEXT(L"PCM 연산 우회")
-              : logicalVolume == 0 ? UI_TEXT(L"음소거") : UI_TEXT(L"PCM 감쇠 적용");
+              : logicalVolume == 0 ? UI_TEXT(L"음소거")
+              : logicalVolume > 100 ? UI_TEXT(L"PCM 증폭 적용")
+              : UI_TEXT(L"PCM 감쇠 적용");
 
     const wchar_t* scaleText =
         g_settings.pixelPerfect && g_settings.relativeWindowSize
@@ -5992,9 +6559,9 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
                         ? L"Scaled · Monitor-relative" : UI_TEXT(L"Scaled (비율 고정)");
     const wchar_t* osdFormat = IsEnglishUi()
         ? L"Capture diagnostics                              [Tab close]\n"
-          L"Path          %s · DirectShow → D3D11\n"
-          L"Input         %d x %d @ %d fps · %s 8-bit %s\n"
-          L"Video quality BT.709 · Limited range · D3D11 Video Processor\n"
+          L"Path          %s · %s\n"
+          L"Input         %d x %d @ %d fps · %s %s %s\n"
+          L"Video quality %s\n"
           L"Display       %d x %d · %s · Flip-discard · %s\n"
           L"Actual FPS    Input %.1f · Present %.1f\n"
           L"App latency   %s  (not total HDMI latency)\n"
@@ -6009,9 +6576,9 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
           L"Error causes  input delay %llu · PCM depletion %llu · resampler %llu\n"
           L"Error trend   %.1f/h · PCM imbalance %+.0f ppm (estimated) · last %s"
         : L"캡처 실시간 정보                              [Tab 닫기]\n"
-          L"경로          %s · DirectShow → D3D11\n"
-          L"입력          %d x %d @ %d fps · %s 8-bit %s\n"
-          L"영상 품질     BT.709 · Limited range · D3D11 Video Processor\n"
+          L"경로          %s · %s\n"
+          L"입력          %d x %d @ %d fps · %s %s %s\n"
+          L"영상 품질     %s\n"
           L"표시          %d x %d · %s · Flip-discard · %s\n"
           L"실제 FPS      입력 %.1f · Present %.1f\n"
           L"앱 처리 지연  %s  (총 HDMI 지연 아님)\n"
@@ -6028,8 +6595,9 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     wchar_t text[2300]{};
     swprintf_s(
         text, osdFormat,
-        captureName.c_str(), preset.width, preset.height, configuredFps,
-        PixelFormatName(activeFormat), chromaText, outputWidth,
+        captureName.c_str(), videoPath, preset.width, preset.height, configuredFps,
+        PixelFormatName(activeFormat), bitDepthText, chromaText, qualityText,
+        outputWidth,
         outputHeight,
         scaleText,
         presentationText,
@@ -6123,7 +6691,9 @@ static bool AdjustVolumeFromWheel(HWND root, WPARAM wParam, LPARAM lParam) {
     if (steps == 0) return true;
 
     const int current = g_volumePercent.load(std::memory_order_acquire);
-    const int adjusted = std::clamp(current + steps * 5, 0, 100);
+    const int maximum = g_settings.allowVolumeBoost
+        ? kMaximumVolumePercent : 100;
+    const int adjusted = std::clamp(current + steps * 5, 0, maximum);
     g_volumePercent.store(adjusted, std::memory_order_release);
     g_settings.volumePercent = adjusted;
     g_volumeHudUntilMs.store(GetTickCount64() + 1200,
@@ -6518,7 +7088,28 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                     g_captureFailureHr.load(std::memory_order_acquire);
                 const std::wstring failureText = HrText(failure);
                 wchar_t message[768]{};
-                const wchar_t* failureFormat = IsEnglishUi()
+                const bool compressedRequested = IsCompressedVideoFormat(
+                    g_settings.pixelFormat);
+                const wchar_t* failureFormat = compressedRequested
+                    ? (IsEnglishUi()
+                        ? L"Experimental compressed capture initialization failed.\n\n"
+                          L"Error: 0x%08X  %s\n\n"
+                          L"The selected device exposes a compressed %s stream, but "
+                          L"Windows could not provide a compatible Media Foundation "
+                          L"decoder or the device's compressed stream was not accepted.\n"
+                          L"Close other capture applications, try the device's other "
+                          L"compressed format or frame rate, and attach the diagnostic "
+                          L"log when reporting the result. Raw NV12/YUY2 remains the "
+                          L"recommended lowest-latency path."
+                        : L"실험적 압축 캡처 초기화에 실패했습니다.\n\n"
+                          L"오류: 0x%08X  %s\n\n"
+                          L"선택한 장치가 %s 압축 스트림을 제공하지만, Windows에서 "
+                          L"호환되는 Media Foundation 디코더를 찾지 못했거나 장치의 "
+                          L"압축 스트림을 수락하지 못했습니다.\n"
+                          L"다른 캡처 프로그램을 종료한 뒤, 장치의 다른 압축 포맷이나 "
+                          L"프레임을 시도하고 결과를 제보할 때 진단 로그를 첨부해 주세요. "
+                          L"최저 지연에는 기존 NV12/YUY2 원시 경로를 권장합니다.")
+                    : IsEnglishUi()
                     ? L"Video capture initialization failed.\n\n"
                       L"Error: 0x%08X  %s\n\n"
                       L"The selected device may not provide the requested "
@@ -6543,7 +7134,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                     message,
                     failureFormat,
                     static_cast<unsigned int>(failure),
-                    failureText.c_str());
+                    failureText.c_str(), PixelFormatName(g_settings.pixelFormat));
                 MessageBoxW(hwnd, message, L"Low Latency Capture Viewer",
                             MB_OK | MB_ICONERROR);
                 g_restartToSettings.store(true, std::memory_order_release);

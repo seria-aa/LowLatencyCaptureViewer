@@ -1,4 +1,4 @@
-Low Latency Capture Viewer v1.0.6 - dependencies
+Low Latency Capture Viewer v1.0.6.1 Beta - dependencies
 =================================================
 
 License: GNU General Public License v3.0 or later. See the root LICENSE file.
@@ -15,4 +15,4 @@ separate Visual C++ Redistributable installation. The target PC needs:
 The tested/recommended card is AVerMedia GC573. Other cards are experimental;
 when their video and audio filters are separate, enable drift correction for
 long sessions if the diagnostics show repeated imbalance.
-No mpv.exe, FFmpeg DLL, decoder, or companion executable is required.
+No mpv.exe, FFmpeg DLL, third-party codec pack, or companion executable is required.

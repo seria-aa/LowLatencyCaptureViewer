@@ -8,7 +8,11 @@ WASAPI. It is built and tested around the AVerMedia GC573; other compatible
 NV12/YUY2 DirectShow cards, including USB devices with separate audio filters,
 are supported experimentally.
 
-No mpv, FFmpeg, decoder, or companion executable is required.
+No mpv, FFmpeg, third-party codec pack, or companion executable is required.
+
+> **v1.0.6.1 Beta:** Adds experimental MJPEG, H.264/AVC, and MPEG-4 capture
+> compatibility through Windows Media Foundation. These modes are opt-in and
+> require real-device testing; NV12/YUY2 remain the tested low-latency path.
 
 ## Highlights
 
@@ -21,6 +25,8 @@ No mpv, FFmpeg, decoder, or companion executable is required.
 - IAudioClient3 shared-mode period negotiation with automatic classic-WASAPI fallback
 - Independent PCM safety target and optional clock-drift correction
 - Automatic mode detection per selected capture device and resolution; choose from its available pixel formats and frame rates
+- Experimental opt-in MJPEG, H.264/AVC, and MPEG-4 decoding through Windows
+  Media Foundation when a device exposes those DirectShow modes
 - Pixel-perfect 1:1 mode, aspect-ratio-locked resizing, multi-monitor DPI support, and edge snap
 - Tab diagnostics overlay, optional logs, volume HUD, and background auto-mute
 
@@ -28,7 +34,8 @@ No mpv, FFmpeg, decoder, or companion executable is required.
 
 - Windows 10 or 11 x64
 - A DirectShow capture-card driver
-- A supported video mode: progressive, uncompressed NV12 or YUY2
+- A supported video mode: progressive NV12 or YUY2. Experimental modes may
+  also expose MJPEG, H.264/AVC, or MPEG-4.
 - A 48 kHz stereo PCM audio pin on the same capture filter or a separate
   DirectShow audio-input filter
 - Clock-drift correction is recommended for long sessions when video and audio
@@ -36,16 +43,17 @@ No mpv, FFmpeg, decoder, or companion executable is required.
 - The x64 release package is self-contained and does not require a separate
   Visual C++ Redistributable installation.
 
-GC573 is the recommended and tested device. Other cards are experimental;
-compressed formats, P010, and automatic device reconnect are not supported.
+GC573 is the recommended and tested device. Other cards are experimental.
+Compressed formats are beta compatibility modes, while P010 and automatic
+device reconnect are not supported.
 
 ## Install and run
 
-1. Run `LowLatencyCaptureViewer_v1.0.6_Setup.exe` and follow the wizard.
+1. Run `LowLatencyCaptureViewer_v1.0.6.1_Setup.exe` and follow the wizard.
 2. Launch **Low Latency Capture Viewer** from the Start menu or the installed
    executable.
 
-A portable `LowLatencyCaptureViewer_v1.0.6_x64.zip` is also available. Extract
+A portable `LowLatencyCaptureViewer_v1.0.6.1_x64.zip` is also available. Extract
 it anywhere and run `LowLatencyCaptureViewer.exe`.
 
 Settings and diagnostic logs are stored per user in

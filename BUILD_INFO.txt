@@ -1,4 +1,18 @@
-Low Latency Capture Viewer v1.0.6 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.0.6.1 Beta x64 (continued from the v0.14.2 rework)
+
+v1.0.6.1 Beta compressed-capture compatibility and volume boost
+---------------------------------------------------------------
+- Added opt-in experimental MJPEG, H.264/AVC, and MPEG-4 capture modes. The
+  DirectShow capture graph still retains only the newest compressed sample;
+  Windows Media Foundation decodes it to NV12 for the existing D3D11 renderer.
+- Compressed modes remain beta: supported behavior depends on the selected
+  capture device's media type, sequence headers, and decoder availability.
+  NV12/YUY2 remain the tested recommended path.
+- Added an off-by-default setting permitting 5% mouse-wheel volume steps up to
+  200%. Values above 100% apply in-app digital gain only and may clip loud
+  source material; no audio buffer or frame queue is added.
+- The startup settings dialog now shows a lower-left `v1.0.6.1 Beta` version
+  watermark.
 
 v1.0.6 direct startup and settings recovery
 -----------------------------------------
