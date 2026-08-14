@@ -1,8 +1,8 @@
-; Low Latency Capture Viewer v1.0.1
+; Low Latency Capture Viewer v1.0.2
 ; Build this script with Inno Setup 6 or newer from the installer directory.
 
 #define MyAppName "Low Latency Capture Viewer"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "seria-aa"
 #define MyAppURL "https://github.com/seria-aa/LowLatencyCaptureViewer"
 #define MyAppExeName "LowLatencyCaptureViewer.exe"
@@ -22,8 +22,8 @@ DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
-OutputDir=..\..\outputs\v1.0.1
-OutputBaseFilename=LowLatencyCaptureViewer_v1.0.1_Setup
+OutputDir=..\..\outputs\v1.0.2
+OutputBaseFilename=LowLatencyCaptureViewer_v1.0.2_Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -31,7 +31,7 @@ CloseApplications=yes
 SetupIconFile=..\assets\LowLatencyCaptureViewer.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Uninstallable=yes
-VersionInfoVersion=1.0.1.0
+VersionInfoVersion=1.0.2.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName}
 VersionInfoCopyright=Copyright (C) 2026 seria-aa
@@ -39,6 +39,10 @@ VersionInfoCopyright=Copyright (C) 2026 seria-aa
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
+
+[CustomMessages]
+english.DeleteUserDataPrompt=Do you also want to delete your settings and diagnostic logs?%n%nChoose No to keep them for a future reinstall, or Yes to remove them permanently.
+korean.DeleteUserDataPrompt=사용자 설정과 진단 로그도 삭제하시겠습니까?%n%n아니오를 선택하면 다음 설치를 위해 보존하고, 예를 선택하면 영구적으로 삭제합니다.
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
@@ -59,5 +63,28 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
-; User settings and logs under %LOCALAPPDATA% are intentionally not removed by
-; the uninstaller, so a reinstall preserves the user's configuration.
+[Code]
+var
+  DeleteUserData: Boolean;
+
+function InitializeUninstall(): Boolean;
+begin
+  Result := True;
+  DeleteUserData := False;
+  if UninstallSilent then
+    Exit;
+
+  if not DirExists(ExpandConstant('{localappdata}\LowLatencyCaptureViewer')) then
+    Exit;
+
+  DeleteUserData := MsgBox(
+    ExpandConstant('{cm:DeleteUserDataPrompt}'), mbConfirmation,
+    MB_YESNO or MB_DEFBUTTON2) = IDYES;
+end;
+
+procedure CurUninstallStepChanged(UninstallStep: TUninstallStep);
+begin
+  if (UninstallStep = usPostUninstall) and DeleteUserData then
+    DelTree(ExpandConstant('{localappdata}\LowLatencyCaptureViewer'),
+      True, True, True);
+end;

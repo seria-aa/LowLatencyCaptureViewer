@@ -1,4 +1,12 @@
-Low Latency Capture Viewer v1.0.1 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.0.2 x64 (continued from the v0.14.2 rework)
+
+v1.0.2 uninstall cleanup choice
+--------------------------------
+- The Inno Setup uninstaller now asks whether to remove per-user settings and
+  diagnostic logs. No preserves them for reinstall; Yes removes them.
+- Diagnostic console visibility is configurable and defaults to hidden.
+- Audio diagnostics use a separate five-second warm-up; video statistics keep
+  the two-second warm-up.
 
 v1.0.1 language selection
 -------------------------

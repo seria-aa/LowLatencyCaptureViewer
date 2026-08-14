@@ -37,18 +37,19 @@ GC573가 테스트·권장 장치입니다. 다른 장치는 실험적이며, �
 
 ## 설치 및 실행
 
-1. `LowLatencyCaptureViewer_v1.0.1_Setup.exe`를 실행하고 설치합니다.
+1. `LowLatencyCaptureViewer_v1.0.2_Setup.exe`를 실행하고 설치합니다.
 2. 시작 메뉴의 **Low Latency Capture Viewer** 또는 설치된 실행 파일을
    실행합니다.
 
-포터블판 `LowLatencyCaptureViewer_v1.0.1_x64.zip`도 함께 제공합니다. 원하는
+포터블판 `LowLatencyCaptureViewer_v1.0.2_x64.zip`도 함께 제공합니다. 원하는
 폴더에 압축을 풀고 `LowLatencyCaptureViewer.exe`를 실행하면 됩니다.
 
 설정과 진단 로그는 사용자별로
 `%LOCALAPPDATA%\\LowLatencyCaptureViewer`에 저장됩니다. 기존에 실행 파일 옆에
 있던 `settings.ini`가 있으면 첫 실행 때 이 위치로 자동 복사하며 기존 파일은
-삭제하지 않습니다. 제거 프로그램도 이 사용자 데이터를 남겨 재설치 시 설정과
-진단 로그를 보존합니다.
+삭제하지 않습니다. 제거 프로그램은 기본적으로 이 데이터를 보존하며, 제거
+과정에서 삭제 여부를 묻습니다. **아니오**를 선택하면 다음 설치를 위해 설정과
+진단 로그를 유지하고, **예**를 선택하면 영구적으로 삭제합니다.
 
 앱 하나에 한국어·영어 UI가 함께 포함됩니다. 설정 창의 **언어 / Language**에서
 자동(Windows 언어), 한국어, English를 선택할 수 있으며, 선택값은 사용자별로
