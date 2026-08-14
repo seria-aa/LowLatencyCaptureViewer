@@ -1,4 +1,12 @@
-Low Latency Capture Viewer v1.0.3 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.0.4 x64 (continued from the v0.14.2 rework)
+
+v1.0.4 display scaling and capture-ownership guidance
+------------------------------------------------------
+- Added Smooth and Sharp scaling choices for non-pixel-perfect video. Sharp
+  uses the supported D3D11 Video Processor edge-enhancement filter and falls
+  back to Smooth on drivers that do not expose it; no frame queue is added.
+- Capture-initialization errors now advise closing OBS and vendor capture
+  utilities that may already hold the selected device.
 
 v1.0.3 separate capture-audio support
 --------------------------------------
