@@ -1,4 +1,13 @@
-Low Latency Capture Viewer v1.0.2 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.0.3 x64 (continued from the v0.14.2 rework)
+
+v1.0.3 separate capture-audio support
+--------------------------------------
+- Added a Capture audio device selector for DirectShow audio-input filters.
+- Automatic mode still prefers an Audio pin on the selected video filter, then
+  finds a clearly matching separately exposed capture-audio device by name.
+- Added initialization-stage and pin/media-type diagnostics to saved logs,
+  making unsupported USB capture-device failures actionable.
+- GC573 keeps its existing single-filter video+audio path.
 
 v1.0.2 uninstall cleanup choice
 --------------------------------

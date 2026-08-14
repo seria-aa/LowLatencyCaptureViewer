@@ -170,6 +170,9 @@ struct AppSettings {
     VideoPixelFormat pixelFormat = VideoPixelFormat::Auto;
     int videoFrameRate = 0;
     std::wstring captureDeviceId;
+    // Empty means: use an audio pin on the video filter when available, then
+    // try a clearly matching DirectShow audio-capture filter.
+    std::wstring captureAudioDeviceId;
     std::wstring audioOutputDeviceId;
     bool saveLog = false;
     bool showDiagnosticConsole = false;
@@ -259,6 +262,9 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"저지연", L"Immediate"},
         {L"캡처 장치", L"Capture device"},
         {L"자동 선택 (GC573 우선 · 권장)", L"Auto select (GC573 first · recommended)"},
+        {L"캡처 오디오 장치", L"Capture audio device"},
+        {L"자동 선택 (영상 장치 오디오 우선 · 권장)", L"Auto select (video-device audio first · recommended)"},
+        {L"같은 캡처 장치 오디오를 우선 사용하고, 없으면 이름이 일치하는 별도 입력을 찾습니다.", L"Uses audio on the video device first, then finds a separately exposed matching input."},
         {L" (실험적)", L" (experimental)"},
         {L"캡처 해상도", L"Capture resolution"},
         {L"픽셀 포맷", L"Pixel format"},
@@ -378,6 +384,7 @@ static std::atomic<uint64_t> g_osdTrackingStartMs{UINT64_MAX};
 static std::atomic<uint64_t> g_audioTrackingStartMs{UINT64_MAX};
 static std::atomic<bool> g_captureAudioAvailable{true};
 static std::wstring g_activeCaptureDeviceName = kCaptureName;
+static std::wstring g_activeCaptureAudioDeviceName;
 static std::wstring g_activeAudioOutputName = L"Windows 기본 장치";
 static std::atomic<int> g_activePixelFormat{
     static_cast<int>(VideoPixelFormat::Nv12)};
@@ -700,7 +707,8 @@ static std::wstring MonikerFriendlyName(IMoniker* moniker) {
     return result;
 }
 
-static std::vector<CaptureDeviceInfo> EnumerateCaptureDevices() {
+static std::vector<CaptureDeviceInfo> EnumerateInputDevices(
+    const CLSID& category) {
     std::vector<CaptureDeviceInfo> devices;
     HRESULT initHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const bool uninitialize = SUCCEEDED(initHr);
@@ -712,8 +720,7 @@ static std::vector<CaptureDeviceInfo> EnumerateCaptureDevices() {
                                   CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&deviceEnumerator));
     if (SUCCEEDED(hr)) {
-        hr = deviceEnumerator->CreateClassEnumerator(
-            CLSID_VideoInputDeviceCategory, &monikers, 0);
+        hr = deviceEnumerator->CreateClassEnumerator(category, &monikers, 0);
     }
     IMoniker* moniker = nullptr;
     while (monikers && monikers->Next(1, &moniker, nullptr) == S_OK) {
@@ -729,6 +736,14 @@ static std::vector<CaptureDeviceInfo> EnumerateCaptureDevices() {
     SafeRelease(deviceEnumerator);
     if (uninitialize) CoUninitialize();
     return devices;
+}
+
+static std::vector<CaptureDeviceInfo> EnumerateCaptureDevices() {
+    return EnumerateInputDevices(CLSID_VideoInputDeviceCategory);
+}
+
+static std::vector<CaptureDeviceInfo> EnumerateCaptureAudioDevices() {
+    return EnumerateInputDevices(CLSID_AudioInputDeviceCategory);
 }
 
 static std::wstring AudioEndpointFriendlyName(IMMDevice* device) {
@@ -859,6 +874,7 @@ static void LoadSettings() {
     wchar_t audioOutputDeviceId[1024]{};
     wchar_t resolution[32]{};
     wchar_t captureDeviceId[1024]{};
+    wchar_t captureAudioDeviceId[1024]{};
     wchar_t pixelFormat[32]{};
     wchar_t frameRate[16]{};
     wchar_t presentation[32]{};
@@ -905,6 +921,9 @@ static void LoadSettings() {
     GetPrivateProfileStringW(L"Video", L"CaptureDeviceId", L"",
                              captureDeviceId, ARRAYSIZE(captureDeviceId),
                              path.c_str());
+    GetPrivateProfileStringW(L"Video", L"CaptureAudioDeviceId", L"",
+                             captureAudioDeviceId,
+                             ARRAYSIZE(captureAudioDeviceId), path.c_str());
     GetPrivateProfileStringW(L"Video", L"PixelFormat", L"Auto",
                              pixelFormat, ARRAYSIZE(pixelFormat), path.c_str());
     GetPrivateProfileStringW(L"Video", L"FrameRate", L"0", frameRate,
@@ -998,6 +1017,7 @@ static void LoadSettings() {
                                       : PresentationMode::AllowTearing;
     g_settings.audioOutputDeviceId = audioOutputDeviceId;
     g_settings.captureDeviceId = captureDeviceId;
+    g_settings.captureAudioDeviceId = captureAudioDeviceId;
     if (_wcsicmp(pixelFormat, L"NV12") == 0) {
         g_settings.pixelFormat = VideoPixelFormat::Nv12;
     } else if (_wcsicmp(pixelFormat, L"YUY2") == 0) {
@@ -1088,6 +1108,9 @@ static void SaveSettings() {
     WritePrivateProfileStringW(L"Video", L"Resolution", resolution, path.c_str());
     WritePrivateProfileStringW(L"Video", L"CaptureDeviceId",
                                g_settings.captureDeviceId.c_str(), path.c_str());
+    WritePrivateProfileStringW(L"Video", L"CaptureAudioDeviceId",
+                               g_settings.captureAudioDeviceId.c_str(),
+                               path.c_str());
     WritePrivateProfileStringW(L"Video", L"PixelFormat",
                                PixelFormatName(g_settings.pixelFormat),
                                path.c_str());
@@ -1512,6 +1535,107 @@ static HRESULT FindCaptureFilter(const std::wstring& selectedId,
     return hr;
 }
 
+static std::wstring NormalizedDeviceName(const std::wstring& value) {
+    std::wstring normalized;
+    bool previousWasSpace = true;
+    for (const wchar_t ch : value) {
+        if (std::iswalnum(ch)) {
+            normalized.push_back(static_cast<wchar_t>(std::towlower(ch)));
+            previousWasSpace = false;
+        } else if (!previousWasSpace) {
+            normalized.push_back(L' ');
+            previousWasSpace = true;
+        }
+    }
+    while (!normalized.empty() && normalized.back() == L' ') normalized.pop_back();
+    return normalized;
+}
+
+static int RelatedCaptureAudioScore(const std::wstring& videoName,
+                                    const std::wstring& audioName) {
+    const std::wstring video = NormalizedDeviceName(videoName);
+    const std::wstring audio = NormalizedDeviceName(audioName);
+    if (video.empty() || audio.empty()) return 0;
+    if (video == audio) return 1000;
+    if (video.find(audio) != std::wstring::npos ||
+        audio.find(video) != std::wstring::npos) return 800;
+
+    int score = 0;
+    size_t start = 0;
+    while (start < video.size()) {
+        const size_t end = video.find(L' ', start);
+        const std::wstring token = video.substr(
+            start, end == std::wstring::npos ? std::wstring::npos : end - start);
+        // Ignore vendor/generic words. Model identifiers such as GC313Pro and
+        // HD60 X remain useful identifiers across video/audio filter names.
+        if (token.size() >= 3 && token != L"avermedia" && token != L"elgato" &&
+            token != L"capture" && token != L"video" && token != L"audio" &&
+            audio.find(token) != std::wstring::npos) {
+            score += 100;
+        }
+        if (end == std::wstring::npos) break;
+        start = end + 1;
+    }
+    return score;
+}
+
+static HRESULT FindCaptureAudioFilter(const std::wstring& selectedId,
+                                      const std::wstring& videoName,
+                                      IBaseFilter** out,
+                                      std::wstring* selectedName = nullptr) {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+
+    ICreateDevEnum* devEnum = nullptr;
+    IEnumMoniker* enumMon = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr,
+                                  CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&devEnum));
+    if (FAILED(hr)) return hr;
+    hr = devEnum->CreateClassEnumerator(CLSID_AudioInputDeviceCategory,
+                                        &enumMon, 0);
+    if (hr != S_OK) {
+        SafeRelease(devEnum);
+        return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    }
+
+    IMoniker* mon = nullptr;
+    IMoniker* chosen = nullptr;
+    std::wstring chosenName;
+    int chosenScore = 0;
+    while (enumMon->Next(1, &mon, nullptr) == S_OK) {
+        const std::wstring name = MonikerFriendlyName(mon);
+        const std::wstring id = MonikerDisplayName(mon);
+        if (!name.empty()) fwprintf(stderr, L"[capture] audio input: %s\n", name.c_str());
+        const int score = !selectedId.empty()
+            ? (id == selectedId ? 10000 : 0)
+            : RelatedCaptureAudioScore(videoName, name);
+        if (score > chosenScore) {
+            SafeRelease(chosen);
+            chosen = mon;
+            chosen->AddRef();
+            chosenName = name;
+            chosenScore = score;
+        }
+        SafeRelease(mon);
+    }
+
+    if (chosen) {
+        hr = chosen->BindToObject(nullptr, nullptr, IID_PPV_ARGS(out));
+        if (SUCCEEDED(hr)) {
+            fwprintf(stderr, L"[capture] selected audio input: %s%s\n",
+                     chosenName.c_str(), selectedId.empty() ? L" (auto match)" : L"");
+            if (selectedName) *selectedName = chosenName;
+        }
+    } else {
+        hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    }
+    SafeRelease(chosen);
+    SafeRelease(enumMon);
+    SafeRelease(devEnum);
+    return hr;
+}
+
 static HRESULT FindOutputPinByName(IBaseFilter* filter, const wchar_t* name, IPin** out) {
     if (!filter || !out) return E_POINTER;
     *out = nullptr;
@@ -1598,6 +1722,42 @@ static HRESULT FindOutputPinByMajorType(IBaseFilter* filter,
     }
     SafeRelease(pins);
     return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}
+
+static void LogFilterPins(IBaseFilter* filter, const wchar_t* label) {
+    if (!filter || !label) return;
+    IEnumPins* pins = nullptr;
+    if (FAILED(filter->EnumPins(&pins))) return;
+    fwprintf(stderr, L"[capture] %s pin diagnostics:\n", label);
+    IPin* pin = nullptr;
+    while (pins->Next(1, &pin, nullptr) == S_OK) {
+        PIN_INFO info{};
+        PIN_DIRECTION direction{};
+        pin->QueryDirection(&direction);
+        const bool hasInfo = SUCCEEDED(pin->QueryPinInfo(&info));
+        fwprintf(stderr, L"[capture]   %s: %s\n",
+                 hasInfo ? info.achName : L"(unnamed pin)",
+                 direction == PINDIR_OUTPUT ? L"output" : L"input");
+        if (hasInfo && info.pFilter) info.pFilter->Release();
+        IEnumMediaTypes* types = nullptr;
+        if (SUCCEEDED(pin->EnumMediaTypes(&types))) {
+            int index = 0;
+            AM_MEDIA_TYPE* type = nullptr;
+            while (index < 12 && types->Next(1, &type, nullptr) == S_OK) {
+                wchar_t major[48]{};
+                wchar_t subtype[48]{};
+                StringFromGUID2(type->majortype, major, ARRAYSIZE(major));
+                StringFromGUID2(type->subtype, subtype, ARRAYSIZE(subtype));
+                fwprintf(stderr, L"[capture]     type %d: %s / %s\n",
+                         index + 1, major, subtype);
+                DeleteMediaType(type);
+                ++index;
+            }
+            SafeRelease(types);
+        }
+        SafeRelease(pin);
+    }
+    SafeRelease(pins);
 }
 
 static void SuggestCaptureBuffer(IPin* audioPin) {
@@ -3155,6 +3315,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
     IMediaControl* control = nullptr;
     IMediaFilter* mediaFilter = nullptr;
     IBaseFilter* capture = nullptr;
+    IBaseFilter* audioCapture = nullptr;
     IPin* videoPin = nullptr;
     IPin* audioPin = nullptr;
     IBaseFilter* grabberFilter = nullptr;
@@ -3173,9 +3334,11 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
     SampleGrabberCB* audioCallback = nullptr;
     HANDLE frameEvent = nullptr;
     bool initialized = false;
+    const wchar_t* initializationStage = L"create DirectShow graph";
     DirectD3D11Renderer renderer;
 
     do {
+        initializationStage = L"create DirectShow graph";
         hr = CoCreateInstance(CLSID_FilterGraph, nullptr, CLSCTX_INPROC_SERVER,
                               IID_PPV_ARGS(&graph));
         if (FAILED(hr)) break;
@@ -3184,11 +3347,14 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         graph->QueryInterface(IID_PPV_ARGS(&mediaFilter));
         if (mediaFilter) mediaFilter->SetSyncSource(nullptr);
 
+        initializationStage = L"find selected video capture filter";
         hr = FindCaptureFilter(g_settings.captureDeviceId, &capture,
                                &g_activeCaptureDeviceName);
         if (FAILED(hr)) break;
+        initializationStage = L"add selected video capture filter";
         hr = graph->AddFilter(capture, L"Selected Capture Device");
         if (FAILED(hr)) break;
+        initializationStage = L"find video output pin";
         hr = FindOutputPinByMajorType(capture, MEDIATYPE_Video, &videoPin);
         if (FAILED(hr)) break;
 
@@ -3196,6 +3362,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         UINT32 stride = 0;
         int configuredFps = 0;
         VideoPixelFormat configuredFormat = VideoPixelFormat::Nv12;
+        initializationStage = L"negotiate video resolution/FPS/pixel format";
         hr = ConfigureVideoPin(videoPin, preset.width, preset.height,
                                RequestedVideoFrameRate(),
                                g_settings.pixelFormat,
@@ -3210,6 +3377,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
 
         g_videoConfiguredFps.store(configuredFps,
                                    std::memory_order_release);
+        initializationStage = L"initialize D3D11 video renderer";
         hr = renderer.initialize(host, preset.width, preset.height,
                                  configuredFps, configuredFormat);
         if (FAILED(hr)) {
@@ -3222,6 +3390,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         if (!frameEvent) { hr = HRESULT_FROM_WIN32(GetLastError()); break; }
         LatestNv12Sample latest(imageBytes, frameEvent);
 
+        initializationStage = L"build video sample path";
         hr = CoCreateInstance(CLSID_SampleGrabber, nullptr,
                               CLSCTX_INPROC_SERVER,
                               IID_PPV_ARGS(&grabberFilter));
@@ -3261,16 +3430,40 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         if (FAILED(hr = graph->ConnectDirect(grabberOut, nullIn,
                                              nullptr))) break;
 
-        // Build the capture audio branch inside this same graph and filter
-        // instance. There is no second device graph and no separate clock.
-        hr = FindOutputPinByName(capture, kAudioPinName, &audioPin);
+        // Prefer an audio pin on the selected video filter. Many USB UVC
+        // capture devices instead expose their capture audio as a separate
+        // DirectShow audio-input filter, which is added to this same graph.
+        IBaseFilter* audioSource = capture;
+        g_activeCaptureAudioDeviceName = g_activeCaptureDeviceName;
+        initializationStage = L"find audio output pin on video capture filter";
+        hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        if (g_settings.captureAudioDeviceId.empty()) {
+            hr = FindOutputPinByName(capture, kAudioPinName, &audioPin);
+            if (FAILED(hr)) {
+                hr = FindOutputPinByMajorType(capture, MEDIATYPE_Audio, &audioPin);
+            }
+        }
         if (FAILED(hr)) {
-            hr = FindOutputPinByMajorType(capture, MEDIATYPE_Audio, &audioPin);
+            initializationStage = g_settings.captureAudioDeviceId.empty()
+                ? L"find matching separate capture audio filter"
+                : L"find selected separate capture audio filter";
+            hr = FindCaptureAudioFilter(g_settings.captureAudioDeviceId,
+                                        g_activeCaptureDeviceName,
+                                        &audioCapture,
+                                        &g_activeCaptureAudioDeviceName);
+            if (FAILED(hr)) break;
+            initializationStage = L"add separate capture audio filter";
+            hr = graph->AddFilter(audioCapture, L"Selected Capture Audio Device");
+            if (FAILED(hr)) break;
+            audioSource = audioCapture;
+            initializationStage = L"find audio output pin on separate capture filter";
+            hr = FindOutputPinByMajorType(audioSource, MEDIATYPE_Audio, &audioPin);
         }
         if (FAILED(hr)) break;
         g_captureAudioAvailable.store(true, std::memory_order_release);
         SuggestCaptureBuffer(audioPin);
 
+        initializationStage = L"build PCM audio sample path";
         hr = CoCreateInstance(CLSID_SampleGrabber, nullptr,
                               CLSCTX_INPROC_SERVER,
                               IID_PPV_ARGS(&audioGrabberFilter));
@@ -3317,6 +3510,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         ReportConnectedAudioAllocator(audioGrabberIn);
         if (FAILED(hr = graph->Connect(audioGrabberOut, audioNullIn))) break;
 
+        initializationStage = L"connect and start capture graph";
         hr = control->Run();
         if (FAILED(hr)) break;
         initialized = true;
@@ -3325,9 +3519,10 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             g_settings.presentationMode == PresentationMode::AllowTearing;
         g_videoTearing.store(tearingActive, std::memory_order_release);
         fwprintf(stderr,
-                 L"[capture] single graph running: %s · %s %dx%d @ %d + "
+                 L"[capture] graph running: video %s · audio %s · %s %dx%d @ %d + "
                  L"PCM 48k stereo, stride %u, frame bytes %lu, present %s\n",
                  g_activeCaptureDeviceName.c_str(),
+                 g_activeCaptureAudioDeviceName.c_str(),
                  PixelFormatName(configuredFormat), preset.width,
                  preset.height, configuredFps, stride, imageBytes,
                  g_settings.presentationMode == PresentationMode::VSync
@@ -3438,7 +3633,13 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
     if (!initialized) {
         const HRESULT failure = FAILED(hr) ? hr : E_FAIL;
         g_captureFailureHr.store(failure, std::memory_order_release);
+        fwprintf(stderr, L"[capture] initialization stage: %s\n",
+                 initializationStage);
         LogHr(L"Single capture graph initialization", failure);
+        LogFilterPins(capture, L"video capture filter");
+        if (audioCapture && audioCapture != capture) {
+            LogFilterPins(audioCapture, L"separate capture audio filter");
+        }
     }
     if (audioGrabber) audioGrabber->SetCallback(nullptr, 0);
     if (audioCallback) audioCallback->Release();
@@ -3459,6 +3660,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
     SafeRelease(grabberFilter);
     SafeRelease(videoPin);
     SafeRelease(audioPin);
+    SafeRelease(audioCapture);
     SafeRelease(capture);
     SafeRelease(mediaFilter);
     SafeRelease(control);
@@ -3498,6 +3700,7 @@ constexpr int IDC_SETTINGS_PRESENTATION_HELP = 2022;
 constexpr int IDC_SETTINGS_PCM_QUEUE_HELP = 2023;
 constexpr int IDC_SETTINGS_LANGUAGE = 2024;
 constexpr int IDC_SETTINGS_SHOW_CONSOLE = 2025;
+constexpr int IDC_SETTINGS_CAPTURE_AUDIO_DEVICE = 2026;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
@@ -3517,6 +3720,7 @@ struct SettingsDialogState {
     HWND presentationHelp = nullptr;
     HWND videoLabel = nullptr;
     HWND captureDeviceLabel = nullptr;
+    HWND captureAudioDeviceLabel = nullptr;
     HWND pixelFormatLabel = nullptr;
     HWND frameRateLabel = nullptr;
     HWND videoCapabilityStatus = nullptr;
@@ -3531,6 +3735,7 @@ struct SettingsDialogState {
     HWND presentationCombo = nullptr;
     HWND videoCombo = nullptr;
     HWND captureDeviceCombo = nullptr;
+    HWND captureAudioDeviceCombo = nullptr;
     HWND pixelFormatCombo = nullptr;
     HWND frameRateCombo = nullptr;
     HWND pixelCheck = nullptr;
@@ -3550,6 +3755,7 @@ struct SettingsDialogState {
     AudioClient3Support probe{};
     std::vector<UINT32> sharedPeriodChoices;
     std::vector<CaptureDeviceInfo> captureDevices;
+    std::vector<CaptureDeviceInfo> captureAudioDevices;
     std::vector<AudioEndpointInfo> audioEndpoints;
     std::vector<PixelFormatSupport> pixelFormats;
     VideoPreset initialVideoPreset = VideoPreset::R2560x1440;
@@ -3566,7 +3772,7 @@ static int SettingsPixels(int dips, UINT dpi) {
 }
 
 static constexpr int kSettingsClientWidthDip = 950;
-static constexpr int kSettingsClientHeightDip = 600;
+static constexpr int kSettingsClientHeightDip = 640;
 
 static VideoPreset RecommendedVideoPresetForMonitor(HMONITOR monitor) {
     MONITORINFO info{sizeof(info)};
@@ -3649,22 +3855,24 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->presentationCombo, 630, 20, 295, 120, dpi);
     PlaceSettingsControl(state->captureDeviceLabel, 505, 68, 120, 24, dpi);
     PlaceSettingsControl(state->captureDeviceCombo, 630, 64, 295, 220, dpi);
-    PlaceSettingsControl(state->videoLabel, 505, 112, 120, 24, dpi);
-    PlaceSettingsControl(state->videoCombo, 630, 108, 295, 120, dpi);
-    PlaceSettingsControl(state->pixelFormatLabel, 505, 156, 120, 24, dpi);
-    PlaceSettingsControl(state->pixelFormatCombo, 630, 152, 295, 160, dpi);
-    PlaceSettingsControl(state->frameRateLabel, 505, 200, 120, 24, dpi);
-    PlaceSettingsControl(state->frameRateCombo, 630, 196, 295, 200, dpi);
-    PlaceSettingsControl(state->videoCapabilityStatus, 505, 234, 420, 24, dpi);
-    PlaceSettingsControl(state->pixelCheck, 505, 266, 420, 28, dpi);
-    PlaceSettingsControl(state->relativeSizeCheck, 505, 300, 420, 28, dpi);
-    PlaceSettingsControl(state->relativeSizeWarning, 525, 328, 400, 36, dpi);
-    PlaceSettingsControl(state->borderlessCheck, 505, 370, 420, 28, dpi);
-    PlaceSettingsControl(state->windowSnapCheck, 505, 404, 420, 28, dpi);
-    PlaceSettingsControl(state->saveLogCheck, 505, 438, 420, 28, dpi);
-    PlaceSettingsControl(state->showConsoleCheck, 505, 472, 420, 28, dpi);
-    PlaceSettingsControl(state->startButton, 745, 552, 80, 30, dpi);
-    PlaceSettingsControl(state->cancelButton, 835, 552, 80, 30, dpi);
+    PlaceSettingsControl(state->captureAudioDeviceLabel, 505, 112, 120, 24, dpi);
+    PlaceSettingsControl(state->captureAudioDeviceCombo, 630, 108, 295, 220, dpi);
+    PlaceSettingsControl(state->videoLabel, 505, 156, 120, 24, dpi);
+    PlaceSettingsControl(state->videoCombo, 630, 152, 295, 120, dpi);
+    PlaceSettingsControl(state->pixelFormatLabel, 505, 200, 120, 24, dpi);
+    PlaceSettingsControl(state->pixelFormatCombo, 630, 196, 295, 160, dpi);
+    PlaceSettingsControl(state->frameRateLabel, 505, 244, 120, 24, dpi);
+    PlaceSettingsControl(state->frameRateCombo, 630, 240, 295, 200, dpi);
+    PlaceSettingsControl(state->videoCapabilityStatus, 505, 278, 420, 24, dpi);
+    PlaceSettingsControl(state->pixelCheck, 505, 310, 420, 28, dpi);
+    PlaceSettingsControl(state->relativeSizeCheck, 505, 344, 420, 28, dpi);
+    PlaceSettingsControl(state->relativeSizeWarning, 525, 372, 400, 36, dpi);
+    PlaceSettingsControl(state->borderlessCheck, 505, 414, 420, 28, dpi);
+    PlaceSettingsControl(state->windowSnapCheck, 505, 448, 420, 28, dpi);
+    PlaceSettingsControl(state->saveLogCheck, 505, 482, 420, 28, dpi);
+    PlaceSettingsControl(state->showConsoleCheck, 505, 516, 420, 28, dpi);
+    PlaceSettingsControl(state->startButton, 745, 582, 80, 30, dpi);
+    PlaceSettingsControl(state->cancelButton, 835, 582, 80, 30, dpi);
 }
 
 static void TrackSettingsTooltip(HWND target, HWND tooltip, bool active) {
@@ -3935,6 +4143,16 @@ static std::wstring SelectedCaptureDeviceId(
     return state->captureDevices[static_cast<size_t>(index - 1)].id;
 }
 
+static std::wstring SelectedCaptureAudioDeviceId(
+    const SettingsDialogState* state) {
+    if (!state || !state->captureAudioDeviceCombo) return {};
+    const LRESULT index = SendMessageW(
+        state->captureAudioDeviceCombo, CB_GETCURSEL, 0, 0);
+    if (index <= 0 || static_cast<size_t>(index - 1) >=
+                          state->captureAudioDevices.size()) return {};
+    return state->captureAudioDevices[static_cast<size_t>(index - 1)].id;
+}
+
 static VideoPixelFormat SelectedPixelFormat(
     const SettingsDialogState* state) {
     if (!state || !state->pixelFormatCombo) return VideoPixelFormat::Auto;
@@ -4198,6 +4416,7 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
         }
         g_settings.audioOutputDeviceId = SelectedAudioEndpointId(state);
         g_settings.captureDeviceId = SelectedCaptureDeviceId(state);
+        g_settings.captureAudioDeviceId = SelectedCaptureAudioDeviceId(state);
         if (pixelFormatIndex >= 0) {
             const LRESULT value = SendMessageW(
                 state->pixelFormatCombo, CB_GETITEMDATA,
@@ -4505,11 +4724,36 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         SendMessageW(state->captureDeviceCombo, CB_SETCURSEL,
                      selectedCaptureDevice, 0);
 
-        state->videoLabel = makeLabel(UI_TEXT(L"캡처 해상도"), 24, 318);
+        state->captureAudioDeviceLabel = makeLabel(
+            UI_TEXT(L"캡처 오디오 장치"), 430, 112);
+        state->captureAudioDeviceCombo = CreateWindowExW(
+            0, L"COMBOBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
+            550, 108, 245, 220, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_CAPTURE_AUDIO_DEVICE)),
+            instance, nullptr);
+        SendMessageW(state->captureAudioDeviceCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(UI_TEXT(
+                         L"자동 선택 (영상 장치 오디오 우선 · 권장)")));
+        LRESULT selectedCaptureAudioDevice = 0;
+        for (size_t i = 0; i < state->captureAudioDevices.size(); ++i) {
+            const std::wstring& label = state->captureAudioDevices[i].name;
+            SendMessageW(state->captureAudioDeviceCombo, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(label.c_str()));
+            if (state->captureAudioDevices[i].id ==
+                g_settings.captureAudioDeviceId) {
+                selectedCaptureAudioDevice = static_cast<LRESULT>(i + 1);
+            }
+        }
+        SendMessageW(state->captureAudioDeviceCombo, CB_SETCURSEL,
+                     selectedCaptureAudioDevice, 0);
+
+        state->videoLabel = makeLabel(UI_TEXT(L"캡처 해상도"), 430, 156);
         state->videoCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            180, 314, 210, 120, hwnd,
+            550, 152, 245, 120, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_VIDEO)), instance, nullptr);
         for (const auto& info : kVideoPresets) {
             SendMessageW(state->videoCombo, CB_ADDSTRING, 0,
@@ -4817,6 +5061,7 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
 
     SettingsDialogState state{};
     state.captureDevices = EnumerateCaptureDevices();
+    state.captureAudioDevices = EnumerateCaptureAudioDevices();
     state.audioEndpoints = EnumerateAudioEndpoints();
     POINT cursor{};
     GetCursorPos(&cursor);
@@ -6158,16 +6403,18 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                     ? L"Video capture initialization failed.\n\n"
                       L"Error: 0x%08X  %s\n\n"
                       L"The selected device may not provide the requested "
-                      L"resolution/FPS/pixel format or a 48 kHz stereo PCM "
-                      L"audio pin.\n"
-                      L"Try Auto pixel format or another resolution. If logging "
+                      L"resolution/FPS/pixel format or a compatible 48 kHz "
+                      L"stereo PCM capture-audio input.\n"
+                      L"Try Auto pixel format, another resolution, or select "
+                      L"a capture audio device. If logging "
                       L"is enabled, check the logs folder under LocalAppData."
                     : L"캡처 영상 초기화에 실패했습니다.\n\n"
                       L"오류: 0x%08X  %s\n\n"
                       L"선택한 장치가 지정한 해상도/FPS/픽셀 포맷 또는 "
-                      L"48 kHz 스테레오 PCM 오디오 핀을 제공하지 않을 수 "
-                      L"있습니다.\n"
-                      L"자동 픽셀 포맷이나 다른 해상도로 다시 시도하고, "
+                      L"호환되는 48 kHz 스테레오 PCM 캡처 오디오 입력을 "
+                      L"제공하지 않을 수 있습니다.\n"
+                      L"자동 픽셀 포맷, 다른 해상도 또는 캡처 오디오 장치를 "
+                      L"선택해 다시 시도하고, "
                       L"로그 저장을 켠 경우 사용자 데이터 폴더의 logs를 확인해 주세요.";
                 swprintf_s(
                     message,
