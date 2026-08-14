@@ -29,19 +29,26 @@ mpv, FFmpeg, 디코더, 별도 실행 파일은 필요하지 않습니다.
 - DirectShow 캡처카드 드라이버
 - progressive 비압축 NV12 또는 YUY2 영상 모드
 - 같은 캡처 필터의 48 kHz 스테레오 PCM 오디오 핀
-- Microsoft Visual C++ 2015–2022 Redistributable x64
+- x64 릴리스 패키지는 Visual C++ Redistributable를 별도로 설치하지 않아도
+  실행되도록 포함되어 있습니다.
 
 GC573가 테스트·권장 장치입니다. 다른 장치는 실험적이며, 압축 포맷, P010,
 별도 USB 오디오 필터, 자동 장치 재연결은 지원하지 않습니다.
 
 ## 설치 및 실행
 
-1. [Releases](https://github.com/seria-aa/LowLatencyCaptureViewer/releases)에서 `LowLatencyCaptureViewer_v*_x64.zip`을 받습니다.
-2. 쓰기 가능한 폴더에 압축을 풉니다.
-3. `LowLatencyCaptureViewer.exe`를 실행하고 캡처·오디오 옵션을 선택합니다.
+1. `LowLatencyCaptureViewer_v1.0.0_Setup.exe`를 실행하고 설치합니다.
+2. 시작 메뉴의 **Low Latency Capture Viewer** 또는 설치된 실행 파일을
+   실행합니다.
 
-설정은 실행 파일 옆의 `settings.ini`에 저장됩니다. 진단 로그를 켜면 `logs`
-폴더에 기록됩니다.
+포터블판 `LowLatencyCaptureViewer_v1.0.0_x64.zip`도 함께 제공합니다. 원하는
+폴더에 압축을 풀고 `LowLatencyCaptureViewer.exe`를 실행하면 됩니다.
+
+설정과 진단 로그는 사용자별로
+`%LOCALAPPDATA%\\LowLatencyCaptureViewer`에 저장됩니다. 기존에 실행 파일 옆에
+있던 `settings.ini`가 있으면 첫 실행 때 이 위치로 자동 복사하며 기존 파일은
+삭제하지 않습니다. 제거 프로그램도 이 사용자 데이터를 남겨 재설치 시 설정과
+진단 로그를 보존합니다.
 
 ## 권장 시작 설정
 
@@ -55,7 +62,11 @@ GC573가 테스트·권장 장치입니다. 다른 장치는 실험적이며, �
 | 영상 포맷 | 최저 업로드 부하는 자동/NV12 우선. 120 fps가 유지되지 않으면 60 fps 선택. |
 
 캡처 장치나 해상도를 바꾸면 지원하는 픽셀 포맷과 프레임 목록을 다시 읽습니다.
-설정 창에 감지한 조합을 표시하며, 지원하는 비압축 모드가 없으면 시작할 수 없습니다.
+설정 창을 다른 모니터로 옮기면 모니터 경계를 넘는 순간 권장 캡처 해상도도
+따라갑니다(FHD에서는 1920x1080, 그 이상에서는 QHD). 이때 지원 포맷·프레임
+목록을 한 번 갱신하지만 설정 창에서만 동작하므로 실행 중 캡처·렌더링 경로의
+성능이나 지연에는 영향을 주지 않습니다. 지원하는 비압축 모드가 없으면
+시작할 수 없습니다.
 
 이 프로그램에서는 **NV12를 저지연 권장 포맷**으로 사용합니다. NV12는 픽셀당
 12비트, YUY2는 픽셀당 16비트이므로 남아 있는 시스템 메모리→D3D11 업로드에서
@@ -67,8 +78,9 @@ YUY2를 선택하세요.
 
 `Pixel-perfect`를 켜면 선택한 캡처 해상도와 같은 1:1 클라이언트 영역으로
 고정되고 마우스 크기 조절이 꺼집니다. 해제하면 영상 비율을 유지한 채 창 크기를
-조절할 수 있습니다. 모니터 이동 시 상대적 창 크기 유지는 독립 옵션이므로, 다른
-크기의 모니터로 옮긴 뒤에는 1:1 크기가 바뀔 수 있습니다.
+조절할 수 있습니다. 모니터 이동 시 상대적 창 크기 유지는 독립 옵션이며, 켜져
+있으면 저장된 상대 비율을 다음 실행에도 적용합니다. 따라서 4K에서 QHD 창을
+FHD로 옮긴 뒤 종료해도 FHD에서 다시 QHD 전체 크기로 열리지 않습니다.
 
 ## 저지연 오디오
 
@@ -173,9 +185,13 @@ cmake --build build --config Release
 
 생성 파일은 `build\Release\LowLatencyCaptureViewer.exe`입니다.
 
+설치 프로그램 스크립트는 `installer\LowLatencyCaptureViewer.iss`이며 Inno Setup
+6 이상으로 빌드합니다. 설치판과 포터블판 모두 컴퓨터별 설정 파일은 포함하지
+않습니다.
+
 ## 라이선스
 
 Copyright (C) 2026 seria-aa. 이 프로젝트는
 [GNU General Public License v3.0 또는 이후 버전](LICENSE)으로 배포됩니다.
-Windows 구성요소, Visual C++ Redistributable, 캡처카드 드라이버는 별도 구성요소이며
-각자의 라이선스를 따릅니다.
+Windows 구성요소와 캡처카드 드라이버는 별도 구성요소이며 각자의 라이선스를
+따릅니다.

@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 0.18.1 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_WIN32_EXECUTABLE ON)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_executable(LowLatencyCaptureViewer
     src/main.cpp
+    src/app.rc
 )
 
 target_compile_definitions(LowLatencyCaptureViewer PRIVATE
@@ -39,5 +41,5 @@ endif()
 
 install(TARGETS LowLatencyCaptureViewer RUNTIME DESTINATION .)
 install(FILES LICENSE README.md README.ko.md DESIGN.txt BUILD_INFO.txt DEPENDENCIES.txt
-        "실행안내.txt" GITHUB_PREP.md settings.ini DESTINATION .)
+        "실행안내.txt" GITHUB_PREP.md DESTINATION .)
 install(DIRECTORY docs DESTINATION .)

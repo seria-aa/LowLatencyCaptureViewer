@@ -28,7 +28,8 @@ No mpv, FFmpeg, decoder, or companion executable is required.
 - A DirectShow capture-card driver
 - A supported video mode: progressive, uncompressed NV12 or YUY2
 - A 48 kHz stereo PCM audio pin on the same capture filter
-- Microsoft Visual C++ 2015–2022 Redistributable (x64)
+- The x64 release package is self-contained and does not require a separate
+  Visual C++ Redistributable installation.
 
 GC573 is the recommended and tested device. Other cards are experimental;
 compressed formats, P010, separate USB-audio filters, and automatic device
@@ -36,12 +37,18 @@ reconnect are not supported.
 
 ## Install and run
 
-1. Download `LowLatencyCaptureViewer_v*_x64.zip` from [Releases](https://github.com/seria-aa/LowLatencyCaptureViewer/releases).
-2. Extract it to a writable folder.
-3. Run `LowLatencyCaptureViewer.exe` and choose the capture and audio settings.
+1. Run `LowLatencyCaptureViewer_v1.0.0_Setup.exe` and follow the wizard.
+2. Launch **Low Latency Capture Viewer** from the Start menu or the installed
+   executable.
 
-Settings are saved beside the executable in `settings.ini`. Diagnostic logs,
-when enabled, are written to the `logs` folder.
+A portable `LowLatencyCaptureViewer_v1.0.0_x64.zip` is also available. Extract
+it anywhere and run `LowLatencyCaptureViewer.exe`.
+
+Settings and diagnostic logs are stored per user in
+`%LOCALAPPDATA%\\LowLatencyCaptureViewer`. An older `settings.ini` beside the
+executable is copied there automatically on first launch; it is not deleted.
+The uninstaller leaves this user data in place so reinstalling does not erase
+preferences or diagnostics.
 
 ## Recommended starting settings
 
@@ -55,8 +62,13 @@ when enabled, are written to the `logs` folder.
 | Video format | Auto/NV12 first for the lowest upload overhead; select 60 fps when 120 fps is not sustainable. |
 
 Changing the capture device or resolution refreshes the supported format and
-frame-rate list. The settings window shows the detected combinations, and
-disables Start when the selected device has no supported uncompressed mode.
+frame-rate list. While the settings dialog is moved to another monitor, its
+recommended capture resolution follows that monitor (1080p on FHD, QHD on
+larger displays) and refreshes the capability list once at the monitor
+boundary. This happens only in the settings dialog and does not add work to
+the active capture or render path. The settings window shows the detected
+combinations, and disables Start when the selected device has no supported
+uncompressed mode.
 
 For this viewer, **NV12 is the preferred low-latency format**. Its 12-bit-per-
 pixel layout transfers 25% less frame data than 16-bit-per-pixel YUY2 during the
@@ -68,8 +80,9 @@ important or when a particular device handles it better.
 
 `Pixel-perfect` fixes the client area to the selected capture resolution and
 disables manual resizing. With it off, the window can be resized while keeping
-the video aspect ratio. Monitor-relative sizing is independent and can change
-the 1:1 size after moving to a differently sized display.
+the video aspect ratio. Monitor-relative sizing is independent: when enabled,
+the saved monitor-relative scale is also applied on the next launch, so a QHD
+window moved to an FHD display does not reopen at the full QHD size there.
 
 ## Low-latency audio
 
@@ -180,9 +193,13 @@ cmake --build build --config Release
 
 The executable is `build\Release\LowLatencyCaptureViewer.exe`.
 
+The installer script is `installer\LowLatencyCaptureViewer.iss` and is built
+with Inno Setup 6 or newer. Neither the installer nor the portable package includes
+machine-specific settings.
+
 ## License
 
 Copyright (C) 2026 seria-aa. This project is licensed under the
-[GNU General Public License v3.0 or later](LICENSE). Windows components,
-the Visual C++ Redistributable, and capture-card drivers are separate
-dependencies and remain under their own licenses.
+[GNU General Public License v3.0 or later](LICENSE). Windows components and
+capture-card drivers are separate dependencies and remain under their own
+licenses.

@@ -1,4 +1,21 @@
-Low Latency Capture Viewer v0.18.1 design (continued from v0.14.2)
+Low Latency Capture Viewer v1.0.0 design (continued from v0.14.2)
+
+v1.0.0 packaging and per-user storage
+--------------------------------------
+- The release build uses the static MSVC runtime for self-contained x64
+  distribution.
+- The installer places the executable under Program Files. Settings and logs
+  are kept in `%LOCALAPPDATA%\\LowLatencyCaptureViewer` so normal users never
+  need write access to the installation directory.
+- A legacy settings.ini beside the executable is copied once to the new path;
+  the original is preserved for recovery and portable-copy compatibility.
+- The installer does not remove per-user settings or logs during uninstall.
+- The settings dialog tracks monitor changes and updates its recommended capture
+  resolution and capability list only at a monitor boundary. The active viewer
+  path is not involved.
+- Initial window sizing applies the persisted monitor-relative scale even when
+  Pixel-perfect is also enabled, so the last monitor's relative size survives
+  a restart.
 
 v0.18.1 tooltip routing hotfix
 ------------------------------
@@ -167,7 +184,8 @@ v0.15 selection boundary
 26. WM_MOVING applies an 18-DIP, per-monitor-DPI edge threshold against the
     nearest monitor work area. It preserves the complete outer-window size,
     supports all four edges/corners, and does not cover the taskbar.
-27. Edge snap is enabled by default, persisted in settings.ini, and bypassed
+27. Edge snap is enabled by default, persisted in the per-user settings.ini,
+    and bypassed
     while Shift is held. The handler is inactive outside manual window moves,
     so capture, rendering, Present, and audio threads are unchanged.
 28. Horizontal and vertical snap axes are latched independently. A 15-DIP cursor
