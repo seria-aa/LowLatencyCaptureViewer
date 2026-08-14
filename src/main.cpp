@@ -469,9 +469,50 @@ static std::wstring AppDirectory() {
     return dir;
 }
 
+// User-writable data belongs in LocalAppData so an installation under
+// Program Files does not require elevation and portable copies do not mix
+// machine-specific settings into the application directory.
+static std::wstring UserDataDirectory() {
+    static const std::wstring directory = [] {
+        wchar_t buffer[32768]{};
+        const DWORD length = GetEnvironmentVariableW(
+            L"LOCALAPPDATA", buffer, ARRAYSIZE(buffer));
+        if (length > 0 && length < ARRAYSIZE(buffer)) {
+            return std::wstring(buffer, length) +
+                   L"\\LowLatencyCaptureViewer";
+        }
+        return AppDirectory();
+    }();
+    return directory;
+}
+
+static std::wstring LogDirectory() {
+    return UserDataDirectory() + L"\\logs";
+}
+
+static void EnsureUserDataDirectory() {
+    CreateDirectoryW(UserDataDirectory().c_str(), nullptr);
+}
+
+static void MigrateLegacySettings() {
+    EnsureUserDataDirectory();
+    const std::wstring destination = UserDataDirectory() + L"\\settings.ini";
+    const std::wstring legacy = AppDirectory() + L"\\settings.ini";
+    if (_wcsicmp(destination.c_str(), legacy.c_str()) == 0) return;
+    const DWORD destinationAttributes = GetFileAttributesW(destination.c_str());
+    const DWORD legacyAttributes = GetFileAttributesW(legacy.c_str());
+    if (destinationAttributes == INVALID_FILE_ATTRIBUTES &&
+        legacyAttributes != INVALID_FILE_ATTRIBUTES &&
+        (legacyAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        // Keep the old file in place so a portable copy remains recoverable.
+        CopyFileW(legacy.c_str(), destination.c_str(), FALSE);
+    }
+}
+
 static void OpenSavedLog() {
     if (!g_settings.saveLog || g_savedLogFile) return;
-    const std::wstring directory = AppDirectory() + L"\\logs";
+    EnsureUserDataDirectory();
+    const std::wstring directory = LogDirectory();
     CreateDirectoryW(directory.c_str(), nullptr);
     SYSTEMTIME time{};
     GetLocalTime(&time);
@@ -668,10 +709,11 @@ static int RelativeScaleForMonitor(HMONITOR monitor) {
 }
 
 static std::wstring SettingsPath() {
-    return AppDirectory() + L"\\settings.ini";
+    return UserDataDirectory() + L"\\settings.ini";
 }
 
 static void LoadSettings() {
+    MigrateLegacySettings();
     const std::wstring path = SettingsPath();
     wchar_t audio[32]{};
     wchar_t bufferMs[16]{};
@@ -844,6 +886,7 @@ static void LoadSettings() {
 }
 
 static void SaveSettings() {
+    EnsureUserDataDirectory();
     const std::wstring path = SettingsPath();
     WritePrivateProfileStringW(
         L"Audio", L"Mode",
@@ -3347,6 +3390,7 @@ struct SettingsDialogState {
     std::vector<AudioEndpointInfo> audioEndpoints;
     std::vector<PixelFormatSupport> pixelFormats;
     VideoPreset initialVideoPreset = VideoPreset::R2560x1440;
+    HMONITOR currentMonitor = nullptr;
     UINT32 selectedSharedPeriodFrames = 0;
     int selectedBufferMs = kRecommendedWasapiBufferMs;
     bool bufferItemsAreSharedFrames = false;
@@ -3360,6 +3404,20 @@ static int SettingsPixels(int dips, UINT dpi) {
 
 static constexpr int kSettingsClientWidthDip = 950;
 static constexpr int kSettingsClientHeightDip = 600;
+
+static VideoPreset RecommendedVideoPresetForMonitor(HMONITOR monitor) {
+    MONITORINFO info{sizeof(info)};
+    if (monitor && GetMonitorInfoW(monitor, &info)) {
+        const int monitorWidth = info.rcMonitor.right - info.rcMonitor.left;
+        // Use the horizontal desktop resolution for the FHD/QHD suggestion.
+        // This keeps 16:10 FHD-class displays such as 1920x1200 in the FHD
+        // bucket instead of incorrectly promoting them to QHD.
+        if (monitorWidth <= 1920) {
+            return VideoPreset::R1920x1080;
+        }
+    }
+    return VideoPreset::R2560x1440;
+}
 
 static SIZE SettingsDialogOuterSize(HWND hwnd, UINT dpi) {
     RECT rect{0, 0, SettingsPixels(kSettingsClientWidthDip, dpi),
@@ -3810,6 +3868,34 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
     UpdateVideoCapabilityStatus(state);
 }
 
+static void FollowSettingsDialogMonitor(SettingsDialogState* state,
+                                        HMONITOR monitor) {
+    if (!state || !state->videoCombo || !monitor ||
+        monitor == state->currentMonitor) {
+        return;
+    }
+    state->currentMonitor = monitor;
+    state->initialVideoPreset = RecommendedVideoPresetForMonitor(monitor);
+
+    size_t selected = 0;
+    for (size_t i = 0; i < ARRAYSIZE(kVideoPresets); ++i) {
+        if (kVideoPresets[i].preset == state->initialVideoPreset) {
+            selected = i;
+            break;
+        }
+    }
+    if (SendMessageW(state->videoCombo, CB_GETCURSEL, 0, 0) ==
+        static_cast<LRESULT>(selected)) {
+        return;
+    }
+    SendMessageW(state->videoCombo, CB_SETCURSEL,
+                 static_cast<WPARAM>(selected), 0);
+    // Resolution changes alter the capture pin's available format/FPS list.
+    // This runs only when the settings dialog crosses to another monitor,
+    // never in the active capture/render path.
+    PopulatePixelFormatCombo(state);
+}
+
 static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool accepted) {
     if (!state) return;
 
@@ -3895,8 +3981,10 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
                 !previouslyRelative ||
                 previousVideoPreset != g_settings.videoPreset ||
                 g_settings.relativeWindowScalePpm <= 0) {
-                HMONITOR baselineMonitor = nullptr;
-                if (g_settings.hasWindowPosition) {
+                // Use the settings dialog's monitor as the sizing context;
+                // the saved viewer monitor is only a fallback.
+                HMONITOR baselineMonitor = state->currentMonitor;
+                if (!baselineMonitor && g_settings.hasWindowPosition) {
                     baselineMonitor = MonitorFromPoint(
                         POINT{g_settings.windowX, g_settings.windowY},
                         MONITOR_DEFAULTTONULL);
@@ -4270,7 +4358,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                      g_settings.windowSnap ? BST_CHECKED : BST_UNCHECKED, 0);
 
         state->saveLogCheck = CreateWindowExW(
-            0, L"BUTTON", L"진단 로그 파일 저장 (logs 폴더)",
+            0, L"BUTTON", L"진단 로그 파일 저장 (사용자 폴더)",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
             430, 374, 365, 28, hwnd,
             reinterpret_cast<HMENU>(
@@ -4303,6 +4391,19 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             PostMessageW(hwnd, WM_AUDIOCLIENT3_PROBE_COMPLETE, 0, 0);
         });
         return 0;
+    }
+
+    case WM_MOVE: {
+        if (state && state->videoCombo) {
+            HMONITOR monitor =
+                MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            POINT cursor{};
+            if (!monitor && GetCursorPos(&cursor)) {
+                monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+            }
+            FollowSettingsDialogMonitor(state, monitor);
+        }
+        break;
     }
 
     case WM_DPICHANGED: {
@@ -4524,6 +4625,7 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
     GetCursorPos(&cursor);
     const HMONITOR settingsMonitor = MonitorFromPoint(
         cursor, MONITOR_DEFAULTTOPRIMARY);
+    state.currentMonitor = settingsMonitor;
     UINT settingsDpiX = GetDpiForSystem();
     UINT settingsDpiY = settingsDpiX;
     if (FAILED(GetDpiForMonitor(settingsMonitor, MDT_EFFECTIVE_DPI,
@@ -4542,14 +4644,8 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
                              settingsRect.bottom - settingsRect.top};
     MONITORINFO settingsMonitorInfo{sizeof(settingsMonitorInfo)};
     GetMonitorInfoW(settingsMonitor, &settingsMonitorInfo);
-    const int monitorWidth = settingsMonitorInfo.rcMonitor.right -
-                             settingsMonitorInfo.rcMonitor.left;
-    const int monitorHeight = settingsMonitorInfo.rcMonitor.bottom -
-                              settingsMonitorInfo.rcMonitor.top;
     state.initialVideoPreset =
-        monitorWidth <= 1920 && monitorHeight <= 1080
-            ? VideoPreset::R1920x1080
-            : VideoPreset::R2560x1440;
+        RecommendedVideoPresetForMonitor(settingsMonitor);
     const RECT work = settingsMonitorInfo.rcWork;
     const int settingsX = work.left +
         ((work.right - work.left) - settingsOuter.cx) / 2;
@@ -4673,9 +4769,12 @@ static SIZE DesiredClientPixelsForMonitor(HMONITOR monitor) {
 
 static SIZE InitialClientPixelsForMonitor(HMONITOR monitor) {
     const auto& video = CurrentVideoPreset();
-    // Pixel-perfect defines the initial 1:1 size. Monitor-relative sizing is
-    // independent and may change that size later when another monitor is
-    // entered, but it must not override the initial pixel-perfect contract.
+    // Monitor-relative sizing is independent from Pixel-perfect. When it is
+    // enabled, restore the same monitor-relative scale that was used before
+    // shutdown, including when the saved monitor is a smaller display.
+    if (g_settings.relativeWindowSize) {
+        return DesiredClientPixelsForMonitor(monitor);
+    }
     if (g_settings.pixelPerfect) return SIZE{video.width, video.height};
     return DesiredClientPixelsForMonitor(monitor);
 }
@@ -4865,6 +4964,7 @@ static void PersistWindowPosition(HWND hwnd) {
     g_settings.windowY = rect.top;
     g_settings.monitorDevice = monitorInfo.szDevice;
 
+    EnsureUserDataDirectory();
     const std::wstring path = SettingsPath();
     wchar_t value[32]{};
     swprintf_s(value, L"%d", g_settings.windowX);
@@ -5692,9 +5792,19 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     AllocConsole();
     FILE* f = nullptr;
     if (smokeTest) {
-        const std::wstring logPath = AppDirectory() + L"\\smoke-test.log";
+        EnsureUserDataDirectory();
+        CreateDirectoryW(LogDirectory().c_str(), nullptr);
+        const std::wstring logPath = LogDirectory() + L"\\smoke-test.log";
         _wfreopen_s(&f, L"CONOUT$", L"w", stdout);
-        _wfreopen_s(&f, logPath.c_str(), L"w", stderr);
+        FILE* logFile = nullptr;
+        if (_wfreopen_s(&logFile, logPath.c_str(), L"w", stderr) != 0 ||
+            !logFile) {
+            // Keep diagnostics alive even when a restricted profile blocks
+            // LocalAppData writes (for example, in a CI smoke-test runner).
+            _wfreopen_s(&f, L"CONOUT$", L"w", stderr);
+            fwprintf(stderr, L"[log] unable to open smoke-test log: %s\n",
+                     logPath.c_str());
+        }
     } else {
         _wfreopen_s(&f, L"CONOUT$", L"w", stdout);
         _wfreopen_s(&f, L"CONOUT$", L"w", stderr);
@@ -5821,7 +5931,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                     L"48 kHz 스테레오 PCM 오디오 핀을 제공하지 않을 수 "
                     L"있습니다.\n"
                     L"자동 픽셀 포맷이나 다른 해상도로 다시 시도하고, "
-                    L"로그 저장을 켠 경우 logs 폴더를 확인해 주세요.",
+                    L"로그 저장을 켠 경우 사용자 데이터 폴더의 logs를 확인해 주세요.",
                     static_cast<unsigned int>(failure),
                     failureText.c_str());
                 MessageBoxW(hwnd, message, L"Low Latency Capture Viewer",

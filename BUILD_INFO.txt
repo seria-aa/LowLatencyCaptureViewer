@@ -1,4 +1,20 @@
-Low Latency Capture Viewer v0.18.1 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.0.0 x64 (continued from the v0.14.2 rework)
+
+v1.0.0 installer and per-user data
+-----------------------------------
+- Release builds use the static MSVC runtime, so the installer and portable
+  package do not require a separate Visual C++ Redistributable installation.
+- The Inno Setup script installs the application under Program Files and keeps
+  settings and optional logs in `%LOCALAPPDATA%\\LowLatencyCaptureViewer`.
+- Existing settings beside the executable are copied to the new per-user path
+  on first launch and are left intact as a fallback.
+- A portable ZIP remains available for users who do not want an installation.
+- The settings dialog follows the monitor it is moved to and refreshes the
+  recommended capture resolution and capability list only at monitor changes.
+- Relative window sizing is restored on the saved monitor at startup, including
+  when Pixel-perfect is enabled alongside the independent relative-size option.
+- Added a multi-size Windows application icon with the capture-display and
+  low-latency lightning motif; it is embedded in the EXE and Setup.exe.
 
 v0.18.1 settings-help hotfix
 -----------------------------
