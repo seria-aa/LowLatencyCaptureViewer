@@ -127,6 +127,15 @@ VSync reduces tearing but adds a wait and its pacing depends on the current
 display. Match capture FPS to the target monitor when possible and compare the
 Input FPS and Present FPS in the Tab overlay.
 
+### Capture frame rate
+
+Choose a capture rate at or below the source's actual maximum rate. A 120 fps
+source has no additional visual information at 144 fps; a capture card may only
+repeat or re-time frames in that mode. A 144 Hz display does not require 144 fps
+capture. Use 120 fps for a 120 fps source and 60 fps for a 60 fps source. For
+VSync, a 120 Hz or 240 Hz display can provide more even pacing for 120 fps video
+than a 144 Hz display.
+
 ### Overhead and input-latency expectations
 
 The viewer avoids an encoder, scene graph, and queued video pipeline; it keeps

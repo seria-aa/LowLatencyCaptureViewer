@@ -1,4 +1,15 @@
-Low Latency Capture Viewer v0.17.0 design (continued from v0.14.2)
+Low Latency Capture Viewer v0.18.0 design (continued from v0.14.2)
+
+v0.18.0 settings guidance
+-------------------------
+- Two independent help controls explain the presentation and PCM safety-target
+  trade-offs without embedding failure-oriented language in the selectors.
+- Tooltip routing is shared by the drift, presentation, and PCM help controls;
+  each has the same hover positioning and click-to-open detail path.
+- Settings picks an initial capture preset from the monitor hosting the dialog:
+  FHD selects 1080p; QHD, 4K, and other larger displays select QHD. This is a
+  dialog default, not a write to persistent settings until Start is pressed.
+- Edge-snap entry and release use the same 20-DIP threshold in both axes.
 
 v0.17.0 capture capability selection
 ------------------------------------

@@ -1,4 +1,15 @@
-Low Latency Capture Viewer v0.17.0 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v0.18.0 x64 (continued from the v0.14.2 rework)
+
+v0.18.0 settings clarity and monitor defaults
+----------------------------------------------
+- Snap entry and release distances are both 20 DIP on every monitor edge.
+- Opening settings selects 1920x1080 on an FHD monitor and 2560x1440 on a
+  QHD-or-larger monitor, including 4K. The selection is saved only after Start.
+- Presentation labels are now `저지연` and `VSync`; PCM labels describe the
+  intended target rather than warning text. Dedicated ? buttons explain the
+  display and PCM-latency trade-offs on hover or click.
+- README now includes the Tab diagnostics screenshot and concise compatibility
+  notes for OBS, APO/DSP, mixed refresh rates, and source frame-rate selection.
 
 v0.17.0 automatic capture-mode detection
 ----------------------------------------
