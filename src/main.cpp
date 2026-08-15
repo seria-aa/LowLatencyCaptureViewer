@@ -97,7 +97,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.1.0";
+constexpr wchar_t kAppVersionLabel[] = L"v1.1.1";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -904,8 +904,9 @@ static int RequestedVideoFrameRate() {
 }
 
 static constexpr int kRelativeScaleUnit = 1'000'000;
+static constexpr int kRelativeScaleSettingsVersion = 4;
 
-static int RelativeScaleForMonitor(HMONITOR monitor) {
+static int LegacyRelativeScaleForMonitor(HMONITOR monitor) {
     MONITORINFO info{sizeof(info)};
     if (!monitor || !GetMonitorInfoW(monitor, &info)) return 0;
     const int monitorWidth = info.rcMonitor.right - info.rcMonitor.left;
@@ -922,9 +923,33 @@ static int RelativeScaleForMonitor(HMONITOR monitor) {
                       kRelativeScaleUnit / 4, kRelativeScaleUnit);
 }
 
+static int RelativeScaleForMonitor(HMONITOR monitor) {
+    MONITORINFO info{sizeof(info)};
+    if (!monitor || !GetMonitorInfoW(monitor, &info)) return 0;
+    const int monitorWidth = info.rcMonitor.right - info.rcMonitor.left;
+    const int monitorHeight = info.rcMonitor.bottom - info.rcMonitor.top;
+    if (monitorWidth <= 0 || monitorHeight <= 0) return 0;
+    const auto& video = CurrentVideoPreset();
+    const int widthScale = static_cast<int>(
+        static_cast<int64_t>(video.width) * kRelativeScaleUnit /
+        monitorWidth);
+    const int heightScale = static_cast<int>(
+        static_cast<int64_t>(video.height) * kRelativeScaleUnit /
+        monitorHeight);
+    // DesiredClientPixelsForMonitor treats the scale as an aspect-preserving
+    // bounding box, so reproducing a given client size requires the larger
+    // normalized dimension. RememberRelativeScaleFromWindow uses the same
+    // definition. Using the smaller dimension double-shrank 1920x1080 on a
+    // 1920x1200 display to 1728x972 (90%).
+    return std::clamp((std::max)(widthScale, heightScale),
+                      kRelativeScaleUnit / 4, kRelativeScaleUnit);
+}
+
 static std::wstring SettingsPath() {
     return UserDataDirectory() + L"\\settings.ini";
 }
+
+static HMONITOR SavedViewerMonitor();
 
 static void LoadSettings() {
     MigrateLegacySettings();
@@ -949,6 +974,7 @@ static void LoadSettings() {
     wchar_t pixelPerfect[8]{};
     wchar_t relativeWindowSize[8]{};
     wchar_t relativeWindowScale[16]{};
+    wchar_t relativeWindowScaleVersion[16]{};
     wchar_t borderlessWindow[8]{};
     wchar_t windowSnap[8]{};
     wchar_t windowX[32]{};
@@ -1016,6 +1042,10 @@ static void LoadSettings() {
     GetPrivateProfileStringW(L"Video", L"RelativeWindowScalePpm", L"0",
                              relativeWindowScale,
                              ARRAYSIZE(relativeWindowScale), path.c_str());
+    GetPrivateProfileStringW(L"Video", L"RelativeWindowScaleVersion", L"0",
+                             relativeWindowScaleVersion,
+                             ARRAYSIZE(relativeWindowScaleVersion),
+                             path.c_str());
     GetPrivateProfileStringW(L"Video", L"BorderlessWindow", L"0", borderlessWindow,
                              ARRAYSIZE(borderlessWindow), path.c_str());
     GetPrivateProfileStringW(L"Window", L"Snap", L"1", windowSnap,
@@ -1143,6 +1173,29 @@ static void LoadSettings() {
         g_settings.windowY = static_cast<int>(wcstol(windowY, nullptr, 10));
         g_settings.monitorDevice = monitorDevice;
     }
+
+    // Older builds used the smaller normalized dimension on mixed-aspect
+    // displays. Correct only values that exactly match that legacy formula;
+    // do not recompute every saved scale from the last monitor. Recomputing
+    // would destroy a legitimate 50%/66.67% ratio after the user moved the
+    // viewer to another monitor and closed it there.
+    const int relativeScaleVersion = static_cast<int>(
+        wcstol(relativeWindowScaleVersion, nullptr, 10));
+    if (relativeScaleVersion < kRelativeScaleSettingsVersion &&
+        g_settings.relativeWindowSize && g_settings.pixelPerfect &&
+        g_settings.hasWindowPosition) {
+        const HMONITOR savedViewerMonitor = SavedViewerMonitor();
+        const int legacyScale = LegacyRelativeScaleForMonitor(
+            savedViewerMonitor);
+        const int correctedScale = RelativeScaleForMonitor(
+            savedViewerMonitor);
+        if (correctedScale > 0 &&
+            (g_settings.relativeWindowScalePpm <= 0 ||
+             (legacyScale != correctedScale &&
+              g_settings.relativeWindowScalePpm == legacyScale))) {
+            g_settings.relativeWindowScalePpm = correctedScale;
+        }
+    }
 }
 
 static void SaveSettings() {
@@ -1232,6 +1285,10 @@ static void SaveSettings() {
     swprintf_s(relativeScale, L"%d", g_settings.relativeWindowScalePpm);
     WritePrivateProfileStringW(L"Video", L"RelativeWindowScalePpm",
                                relativeScale, path.c_str());
+    wchar_t relativeScaleVersion[16]{};
+    swprintf_s(relativeScaleVersion, L"%d", kRelativeScaleSettingsVersion);
+    WritePrivateProfileStringW(L"Video", L"RelativeWindowScaleVersion",
+                               relativeScaleVersion, path.c_str());
     WritePrivateProfileStringW(L"Video", L"BorderlessWindow",
                                g_settings.borderlessWindow ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"Window", L"Snap",
@@ -3676,18 +3733,19 @@ struct DirectD3D11Renderer {
                         static_cast<LONG>(outputHeight)};
         RECT videoRect = outputRect;
         if (pixelPerfectFullscreen) {
-            const int integerScale = (std::min)(
-                static_cast<int>(outputWidth) / width,
-                static_cast<int>(outputHeight) / height);
             LONG displayWidth = 0;
             LONG displayHeight = 0;
-            if (integerScale >= 1) {
-                displayWidth = static_cast<LONG>(width * integerScale);
-                displayHeight = static_cast<LONG>(height * integerScale);
+            if (width <= static_cast<int>(outputWidth) &&
+                height <= static_cast<int>(outputHeight)) {
+                // Pixel-perfect means strict 1:1 mapping. Do not turn FHD
+                // into a 2x 4K Video Processor upscale; center the original
+                // capture pixels and clear the unused output to black.
+                displayWidth = static_cast<LONG>(width);
+                displayHeight = static_cast<LONG>(height);
                 fwprintf(stderr,
-                         L"[video] pixel-perfect fullscreen: %dx integer scale, "
+                         L"[video] pixel-perfect fullscreen: strict 1:1, "
                          L"centered %ld x %ld in %u x %u.\n",
-                         integerScale, displayWidth, displayHeight,
+                         displayWidth, displayHeight,
                          outputWidth, outputHeight);
             } else {
                 // Exact pixel mapping cannot fit when the capture is larger
@@ -4508,7 +4566,7 @@ struct SettingsDialogState {
     std::vector<AudioEndpointInfo> audioEndpoints;
     std::vector<PixelFormatSupport> pixelFormats;
     VideoPreset initialVideoPreset = VideoPreset::R1920x1080;
-    HMONITOR currentMonitor = nullptr;
+    HMONITOR viewerMonitor = nullptr;
     UINT32 selectedSharedPeriodFrames = 0;
     int selectedBufferMs = kRecommendedWasapiBufferMs;
     bool bufferItemsAreSharedFrames = false;
@@ -5288,15 +5346,6 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
     UpdateVideoCapabilityStatus(state);
 }
 
-static void FollowSettingsDialogMonitor(SettingsDialogState* state,
-                                        HMONITOR monitor) {
-    if (!state || !monitor ||
-        monitor == state->currentMonitor) {
-        return;
-    }
-    state->currentMonitor = monitor;
-}
-
 static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool accepted) {
     if (!state) return;
 
@@ -5400,21 +5449,19 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
         g_settings.relativeWindowSize = SendMessageW(
             state->relativeSizeCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (g_settings.relativeWindowSize) {
-            if (g_settings.pixelPerfect ||
-                !previouslyRelative ||
+            if (!previouslyRelative ||
                 previousVideoPreset != g_settings.videoPreset ||
                 g_settings.relativeWindowScalePpm <= 0) {
-                // Use the settings dialog's monitor as the sizing context;
-                // the saved viewer monitor is only a fallback.
-                HMONITOR baselineMonitor = state->currentMonitor;
-                if (!baselineMonitor && g_settings.hasWindowPosition) {
-                    baselineMonitor = MonitorFromPoint(
-                        POINT{g_settings.windowX, g_settings.windowY},
-                        MONITOR_DEFAULTTONULL);
+                // The settings dialog can be moved independently. Relative
+                // viewer sizing must remain based on the monitor where the
+                // viewer will reopen, not the dialog's current monitor.
+                HMONITOR baselineMonitor = state->viewerMonitor;
+                if (!baselineMonitor) {
+                    baselineMonitor = SavedViewerMonitor();
                 }
                 if (!baselineMonitor) {
-                    baselineMonitor = MonitorFromWindow(
-                        hwnd, MONITOR_DEFAULTTONEAREST);
+                    baselineMonitor = MonitorFromPoint(
+                        POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
                 }
                 g_settings.relativeWindowScalePpm = RelativeScaleForMonitor(
                     baselineMonitor);
@@ -5908,19 +5955,6 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         return 0;
     }
 
-    case WM_MOVE: {
-        if (state && state->videoCombo) {
-            HMONITOR monitor =
-                MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-            POINT cursor{};
-            if (!monitor && GetCursorPos(&cursor)) {
-                monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
-            }
-            FollowSettingsDialogMonitor(state, monitor);
-        }
-        break;
-    }
-
     case WM_DPICHANGED: {
         const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
         SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
@@ -6128,7 +6162,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-static bool ShowSettingsDialog(HINSTANCE hInst) {
+static bool ShowSettingsDialog(HINSTANCE hInst,
+                               bool preferSavedViewerMonitor) {
     static const wchar_t kSettingsClass[] = L"LowLatencyCaptureViewerSettingsDialogClass";
     static bool registered = false;
     if (!registered) {
@@ -6150,9 +6185,22 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
     state.audioEndpoints = EnumerateAudioEndpoints();
     POINT cursor{};
     GetCursorPos(&cursor);
-    const HMONITOR settingsMonitor = MonitorFromPoint(
-        cursor, MONITOR_DEFAULTTOPRIMARY);
-    state.currentMonitor = settingsMonitor;
+    const HMONITOR savedViewerMonitor = SavedViewerMonitor();
+    HMONITOR settingsMonitor = nullptr;
+    if (preferSavedViewerMonitor && savedViewerMonitor) {
+        // F2 closes the viewer before reopening settings in a child process.
+        // PersistWindowPosition has just saved the viewer's monitor, so keep
+        // the settings dialog with that viewer instead of following the mouse
+        // cursor to another display.
+        settingsMonitor = savedViewerMonitor;
+    }
+    if (!settingsMonitor) {
+        settingsMonitor = MonitorFromPoint(
+            cursor, MONITOR_DEFAULTTOPRIMARY);
+    }
+    state.viewerMonitor = savedViewerMonitor
+        ? savedViewerMonitor
+        : MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
     UINT settingsDpiX = GetDpiForSystem();
     UINT settingsDpiY = settingsDpiX;
     if (FAILED(GetDpiForMonitor(settingsMonitor, MDT_EFFECTIVE_DPI,
@@ -6177,7 +6225,7 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
         ((work.right - work.left) - settingsOuter.cx) / 2;
     const int settingsY = work.top +
         ((work.bottom - work.top) - settingsOuter.cy) / 2;
-        HWND hwnd = CreateWindowExW(
+    HWND hwnd = CreateWindowExW(
         settingsExStyle,
         kSettingsClass, UI_TEXT(L"Low Latency Capture Viewer 설정"),
         settingsStyle,
@@ -6185,7 +6233,19 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
         nullptr, nullptr, hInst, &state);
     if (!hwnd) return false;
 
+    // F2 reopens settings in a new process after the capture threads have
+    // stopped. Briefly promote the dialog while activating it, then return it
+    // to the normal z-order so it cannot remain hidden behind the previously
+    // foreground application and is never permanently topmost.
+    ShowWindow(hwnd, SW_SHOWNORMAL);
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    BringWindowToTop(hwnd);
     SetForegroundWindow(hwnd);
+    SetActiveWindow(hwnd);
+    SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    UpdateWindow(hwnd);
     MSG msg{};
     while (IsWindow(hwnd)) {
         const BOOL result = GetMessageW(&msg, nullptr, 0, 0);
@@ -6440,24 +6500,26 @@ static BOOL CALLBACK FindMonitorCallback(HMONITOR monitor, HDC, LPRECT,
     return TRUE;
 }
 
-static bool RestoredWindowOrigin(const SIZE& outerSize, POINT& origin) {
-    if (!g_settings.hasWindowPosition) return false;
-    MONITORINFOEXW monitorInfo{};
-    monitorInfo.cbSize = sizeof(monitorInfo);
-    HMONITOR monitor = nullptr;
+static HMONITOR SavedViewerMonitor() {
+    if (!g_settings.hasWindowPosition) return nullptr;
     if (!g_settings.monitorDevice.empty()) {
         MonitorLookup lookup{};
         lookup.wantedDevice = g_settings.monitorDevice;
         EnumDisplayMonitors(nullptr, nullptr, FindMonitorCallback,
                             reinterpret_cast<LPARAM>(&lookup));
-        monitor = lookup.match;
-        if (monitor) monitorInfo = lookup.info;
+        if (lookup.match) return lookup.match;
     }
-    if (!monitor) {
-        const POINT saved{g_settings.windowX, g_settings.windowY};
-        monitor = MonitorFromPoint(saved, MONITOR_DEFAULTTONULL);
-        if (monitor) GetMonitorInfoW(monitor, &monitorInfo);
-    }
+    return MonitorFromPoint(
+        POINT{g_settings.windowX, g_settings.windowY},
+        MONITOR_DEFAULTTONULL);
+}
+
+static bool RestoredWindowOrigin(const SIZE& outerSize, POINT& origin) {
+    if (!g_settings.hasWindowPosition) return false;
+    MONITORINFOEXW monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    HMONITOR monitor = SavedViewerMonitor();
+    if (monitor) GetMonitorInfoW(monitor, &monitorInfo);
     if (!monitor) {
         monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
         GetMonitorInfoW(monitor, &monitorInfo);
@@ -6873,6 +6935,10 @@ static void RestoreOneToOneWindow(HWND hwnd) {
     // fullscreen case. Prefer true fullscreen even when a borderless window
     // would happen to fit an auto-hidden-taskbar work area.
     if (SelectedResolutionMatchesMonitor(monitor)) {
+        if (g_settings.relativeWindowSize) {
+            g_settings.relativeWindowScalePpm =
+                RelativeScaleForMonitor(monitor);
+        }
         if (!fullscreen) ToggleFullscreen(hwnd);
         ShowTransientHud(TransientHudContent::OneToOne);
         fwprintf(stderr,
@@ -6883,6 +6949,12 @@ static void RestoreOneToOneWindow(HWND hwnd) {
     }
 
     if (outer.cx <= workWidth && outer.cy <= workHeight) {
+        if (g_settings.relativeWindowSize) {
+            // F5 establishes this monitor's 1:1 window as the new relative
+            // baseline as well, so subsequent monitor moves preserve it.
+            g_settings.relativeWindowScalePpm =
+                RelativeScaleForMonitor(monitor);
+        }
         if (fullscreen) ToggleFullscreen(hwnd, false, false);
         const int x = monitorInfo.rcWork.left + (workWidth - outer.cx) / 2;
         const int y = monitorInfo.rcWork.top + (workHeight - outer.cy) / 2;
@@ -7460,9 +7532,15 @@ static void RelaunchWithSettings() {
                                         commandLine.end());
     mutableCommand.push_back(L'\0');
     STARTUPINFOW startup{sizeof(startup)};
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_SHOWNORMAL;
     PROCESS_INFORMATION process{};
     if (CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr,
                        FALSE, 0, nullptr, nullptr, &startup, &process)) {
+        // Let the child activate its settings dialog when Windows accepts the
+        // foreground handoff. The dialog also has a short z-order promotion as
+        // a fallback for systems that reject foreground activation here.
+        AllowSetForegroundWindow(process.dwProcessId);
         CloseHandle(process.hThread);
         CloseHandle(process.hProcess);
     }
@@ -7493,7 +7571,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     const bool showStartupSettings = !smokeTest &&
         (forceSettings || shiftLaunch || !g_settings.skipStartupSettings);
-    if (showStartupSettings && !ShowSettingsDialog(hInst)) return 0;
+    if (showStartupSettings &&
+        !ShowSettingsDialog(hInst, forceSettings)) return 0;
 
     // Allocate a console for prototype diagnostics.
     const BOOL allocatedConsole = AllocConsole();
@@ -7562,11 +7641,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                                         ? fixedWindowStyle
                                         : (WS_OVERLAPPEDWINDOW | WS_VISIBLE);
     constexpr DWORD windowExStyle = 0;
-    const POINT initialMonitorPoint = g_settings.hasWindowPosition
-        ? POINT{g_settings.windowX, g_settings.windowY}
-        : POINT{0, 0};
-    const HMONITOR initialMonitor = MonitorFromPoint(
-        initialMonitorPoint, MONITOR_DEFAULTTOPRIMARY);
+    HMONITOR initialMonitor = SavedViewerMonitor();
+    if (!initialMonitor) {
+        initialMonitor = MonitorFromPoint(
+            POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    }
     const SIZE initialClient = InitialClientPixelsForMonitor(initialMonitor);
     const UINT initialDpi = EffectiveMonitorDpi(initialMonitor, nullptr);
     const SIZE outerSize = OuterSizeForClientPixels(

@@ -80,11 +80,11 @@ With **Pixel-perfect** enabled, the client area is fixed to the selected capture
 resolution and mouse resizing is disabled. With it disabled, the window remains
 freely resizable while preserving the video aspect ratio.
 
-Pixel-perfect fullscreen uses the largest integer scale that fits and clears
-unused space to black. QHD input therefore remains at 1x and is centered on a 4K
-display, while FHD input scales exactly 2x to fill 4K. If the capture is larger
-than the monitor, it is downscaled without cropping and with its aspect ratio
-preserved.
+Pixel-perfect fullscreen keeps a strict 1:1 mapping whenever the capture fits
+the monitor, centers the original image, and clears unused space to black. Both
+QHD and FHD input therefore remain at their original size on a 4K display. If
+the capture is larger than the monitor, it is downscaled without cropping and
+with its aspect ratio preserved.
 
 `F5` restores exact 1:1 client size without changing the saved Pixel-perfect
 option. If capture and monitor resolutions match, it uses fullscreen. If a 1:1
@@ -104,9 +104,11 @@ driver supports it and does not add a frame queue. If unsupported, it falls back
 to Smooth.
 
 **Keep relative window size when moving monitors** preserves a similar fraction
-of the screen across monitors with different resolutions or DPI and restores
-that ratio on the next launch. It is independent of Pixel-perfect and may break
-1:1 after a monitor move; press `F5` to restore exact mapping.
+of the limiting display dimension across monitors with different resolutions,
+DPI, or aspect ratios and restores that ratio on the next launch. It preserves
+video aspect ratio without an extra shrink on 16:10, 21:9, and 32:9 displays.
+It is independent of Pixel-perfect and may break 1:1 after a monitor move;
+press `F5` to restore exact mapping.
 
 **Hide title bar** removes the caption and border in windowed mode. Edge snap
 works at outer monitor edges and shared boundaries. Entry and release distance

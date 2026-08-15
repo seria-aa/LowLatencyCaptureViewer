@@ -1,7 +1,22 @@
-Low Latency Capture Viewer v1.1.0 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.1.1 x64 (continued from the v0.14.2 rework)
+
+v1.1.1 multi-monitor and strict pixel-perfect maintenance release
+----------------------------------------------------
+- Pixel-perfect fullscreen now keeps strict 1:1 output when the capture fits
+  the monitor, centers it, and clears unused space to black. Only oversized
+  captures are downscaled with their aspect ratio preserved.
+- Relative window sizing now uses the same limiting-dimension definition when
+  calculating and restoring the saved ratio. This prevents an extra shrink on
+  16:10, 21:9, and 32:9 displays.
+- Existing custom relative sizes are preserved; only an exact match for the
+  legacy mixed-aspect formula is migrated once.
+- F2 settings reopen on the saved viewer monitor and are explicitly activated.
+  Moving the settings dialog no longer changes the viewer's sizing baseline.
+- The capture, latest-frame-only D3D11, and WASAPI paths are unchanged and no
+  new persistent queue is introduced.
 
 v1.1.0 frame-rate and pixel-perfect display release
-----------------------------------------------------
+---------------------------------------------------
 - Added selectable 30 fps capture. Exact 30/29.97 media types are recognized,
   and UVC drivers that expose 30 fps only through VIDEO_STREAM_CONFIG_CAPS are
   supported by configuring the capture pin itself at 30 fps.
