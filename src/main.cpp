@@ -46,6 +46,7 @@
 #include <cstdlib>
 #include <cwchar>
 #include <cwctype>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -85,12 +86,6 @@ static const CLSID CLSID_SampleGrabber =
 static const CLSID CLSID_NullRenderer =
 {0xC1F400A4,0x3F08,0x11D3,{0x9F,0x0B,0x00,0x60,0x08,0x03,0x9E,0x37}};
 
-// wmcodecdsp.h declares MEDIASUBTYPE_AVC1 as an imported symbol. Keep the
-// FOURCC GUID local so AVC1-only UVC devices do not add a runtime dependency
-// on a legacy Windows Media codec library.
-static const GUID kMediaSubtypeAvc1 =
-{0x31435641,0x0000,0x0010,{0x80,0x00,0x00,0xaa,0x00,0x38,0x9b,0x71}};
-
 // -----------------------------------------------------------------------------
 // User-tested settings.
 // -----------------------------------------------------------------------------
@@ -102,7 +97,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.0.6.2 Beta";
+constexpr wchar_t kAppVersionLabel[] = L"v1.1.0";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -149,8 +144,6 @@ enum class VideoPixelFormat {
     Nv12,
     Yuy2,
     Mjpeg,
-    H264,
-    Mpeg4,
 };
 
 enum class UiLanguage {
@@ -237,6 +230,8 @@ static constexpr VideoPresetInfo kVideoPresets[] = {
 };
 
 static AppSettings g_settings{};
+static std::atomic<bool> g_fullscreen{false};
+static std::atomic<uint64_t> g_outputConfigurationGeneration{0};
 
 static bool IsEnglishUi() {
     if (g_settings.uiLanguage == UiLanguage::English) return true;
@@ -273,8 +268,6 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"지원 포맷 없음", L"No supported format"},
         {L"자동 선택 (NV12 우선 · 권장)", L"Auto select (NV12 first · recommended)"},
         {L"MJPEG (실험적 압축 호환)", L"MJPEG (experimental compressed compatibility)"},
-        {L"H.264 / AVC (실험적 압축 호환)", L"H.264 / AVC (experimental compressed compatibility)"},
-        {L"MPEG-4 (실험적 압축 호환)", L"MPEG-4 (experimental compressed compatibility)"},
         {L"오디오 출력 모드", L"Audio output mode"},
         {L"WASAPI Shared (호환성 우선 · 권장)", L"WASAPI Shared (compatibility · recommended)"},
         {L"WASAPI Exclusive (지연 최소화 · 장치 독점)", L"WASAPI Exclusive (minimum latency · exclusive device)"},
@@ -425,6 +418,9 @@ static std::atomic<UINT32> g_audioQueueTargetFrames{0};
 static std::atomic<int> g_volumePercent{100};
 static std::atomic<bool> g_backgroundAudioMuted{false};
 static std::atomic<uint64_t> g_volumeHudUntilMs{0};
+enum class TransientHudContent { Volume, OneToOne, OneToOneUnavailable };
+static std::atomic<TransientHudContent> g_transientHudContent{
+    TransientHudContent::Volume};
 static std::atomic<uint64_t> g_overlayGeneration{1};
 static std::atomic<uint64_t> g_overlayRenderedFrames{0};
 static std::atomic<double> g_osdInputFps{0.0};
@@ -476,8 +472,6 @@ static int TeeFwprintf(FILE* stream, const wchar_t* format, ...) {
 static const wchar_t* PixelFormatName(VideoPixelFormat format) {
     switch (format) {
     case VideoPixelFormat::Mjpeg: return L"MJPEG";
-    case VideoPixelFormat::H264: return L"H.264";
-    case VideoPixelFormat::Mpeg4: return L"MPEG-4";
     case VideoPixelFormat::Yuy2: return L"YUY2";
     case VideoPixelFormat::Nv12: return L"NV12";
     default: return L"Auto";
@@ -487,17 +481,13 @@ static const wchar_t* PixelFormatName(VideoPixelFormat format) {
 static const GUID& PixelFormatSubtype(VideoPixelFormat format) {
     switch (format) {
     case VideoPixelFormat::Mjpeg: return MEDIASUBTYPE_MJPG;
-    case VideoPixelFormat::H264: return MEDIASUBTYPE_H264;
-    case VideoPixelFormat::Mpeg4: return MFVideoFormat_MP4V;
     case VideoPixelFormat::Yuy2: return MEDIASUBTYPE_YUY2;
     default: return MEDIASUBTYPE_NV12;
     }
 }
 
 static bool IsCompressedVideoFormat(VideoPixelFormat format) {
-    return format == VideoPixelFormat::Mjpeg ||
-           format == VideoPixelFormat::H264 ||
-           format == VideoPixelFormat::Mpeg4;
+    return format == VideoPixelFormat::Mjpeg;
 }
 
 static VideoPixelFormat VideoPixelFormatFromSubtype(const GUID& subtype) {
@@ -506,11 +496,6 @@ static VideoPixelFormat VideoPixelFormatFromSubtype(const GUID& subtype) {
     if (subtype == MEDIASUBTYPE_MJPG || subtype == MFVideoFormat_MJPG) {
         return VideoPixelFormat::Mjpeg;
     }
-    if (subtype == MEDIASUBTYPE_H264 || subtype == kMediaSubtypeAvc1 ||
-        subtype == MFVideoFormat_H264) {
-        return VideoPixelFormat::H264;
-    }
-    if (subtype == MFVideoFormat_MP4V) return VideoPixelFormat::Mpeg4;
     return VideoPixelFormat::Auto;
 }
 
@@ -1123,13 +1108,9 @@ static void LoadSettings() {
         g_settings.pixelFormat = VideoPixelFormat::Yuy2;
     } else if (_wcsicmp(pixelFormat, L"MJPEG") == 0) {
         g_settings.pixelFormat = VideoPixelFormat::Mjpeg;
-    } else if (_wcsicmp(pixelFormat, L"H.264") == 0 ||
-               _wcsicmp(pixelFormat, L"H264") == 0) {
-        g_settings.pixelFormat = VideoPixelFormat::H264;
-    } else if (_wcsicmp(pixelFormat, L"MPEG-4") == 0 ||
-               _wcsicmp(pixelFormat, L"MP4V") == 0) {
-        g_settings.pixelFormat = VideoPixelFormat::Mpeg4;
     } else {
+        // Older beta settings may contain H.264 or MPEG-4. Those modes are
+        // no longer accepted by this low-latency viewer, so use Auto instead.
         g_settings.pixelFormat = VideoPixelFormat::Auto;
     }
     const int savedFrameRate = static_cast<int>(
@@ -2858,6 +2839,48 @@ static bool VideoFormatDetails(const AM_MEDIA_TYPE* mediaType, int& width,
     return width > 0 && height > 0;
 }
 
+static bool SetVideoFrameDuration(AM_MEDIA_TYPE* mediaType,
+                                  REFERENCE_TIME frameDuration) {
+    if (!mediaType || frameDuration <= 0) return false;
+    if (mediaType->formattype == FORMAT_VideoInfo2 &&
+        mediaType->cbFormat >= sizeof(VIDEOINFOHEADER2)) {
+        auto* info = reinterpret_cast<VIDEOINFOHEADER2*>(mediaType->pbFormat);
+        info->AvgTimePerFrame = frameDuration;
+        return true;
+    }
+    if (mediaType->formattype == FORMAT_VideoInfo &&
+        mediaType->cbFormat >= sizeof(VIDEOINFOHEADER)) {
+        auto* info = reinterpret_cast<VIDEOINFOHEADER*>(mediaType->pbFormat);
+        info->AvgTimePerFrame = frameDuration;
+        return true;
+    }
+    if (mediaType->formattype == FORMAT_MPEG2Video &&
+        mediaType->cbFormat >= FIELD_OFFSET(MPEG2VIDEOINFO, dwSequenceHeader)) {
+        auto* info = reinterpret_cast<MPEG2VIDEOINFO*>(mediaType->pbFormat);
+        info->hdr.AvgTimePerFrame = frameDuration;
+        return true;
+    }
+    return false;
+}
+
+static REFERENCE_TIME FrameDurationForRate(int fps) {
+    return fps > 0 ? (10'000'000 + fps / 2) / fps : 0;
+}
+
+static bool FrameRateAllowedByCaps(const VIDEO_STREAM_CONFIG_CAPS& caps,
+                                   int fps) {
+    const REFERENCE_TIME duration = FrameDurationForRate(fps);
+    if (duration <= 0 || caps.MinFrameInterval <= 0 ||
+        caps.MaxFrameInterval <= 0) {
+        return false;
+    }
+    const REFERENCE_TIME minimum =
+        std::min(caps.MinFrameInterval, caps.MaxFrameInterval);
+    const REFERENCE_TIME maximum =
+        std::max(caps.MinFrameInterval, caps.MaxFrameInterval);
+    return duration >= minimum && duration <= maximum;
+}
+
 static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
                                  int wantedHeight, int wantedFps,
                                  VideoPixelFormat wantedFormat,
@@ -2889,6 +2912,9 @@ static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
         hr = config->GetStreamCaps(i, &candidate, caps.data());
         if (FAILED(hr) || !candidate) continue;
 
+        VIDEO_STREAM_CONFIG_CAPS streamCaps{};
+        std::memcpy(&streamCaps, caps.data(), sizeof(streamCaps));
+
         int width = 0;
         int height = 0;
         REFERENCE_TIME duration = 0;
@@ -2896,10 +2922,10 @@ static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
         VideoPixelFormat format = VideoPixelFormat::Nv12;
         const bool details = VideoFormatDetails(candidate, width, height,
                                                 duration, bytes, &format);
-        const int fps = duration > 0
-                            ? static_cast<int>((10'000'000 + duration / 2) /
-                                               duration)
-                            : 0;
+        int fps = duration > 0
+                      ? static_cast<int>((10'000'000 + duration / 2) /
+                                         duration)
+                      : 0;
         // Compressed capture is opt-in. Auto preserves the original raw
         // NV12/YUY2 path even when the device advertises alternatives.
         const bool formatMatches = wantedFormat == VideoPixelFormat::Auto
@@ -2908,6 +2934,16 @@ static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
             : format == wantedFormat;
         if (details && formatMatches && width == wantedWidth &&
             height == wantedHeight && fps > 0) {
+            // Some UVC drivers advertise only their maximum-rate media type
+            // and expose slower supported rates through the capability range.
+            // Materialize the requested rate so 30 fps configures the capture
+            // pin itself instead of receiving a faster stream and dropping it.
+            if (wantedFps == 30 && fps != wantedFps &&
+                FrameRateAllowedByCaps(streamCaps, wantedFps) &&
+                SetVideoFrameDuration(candidate,
+                                      FrameDurationForRate(wantedFps))) {
+                fps = wantedFps;
+            }
             candidates.push_back({candidate, fps, bytes, format});
             continue;
         }
@@ -2933,9 +2969,7 @@ static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
                     case VideoPixelFormat::Nv12: return 0;
                     case VideoPixelFormat::Yuy2: return 1;
                     case VideoPixelFormat::Mjpeg: return 2;
-                    case VideoPixelFormat::H264: return 3;
-                    case VideoPixelFormat::Mpeg4: return 4;
-                    default: return 5;
+                    default: return 3;
                     }
                 };
                 return rank(a.format) < rank(b.format);
@@ -3031,6 +3065,10 @@ static std::vector<PixelFormatSupport> ProbePixelFormats(
         AM_MEDIA_TYPE* mediaType = nullptr;
         if (FAILED(config->GetStreamCaps(i, &mediaType, caps.data())) ||
             !mediaType) continue;
+        VIDEO_STREAM_CONFIG_CAPS streamCaps{};
+        if (capBytes >= static_cast<int>(sizeof(streamCaps))) {
+            std::memcpy(&streamCaps, caps.data(), sizeof(streamCaps));
+        }
         int candidateWidth = 0;
         int candidateHeight = 0;
         REFERENCE_TIME duration = 0;
@@ -3038,6 +3076,7 @@ static std::vector<PixelFormatSupport> ProbePixelFormats(
         VideoPixelFormat format = VideoPixelFormat::Auto;
         if (VideoFormatDetails(mediaType, candidateWidth, candidateHeight,
                                duration, bytes, &format) &&
+            format != VideoPixelFormat::Auto &&
             candidateWidth == width && candidateHeight == height &&
             duration > 0) {
             const int fps = static_cast<int>(
@@ -3051,6 +3090,21 @@ static std::vector<PixelFormatSupport> ProbePixelFormats(
             if (!duplicate) {
                 result.push_back({format, fps});
             }
+
+            // A number of UVC drivers list only the fastest default media
+            // type, while VIDEO_STREAM_CONFIG_CAPS still declares 30 fps as
+            // valid. Surface that standard rate in the selector as well.
+            constexpr int kAdditionalFrameRate = 30;
+            const bool thirtyFpsDuplicate = std::any_of(
+                result.begin(), result.end(),
+                [format](const PixelFormatSupport& support) {
+                    return support.format == format &&
+                           support.selectedFps == 30;
+                });
+            if (!thirtyFpsDuplicate &&
+                FrameRateAllowedByCaps(streamCaps, kAdditionalFrameRate)) {
+                result.push_back({format, kAdditionalFrameRate});
+            }
         }
         DeleteMediaType(mediaType);
     }
@@ -3063,9 +3117,7 @@ static std::vector<PixelFormatSupport> ProbePixelFormats(
                           case VideoPixelFormat::Nv12: return 0;
                           case VideoPixelFormat::Yuy2: return 1;
                           case VideoPixelFormat::Mjpeg: return 2;
-                          case VideoPixelFormat::H264: return 3;
-                          case VideoPixelFormat::Mpeg4: return 4;
-                          default: return 5;
+                          default: return 3;
                           }
                       };
                       return rank(left.format) < rank(right.format);
@@ -3197,6 +3249,9 @@ struct DirectD3D11Renderer {
     IDWriteTextLayout* volumeTextLayout = nullptr;
     UINT outputWidth = 0;
     UINT outputHeight = 0;
+    bool pixelPerfectFullscreen = false;
+    bool pixelPerfectBorders = false;
+    uint64_t outputConfigurationGeneration = 0;
     uint64_t cachedOverlayGeneration = 0;
     UINT nextUploadSurface = 0;
     UINT activeUploadSurface = 0;
@@ -3254,6 +3309,9 @@ struct DirectD3D11Renderer {
         SafeRelease(device);
         outputWidth = 0;
         outputHeight = 0;
+        pixelPerfectFullscreen = false;
+        pixelPerfectBorders = false;
+        outputConfigurationGeneration = 0;
         cachedOverlayGeneration = 0;
         nextUploadSurface = 0;
         activeUploadSurface = 0;
@@ -3273,15 +3331,26 @@ struct DirectD3D11Renderer {
         return device ? device->GetDeviceRemovedReason() : E_POINTER;
     }
 
+    bool outputConfigurationChanged() const {
+        return outputConfigurationGeneration !=
+            g_outputConfigurationGeneration.load(std::memory_order_acquire);
+    }
+
     HRESULT initialize(HWND hwnd, int width, int height, int fps,
                        VideoPixelFormat pixelFormat) {
         reset();
+        const uint64_t configurationGeneration =
+            g_outputConfigurationGeneration.load(std::memory_order_acquire);
         RECT clientRect{};
         GetClientRect(hwnd, &clientRect);
         outputWidth = static_cast<UINT>((std::max)(
             1L, clientRect.right - clientRect.left));
         outputHeight = static_cast<UINT>((std::max)(
             1L, clientRect.bottom - clientRect.top));
+        pixelPerfectFullscreen =
+            g_settings.pixelPerfect &&
+            g_fullscreen.load(std::memory_order_acquire);
+        outputConfigurationGeneration = configurationGeneration;
         UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT |
                      D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
         D3D_FEATURE_LEVEL featureLevel{};
@@ -3388,7 +3457,8 @@ struct DirectD3D11Renderer {
         }
         hr = videoDevice->CreateVideoProcessor(enumerator, 0, &processor);
         if (FAILED(hr)) return hr;
-        if (g_settings.scalingMode == ScalingMode::Sharp) {
+        if (g_settings.scalingMode == ScalingMode::Sharp &&
+            !g_settings.pixelPerfect) {
             D3D11_VIDEO_PROCESSOR_FILTER_RANGE sharpness{};
             if (SUCCEEDED(enumerator->GetVideoProcessorFilterRange(
                     D3D11_VIDEO_PROCESSOR_FILTER_EDGE_ENHANCEMENT, &sharpness)) &&
@@ -3604,10 +3674,53 @@ struct DirectD3D11Renderer {
         RECT sourceRect{0, 0, width, height};
         RECT outputRect{0, 0, static_cast<LONG>(outputWidth),
                         static_cast<LONG>(outputHeight)};
+        RECT videoRect = outputRect;
+        if (pixelPerfectFullscreen) {
+            const int integerScale = (std::min)(
+                static_cast<int>(outputWidth) / width,
+                static_cast<int>(outputHeight) / height);
+            LONG displayWidth = 0;
+            LONG displayHeight = 0;
+            if (integerScale >= 1) {
+                displayWidth = static_cast<LONG>(width * integerScale);
+                displayHeight = static_cast<LONG>(height * integerScale);
+                fwprintf(stderr,
+                         L"[video] pixel-perfect fullscreen: %dx integer scale, "
+                         L"centered %ld x %ld in %u x %u.\n",
+                         integerScale, displayWidth, displayHeight,
+                         outputWidth, outputHeight);
+            } else {
+                // Exact pixel mapping cannot fit when the capture is larger
+                // than the display. Preserve the complete picture and aspect
+                // ratio instead of cropping it.
+                const double scale = (std::min)(
+                    static_cast<double>(outputWidth) / width,
+                    static_cast<double>(outputHeight) / height);
+                displayWidth = (std::max)(
+                    1L, static_cast<LONG>(std::lround(width * scale)));
+                displayHeight = (std::max)(
+                    1L, static_cast<LONG>(std::lround(height * scale)));
+                fwprintf(stderr,
+                         L"[video] pixel-perfect fullscreen cannot fit 1:1; "
+                         L"aspect-preserving downscale to %ld x %ld in %u x %u.\n",
+                         displayWidth, displayHeight, outputWidth, outputHeight);
+            }
+            videoRect.left =
+                (static_cast<LONG>(outputWidth) - displayWidth) / 2;
+            videoRect.top =
+                (static_cast<LONG>(outputHeight) - displayHeight) / 2;
+            videoRect.right = videoRect.left + displayWidth;
+            videoRect.bottom = videoRect.top + displayHeight;
+            pixelPerfectBorders =
+                videoRect.left != outputRect.left ||
+                videoRect.top != outputRect.top ||
+                videoRect.right != outputRect.right ||
+                videoRect.bottom != outputRect.bottom;
+        }
         videoContext->VideoProcessorSetStreamSourceRect(processor, 0, TRUE,
                                                         &sourceRect);
         videoContext->VideoProcessorSetStreamDestRect(processor, 0, TRUE,
-                                                      &outputRect);
+                                                      &videoRect);
         videoContext->VideoProcessorSetOutputTargetRect(processor, TRUE,
                                                         &outputRect);
         D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputColor{};
@@ -3649,12 +3762,27 @@ struct DirectD3D11Renderer {
             &osdTextLayout);
         if (FAILED(hr)) return hr;
 
-        wchar_t volumeText[64]{};
-        swprintf_s(volumeText, UI_TEXT(L"음량  %d%%"),
-                   g_volumePercent.load(std::memory_order_acquire));
+        const TransientHudContent hudContent =
+            g_transientHudContent.load(std::memory_order_acquire);
+        wchar_t volumeText[96]{};
+        if (hudContent == TransientHudContent::OneToOne) {
+            const auto& video = CurrentVideoPreset();
+            swprintf_s(volumeText,
+                       IsEnglishUi() ? L"1:1 Pixel-perfect\n%d x %d"
+                                     : L"1:1 Pixel-perfect\n%d x %d",
+                       video.width, video.height);
+        } else if (hudContent ==
+                   TransientHudContent::OneToOneUnavailable) {
+            wcscpy_s(volumeText,
+                     IsEnglishUi() ? L"1:1 unavailable\nLarger than this display"
+                                   : L"1:1 표시 불가\n현재 모니터보다 큼");
+        } else {
+            swprintf_s(volumeText, UI_TEXT(L"음량  %d%%"),
+                       g_volumePercent.load(std::memory_order_acquire));
+        }
         hr = dwriteFactory->CreateTextLayout(
             volumeText, static_cast<UINT32>(wcslen(volumeText)),
-            volumeTextFormat, 228.0f, 36.0f, &volumeTextLayout);
+            volumeTextFormat, 228.0f, 62.0f, &volumeTextLayout);
         if (FAILED(hr)) return hr;
 
         osdCacheTarget->BeginDraw();
@@ -3679,22 +3807,24 @@ struct DirectD3D11Renderer {
                               8.0f, 8.0f),
             volumeCacheBackgroundBrush);
         volumeCacheTarget->DrawTextLayout(
-            D2D1::Point2F(16.0f, 10.0f), volumeTextLayout,
+            D2D1::Point2F(16.0f, 6.0f), volumeTextLayout,
             volumeCacheTextBrush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        const D2D1_RECT_F volumeBarBackground =
-            D2D1::RectF(16.0f, 57.0f, 244.0f, 66.0f);
-        volumeCacheTarget->FillRectangle(
-            volumeBarBackground, volumeCacheBarBackgroundBrush);
-        D2D1_RECT_F volumeBar = volumeBarBackground;
-        const int volumeBarMaximum = g_settings.allowVolumeBoost
-            ? kMaximumVolumePercent : 100;
-        volumeBar.right = volumeBar.left +
-            (volumeBarBackground.right - volumeBarBackground.left) *
-                g_volumePercent.load(std::memory_order_acquire) /
-                static_cast<float>(volumeBarMaximum);
-        if (volumeBar.right > volumeBar.left) {
-            volumeCacheTarget->FillRectangle(volumeBar,
-                                             volumeCacheBarBrush);
+        if (hudContent == TransientHudContent::Volume) {
+            const D2D1_RECT_F volumeBarBackground =
+                D2D1::RectF(16.0f, 57.0f, 244.0f, 66.0f);
+            volumeCacheTarget->FillRectangle(
+                volumeBarBackground, volumeCacheBarBackgroundBrush);
+            D2D1_RECT_F volumeBar = volumeBarBackground;
+            const int volumeBarMaximum = g_settings.allowVolumeBoost
+                ? kMaximumVolumePercent : 100;
+            volumeBar.right = volumeBar.left +
+                (volumeBarBackground.right - volumeBarBackground.left) *
+                    g_volumePercent.load(std::memory_order_acquire) /
+                    static_cast<float>(volumeBarMaximum);
+            if (volumeBar.right > volumeBar.left) {
+                volumeCacheTarget->FillRectangle(volumeBar,
+                                                 volumeCacheBarBrush);
+            }
         }
         hr = volumeCacheTarget->EndDraw();
         return hr;
@@ -3803,6 +3933,10 @@ struct DirectD3D11Renderer {
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE;
         stream.pInputSurface = inputViews[activeUploadSurface];
+        if (pixelPerfectBorders) {
+            const float black[4]{0.0f, 0.0f, 0.0f, 1.0f};
+            context->ClearRenderTargetView(backBufferRenderTarget, black);
+        }
         HRESULT hr = videoContext->VideoProcessorBlt(
             processor, outputView, 0, 1, &stream);
         if (FAILED(hr)) return hr;
@@ -4144,6 +4278,22 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             }
             IMediaSample* videoSample = latest.takeLatest(arrivalUs);
             if (!videoSample) continue;
+            if (renderer.outputConfigurationChanged()) {
+                hr = renderer.initialize(host, preset.width, preset.height,
+                                         configuredFps,
+                                         rendererInputFormat);
+                if (FAILED(hr)) {
+                    if (recoverRenderer(L"D3D11 output resize", hr)) {
+                        hr = S_OK;
+                    } else {
+                        videoSample->Release();
+                        initialized = false;
+                        break;
+                    }
+                }
+                g_overlayGeneration.fetch_add(1,
+                                               std::memory_order_relaxed);
+            }
             BYTE* sampleData = nullptr;
             IMFMediaBuffer* decodedBuffer = nullptr;
             if (compressedVideo) {
@@ -4951,12 +5101,14 @@ static VideoPixelFormat SelectedPixelFormat(
                            : static_cast<VideoPixelFormat>(value);
 }
 
-static bool HasRawLowLatencyVideoFormat(
+static bool HasRealtimeRawVideoFormat(
     const std::vector<PixelFormatSupport>& formats) {
     return std::any_of(formats.begin(), formats.end(),
                        [](const PixelFormatSupport& support) {
-                           return support.format == VideoPixelFormat::Nv12 ||
-                                  support.format == VideoPixelFormat::Yuy2;
+                           const bool raw =
+                               support.format == VideoPixelFormat::Nv12 ||
+                               support.format == VideoPixelFormat::Yuy2;
+                           return raw && support.selectedFps >= 30;
                        });
 }
 
@@ -4980,15 +5132,18 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
         message = UI_TEXT(L"지원 모드 없음: 다른 장치 또는 해상도를 선택하세요.");
     } else {
         message = UI_TEXT(L"자동 인식: ");
-        const bool rawAvailable = HasRawLowLatencyVideoFormat(
+        // Do not hide MJPEG merely because a device advertises an unusably
+        // slow raw mode. A raw mode must reach at least 30 fps before it takes
+        // exclusive priority in the normal selector.
+        const bool realtimeRawAvailable = HasRealtimeRawVideoFormat(
             state->pixelFormats);
         bool firstFormat = true;
         for (const auto format : {VideoPixelFormat::Nv12,
                                   VideoPixelFormat::Yuy2,
-                                  VideoPixelFormat::Mjpeg,
-                                  VideoPixelFormat::H264,
-                                  VideoPixelFormat::Mpeg4}) {
-            if (rawAvailable && IsCompressedVideoFormat(format)) continue;
+                                  VideoPixelFormat::Mjpeg}) {
+            if (realtimeRawAvailable && IsCompressedVideoFormat(format)) {
+                continue;
+            }
             std::vector<int> frameRates;
             for (const auto& support : state->pixelFormats) {
                 if (support.format == format) {
@@ -5102,13 +5257,12 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
                  static_cast<WPARAM>(autoIndex),
                  static_cast<LPARAM>(VideoPixelFormat::Auto));
     LRESULT selectedIndex = autoIndex;
-    const bool rawAvailable = HasRawLowLatencyVideoFormat(state->pixelFormats);
+    const bool realtimeRawAvailable = HasRealtimeRawVideoFormat(
+        state->pixelFormats);
     for (const auto format : {VideoPixelFormat::Nv12,
                               VideoPixelFormat::Yuy2,
-                              VideoPixelFormat::Mjpeg,
-                              VideoPixelFormat::H264,
-                              VideoPixelFormat::Mpeg4}) {
-        if (rawAvailable && IsCompressedVideoFormat(format)) continue;
+                              VideoPixelFormat::Mjpeg}) {
+        if (realtimeRawAvailable && IsCompressedVideoFormat(format)) continue;
         const bool available = std::any_of(
             state->pixelFormats.begin(), state->pixelFormats.end(),
             [format](const PixelFormatSupport& support) {
@@ -5119,11 +5273,7 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
             ? L"NV12 8-bit 4:2:0"
             : format == VideoPixelFormat::Yuy2
                 ? L"YUY2 8-bit 4:2:2"
-                : format == VideoPixelFormat::Mjpeg
-                        ? UI_TEXT(L"MJPEG (실험적 압축 호환)")
-                        : format == VideoPixelFormat::H264
-                            ? UI_TEXT(L"H.264 / AVC (실험적 압축 호환)")
-                            : UI_TEXT(L"MPEG-4 (실험적 압축 호환)");
+                : UI_TEXT(L"MJPEG (실험적 압축 호환)");
         const LRESULT index = SendMessageW(
             state->pixelFormatCombo, CB_ADDSTRING, 0,
             reinterpret_cast<LPARAM>(label));
@@ -6067,10 +6217,10 @@ static bool ShowSettingsDialog(HINSTANCE hInst) {
 // Win32 UI
 // -----------------------------------------------------------------------------
 
-static bool g_fullscreen = false;
-// Set only when pixel-perfect startup automatically fills a matching monitor.
-// Esc exits the viewer directly in that case; manually entered F11 fullscreen
-// retains the usual first-Esc-to-windowed behavior.
+// Set when startup automatically fills a monitor whose resolution matches the
+// selected capture resolution. Esc exits the viewer directly in that case;
+// manually entered F11 fullscreen retains the usual first-Esc-to-windowed
+// behavior.
 static bool g_autoFullscreen = false;
 static WINDOWPLACEMENT g_prevPlacement{ sizeof(g_prevPlacement) };
 static LONG_PTR g_prevStyle = 0;
@@ -6634,8 +6784,9 @@ static LRESULT CALLBACK VideoHostSubclassProc(
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
-static void ToggleFullscreen(HWND hwnd, bool automaticStartup = false) {
-    if (!g_fullscreen) {
+static void ToggleFullscreen(HWND hwnd, bool automaticStartup = false,
+                             bool updateOutput = true) {
+    if (!g_fullscreen.load(std::memory_order_acquire)) {
         GetWindowRect(hwnd, &g_lastWindowedRect);
         g_haveLastWindowedRect = true;
         g_prevStyle = GetWindowLongPtrW(hwnd, GWL_STYLE);
@@ -6644,6 +6795,7 @@ static void ToggleFullscreen(HWND hwnd, bool automaticStartup = false) {
         MONITORINFO mi{ sizeof(mi) };
         GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
 
+        g_fullscreen.store(true, std::memory_order_release);
         SetWindowLongPtrW(hwnd, GWL_STYLE, g_prevStyle & ~WS_OVERLAPPEDWINDOW);
         SetWindowPos(hwnd, HWND_TOP,
                      mi.rcMonitor.left, mi.rcMonitor.top,
@@ -6651,24 +6803,26 @@ static void ToggleFullscreen(HWND hwnd, bool automaticStartup = false) {
                      mi.rcMonitor.bottom - mi.rcMonitor.top,
                      SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
         ShowCursor(FALSE);
-        g_fullscreen = true;
         g_autoFullscreen = automaticStartup;
     } else {
+        g_fullscreen.store(false, std::memory_order_release);
         SetWindowLongPtrW(hwnd, GWL_STYLE, g_prevStyle);
         SetWindowPlacement(hwnd, &g_prevPlacement);
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                      SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
                      SWP_NOZORDER | SWP_NOOWNERZORDER);
         ShowCursor(TRUE);
-        g_fullscreen = false;
         g_autoFullscreen = false;
+    }
+    if (updateOutput) {
+        g_outputConfigurationGeneration.fetch_add(
+            1, std::memory_order_acq_rel);
     }
 }
 
-static bool SelectedResolutionMatchesMonitor(HWND hwnd) {
+static bool SelectedResolutionMatchesMonitor(HMONITOR monitor) {
     MONITORINFO monitorInfo{sizeof(monitorInfo)};
-    const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    if (!GetMonitorInfoW(monitor, &monitorInfo)) return false;
+    if (!monitor || !GetMonitorInfoW(monitor, &monitorInfo)) return false;
 
     const auto& video = CurrentVideoPreset();
     const int monitorWidth = monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left;
@@ -6676,8 +6830,82 @@ static bool SelectedResolutionMatchesMonitor(HWND hwnd) {
     return video.width == monitorWidth && video.height == monitorHeight;
 }
 
+static bool ClientSizeFillsMonitor(const SIZE& client, HMONITOR monitor) {
+    MONITORINFO monitorInfo{sizeof(monitorInfo)};
+    if (!monitor || !GetMonitorInfoW(monitor, &monitorInfo)) return false;
+    const int monitorWidth =
+        monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left;
+    const int monitorHeight =
+        monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top;
+    return client.cx == monitorWidth && client.cy == monitorHeight;
+}
+
+static void ShowTransientHud(TransientHudContent content) {
+    g_transientHudContent.store(content, std::memory_order_release);
+    g_volumeHudUntilMs.store(GetTickCount64() + 1500,
+                             std::memory_order_release);
+    g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
+}
+
+static void RestoreOneToOneWindow(HWND hwnd) {
+    if (!hwnd) return;
+    const auto& video = CurrentVideoPreset();
+    const HMONITOR monitor =
+        MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitorInfo{sizeof(monitorInfo)};
+    if (!monitor || !GetMonitorInfoW(monitor, &monitorInfo)) return;
+
+    const bool fullscreen =
+        g_fullscreen.load(std::memory_order_acquire);
+    const DWORD windowedStyle = static_cast<DWORD>(
+        fullscreen ? g_prevStyle : GetWindowLongPtrW(hwnd, GWL_STYLE));
+    const DWORD exStyle =
+        static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+    const UINT dpi = EffectiveMonitorDpi(monitor, hwnd);
+    const SIZE outer = OuterSizeForClientPixels(
+        video.width, video.height, windowedStyle, exStyle, dpi);
+    const int workWidth =
+        monitorInfo.rcWork.right - monitorInfo.rcWork.left;
+    const int workHeight =
+        monitorInfo.rcWork.bottom - monitorInfo.rcWork.top;
+
+    // A capture that exactly matches the monitor is already the ideal 1:1
+    // fullscreen case. Prefer true fullscreen even when a borderless window
+    // would happen to fit an auto-hidden-taskbar work area.
+    if (SelectedResolutionMatchesMonitor(monitor)) {
+        if (!fullscreen) ToggleFullscreen(hwnd);
+        ShowTransientHud(TransientHudContent::OneToOne);
+        fwprintf(stderr,
+                 L"[video] F5 restored 1:1 using matching-monitor fullscreen: "
+                 L"%d x %d.\n",
+                 video.width, video.height);
+        return;
+    }
+
+    if (outer.cx <= workWidth && outer.cy <= workHeight) {
+        if (fullscreen) ToggleFullscreen(hwnd, false, false);
+        const int x = monitorInfo.rcWork.left + (workWidth - outer.cx) / 2;
+        const int y = monitorInfo.rcWork.top + (workHeight - outer.cy) / 2;
+        SetWindowPos(hwnd, nullptr, x, y, outer.cx, outer.cy,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        g_outputConfigurationGeneration.fetch_add(
+            1, std::memory_order_acq_rel);
+        ShowTransientHud(TransientHudContent::OneToOne);
+        fwprintf(stderr, L"[video] F5 restored 1:1 client: %d x %d.\n",
+                 video.width, video.height);
+        return;
+    }
+
+    ShowTransientHud(TransientHudContent::OneToOneUnavailable);
+    fwprintf(stderr,
+             L"[video] F5 1:1 unavailable: capture %d x %d exceeds the "
+             L"current monitor work area %d x %d.\n",
+             video.width, video.height, workWidth, workHeight);
+}
+
 static constexpr UINT WM_TOGGLE_RUNTIME_OSD = WM_APP + 91;
 static constexpr UINT WM_OPEN_SETTINGS = WM_APP + 92;
+static constexpr UINT WM_RESTORE_ONE_TO_ONE = WM_APP + 93;
 
 static void FormatAudioErrorAge(uint64_t lastErrorMs, uint64_t nowMs,
                                 wchar_t* output, size_t outputCount) {
@@ -7018,6 +7246,8 @@ static bool AdjustVolumeFromWheel(HWND root, WPARAM wParam, LPARAM lParam) {
     const int adjusted = std::clamp(current + steps * 5, 0, maximum);
     g_volumePercent.store(adjusted, std::memory_order_release);
     g_settings.volumePercent = adjusted;
+    g_transientHudContent.store(TransientHudContent::Volume,
+                                std::memory_order_release);
     g_volumeHudUntilMs.store(GetTickCount64() + 1200,
                              std::memory_order_release);
     g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
@@ -7155,6 +7385,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SendMessageW(hwnd, WM_OPEN_SETTINGS, 0, 0);
             return 0;
         }
+        if (wParam == VK_F5) {
+            SendMessageW(hwnd, WM_RESTORE_ONE_TO_ONE, 0, 0);
+            return 0;
+        }
         if (wParam == VK_TAB) {
             ToggleRuntimeOsd();
             return 0;
@@ -7187,6 +7421,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // window has closed and their threads have joined.
         g_restartToSettings.store(true, std::memory_order_release);
         PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        return 0;
+
+    case WM_RESTORE_ONE_TO_ONE:
+        RestoreOneToOneWindow(hwnd);
         return 0;
 
     case WM_CLOSE:
@@ -7377,11 +7615,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     UpdateBackgroundAudioMute(
         foregroundProcessId == GetCurrentProcessId());
 
-    // Monitor-relative sizing deliberately restores the saved window ratio.
-    // Do not let a coincidental capture/monitor resolution match replace that
-    // restored size with startup fullscreen.
-    if (g_settings.pixelPerfect && !g_settings.relativeWindowSize &&
-        SelectedResolutionMatchesMonitor(hwnd)) {
+    // Monitor-relative sizing restores the saved window ratio. Preserve a
+    // genuinely smaller restored window, but do not suppress the established
+    // auto-fullscreen behavior when that relative size already fills the
+    // selected monitor. Use the monitor chosen before window creation so an
+    // oversized decorated 4K window cannot make MonitorFromWindow pick a
+    // neighboring display.
+    const bool preserveSmallerRelativeWindow =
+        g_settings.relativeWindowSize &&
+        !ClientSizeFillsMonitor(initialClient, initialMonitor);
+    if (!preserveSmallerRelativeWindow &&
+        SelectedResolutionMatchesMonitor(initialMonitor)) {
         fwprintf(stderr,
                  L"[video] selected resolution matches monitor; entering borderless fullscreen.\n");
         ToggleFullscreen(hwnd, true);
@@ -7483,8 +7727,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
             continue;
         }
         // Keyboard focus can belong to the video-host child. Key messages do
-        // not bubble to its parent, so intercept Tab at the thread message-loop
-        // level and route one toggle command to the main window.
+        // not bubble to its parent, so route viewer shortcuts at the thread
+        // message-loop level.
         if (m.message == WM_KEYDOWN && m.wParam == VK_TAB &&
             GetKeyState(VK_CONTROL) >= 0) {
             SendMessageW(hwnd, WM_TOGGLE_RUNTIME_OSD, 0, 0);
@@ -7492,6 +7736,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         }
         if (m.message == WM_KEYDOWN && m.wParam == VK_F2) {
             SendMessageW(hwnd, WM_OPEN_SETTINGS, 0, 0);
+            continue;
+        }
+        if (m.message == WM_KEYDOWN && m.wParam == VK_F5) {
+            SendMessageW(hwnd, WM_RESTORE_ONE_TO_ONE, 0, 0);
             continue;
         }
         TranslateMessage(&m);

@@ -1,4 +1,26 @@
-Low Latency Capture Viewer v1.0.6.2 Beta x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.1.0 x64 (continued from the v0.14.2 rework)
+
+v1.1.0 frame-rate and pixel-perfect display release
+----------------------------------------------------
+- Added selectable 30 fps capture. Exact 30/29.97 media types are recognized,
+  and UVC drivers that expose 30 fps only through VIDEO_STREAM_CONFIG_CAPS are
+  supported by configuring the capture pin itself at 30 fps.
+- Pixel-perfect fullscreen now uses the largest integer scale that fits and
+  clears unused space to black. Oversized captures retain their full picture
+  with aspect-preserving downscale instead of cropping.
+- Added F5 to restore an exact 1:1 client area without changing the saved
+  Pixel-perfect option. A matching monitor uses borderless fullscreen; an
+  oversized 1:1 request reports that it cannot fit.
+- Matching capture and monitor resolutions again enter automatic borderless
+  fullscreen, including non-pixel-perfect mode. A genuinely smaller saved
+  monitor-relative window is still preserved.
+- Fullscreen and F5 output changes rebuild only the D3D11 output resources.
+  DirectShow capture and WASAPI continue running, so no persistent frame or
+  audio queue is introduced.
+- H.264/AVC and MPEG-4 were removed from compressed compatibility because
+  inter-frame decode/reordering cannot provide reliable low latency. MJPEG is
+  the sole experimental compressed mode and remains visible when all raw modes
+  at the selected resolution are below 30 fps.
 
 v1.0.6.2 Beta settings clarity and capture-audio preflight
 ----------------------------------------------------------
