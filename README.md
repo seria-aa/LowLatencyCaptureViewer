@@ -11,8 +11,6 @@ Video is captured through DirectShow and presented with D3D11. Audio is sent
 directly to WASAPI. No FFmpeg, third-party codec pack, or separate Visual C++
 Redistributable installation is required.
 
-![Tab diagnostics overlay](docs/images/tab-diagnostics.png)
-
 ## Download
 
 Open the [latest release](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest):

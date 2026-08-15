@@ -4,7 +4,7 @@
 
 Press `Tab` in the viewer to show or hide the diagnostics overlay.
 
-![Tab diagnostics overlay](images/tab-diagnostics.png)
+![English Tab diagnostics overlay](images/tab-diagnostics-en.png)
 
 ## Video fields
 

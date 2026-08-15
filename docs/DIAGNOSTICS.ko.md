@@ -4,7 +4,7 @@
 
 뷰어에서 `Tab`을 누르면 실시간 정보창을 표시하거나 숨길 수 있습니다.
 
-![Tab 실시간 정보창](images/tab-diagnostics.png)
+![한국어 Tab 실시간 정보창](images/tab-diagnostics-ko.png)
 
 ## 영상 항목
 

@@ -10,8 +10,6 @@ HDMI 캡처보드의 영상과 소리를 최대한 짧은 경로로 전달하도
 출력합니다. FFmpeg, 서드파티 코덱 팩이나 별도 Visual C++ 재배포 패키지는
 필요하지 않습니다.
 
-![Tab 실시간 정보창](docs/images/tab-diagnostics.png)
-
 ## 다운로드
 
 [최신 릴리스](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)에서 받을 수 있습니다.
