@@ -92,6 +92,12 @@ many devices cannot be opened by two applications at once.
 | Mouse wheel | Change application volume in 5% steps |
 | `Shift` + drag | Temporarily bypass edge snap |
 
+For independent channel volume, press `F3` to show the audio meter OSD, then
+place the pointer over the **L** or **R** card and use the mouse wheel. Each
+step changes only that channel by 5%. Scrolling over the master row or outside
+the channel cards changes the master volume. L/R channel gain is limited to
+100%; the optional 200% boost applies to the master volume only.
+
 Enable **Start directly next time** to skip the settings window on later runs.
 Hold **Shift** while launching, or press **F2** in the viewer, to open settings
 again.

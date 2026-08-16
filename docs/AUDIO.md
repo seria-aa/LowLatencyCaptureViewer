@@ -90,6 +90,12 @@ The mouse wheel changes volume in 5% steps. At 100%, PCM volume processing is
 bypassed. **Allow volume boost above 100%** permits up to 200% digital gain
 without adding an audio buffer, but loud signals may clip.
 
+To adjust channels independently, press `F3` to show the audio meter OSD and
+hover the pointer over the **L** or **R** card while scrolling. Only the
+hovered channel changes, in 5% steps. Scrolling over the master row or outside
+the channel cards changes the master volume. Independent L/R gain remains
+limited to 100%; the optional 200% boost applies only to the master volume.
+
 Background auto-mute changes output gain only. Capture and WASAPI consumption
 continue while the window is inactive, preventing accumulated PCM latency when
 the viewer becomes active again.
