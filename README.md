@@ -39,7 +39,7 @@ To listen without displaying video, enable **Audio-only mode**. The viewer then
 skips the video pin, D3D11 renderer, and video presentation path and runs only
 capture audio plus WASAPI output. The window shows the same L/R peak, dBFS,
 channel/master volume, and clipping OSD as the video viewer. `F2` opens
-settings and `Esc` exits.
+settings, `F3` shows or hides the audio meter OSD, and `Esc` exits.
 
 ## Highlights
 
@@ -84,6 +84,7 @@ many devices cannot be opened by two applications at once.
 | Control | Action |
 | --- | --- |
 | `F2` | Close the viewer safely and reopen settings |
+| `F3` | Show or hide the audio meter OSD (L/R levels, dBFS, and volume) |
 | `F5` | Restore exact 1:1 size; use fullscreen when capture and monitor resolutions match |
 | `F11` | Toggle borderless fullscreen |
 | `Tab` | Show or hide diagnostics |
