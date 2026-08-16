@@ -35,6 +35,12 @@ For the first test, use the recommended values shown in the settings window.
 If a USB device exposes video and audio separately, choose its matching audio
 input under **Capture audio device**.
 
+To listen without displaying video, enable **Audio-only mode**. The viewer then
+skips the video pin, D3D11 renderer, and video presentation path and runs only
+capture audio plus WASAPI output. The window shows the same L/R peak, dBFS,
+channel/master volume, and clipping OSD as the video viewer. `F2` opens
+settings and `Esc` exits.
+
 ## Highlights
 
 - Latest-frame-only video path that discards stale frames instead of queueing them
@@ -45,6 +51,7 @@ input under **Capture audio device**.
 - Pixel-perfect 1:1 display, aspect-ratio resizing, borderless fullscreen, and F5 restore
 - Multi-monitor DPI-aware window sizing and edge snap
 - Volume control, background auto-mute, logs, and a Tab diagnostics overlay
+- **Audio-only mode** that opens only capture audio and WASAPI output
 
 ## Recommended starting settings
 

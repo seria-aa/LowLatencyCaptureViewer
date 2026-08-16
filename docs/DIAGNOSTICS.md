@@ -65,6 +65,12 @@ The log records selected devices and modes, actual allocator sizes, WASAPI
 initialization, fallback paths, capture-graph stages, and filter pin/media-type
 details after an initialization failure.
 
+Saved logs are automatically bounded: each part is limited to 2 MB, and the
+newest five managed log files are retained up to a combined 10 MB. Managed logs
+older than seven days are removed when a new logging session starts. A long
+session may create `..._part02.log`; attach every part from that session when
+reporting a problem.
+
 **Show diagnostic console** displays the same live diagnostic output in a
 console window. It is disabled by default and is not required for file logging.
 

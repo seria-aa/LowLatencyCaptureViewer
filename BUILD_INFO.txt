@@ -1,6 +1,6 @@
-Low Latency Capture Viewer v1.1.1 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.1.2.1 Beta x64 (continued from the v0.14.2 rework)
 
-v1.1.1 multi-monitor and strict pixel-perfect maintenance release
+v1.1.2.1 Beta audio-only and diagnostics maintenance release
 ----------------------------------------------------
 - Pixel-perfect fullscreen now keeps strict 1:1 output when the capture fits
   the monitor, centers it, and clears unused space to black. Only oversized

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 1.1.1 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 1.1.2.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,7 +9,13 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_executable(LowLatencyCaptureViewer
     src/main.cpp
     src/app.rc
+    src/audio/AudioMix.cpp
+    src/audio/CaptureAudioFormat.cpp
+    src/diagnostics/Logger.cpp
+    src/ui/AudioOsdLayout.cpp
 )
+
+target_include_directories(LowLatencyCaptureViewer PRIVATE src)
 
 target_compile_definitions(LowLatencyCaptureViewer PRIVATE
     UNICODE
@@ -39,6 +45,46 @@ target_link_libraries(LowLatencyCaptureViewer PRIVATE
 
 if (MSVC)
     target_compile_options(LowLatencyCaptureViewer PRIVATE /W4 /EHsc /permissive- /utf-8)
+endif()
+
+include(CTest)
+if (BUILD_TESTING)
+    add_executable(AudioModuleTests
+        tests/AudioModuleTests.cpp
+        src/audio/AudioMix.cpp
+        src/audio/CaptureAudioFormat.cpp
+        src/ui/AudioOsdLayout.cpp
+    )
+    set_target_properties(AudioModuleTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    target_include_directories(AudioModuleTests PRIVATE src)
+    target_link_libraries(AudioModuleTests PRIVATE strmiids)
+    target_compile_definitions(AudioModuleTests PRIVATE
+        UNICODE
+        _UNICODE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+    )
+    if (MSVC)
+        target_compile_options(AudioModuleTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    endif()
+    add_test(NAME AudioModuleTests COMMAND AudioModuleTests)
+
+    add_executable(LoggerTests
+        tests/LoggerTests.cpp
+        src/diagnostics/Logger.cpp
+    )
+    target_include_directories(LoggerTests PRIVATE src)
+    target_compile_definitions(LoggerTests PRIVATE
+        UNICODE
+        _UNICODE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+    )
+    set_target_properties(LoggerTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    if (MSVC)
+        target_compile_options(LoggerTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    endif()
+    add_test(NAME LoggerTests COMMAND LoggerTests)
 endif()
 
 install(TARGETS LowLatencyCaptureViewer RUNTIME DESTINATION .)

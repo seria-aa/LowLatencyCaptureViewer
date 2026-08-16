@@ -24,14 +24,15 @@ already owns the device, or when a driver rejects the requested allocation.
 
 `0x80070490` means an expected element was not found. Common causes are an
 unavailable requested mode, a missing compatible capture pin, or no compatible
-48 kHz stereo PCM audio path. The stage and pin diagnostics in the log are more
-useful than the code by itself.
+48 kHz mono/stereo uncompressed PCM or 32-bit float audio path. The stage and
+pin diagnostics in the log are more useful than the code by itself.
 
 ## Video works but audio does not
 
 Some USB devices expose video and audio as separate DirectShow filters. Choose
 the matching USB audio input manually under **Capture audio device**. The audio
-input must provide 48 kHz stereo PCM.
+input must provide 48 kHz mono/stereo uncompressed PCM or 32-bit float. 16-bit
+stereo PCM remains the direct, conversion-free path.
 
 If audio breaks up only after a long session and separate filters are selected,
 observe the PCM trend in the Tab overlay and try clock-drift correction. For

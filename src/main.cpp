@@ -38,6 +38,11 @@
 #include <mftransform.h>
 #include <mferror.h>
 
+#include "audio/AudioMix.h"
+#include "audio/CaptureAudioFormat.h"
+#include "diagnostics/Logger.h"
+#include "ui/AudioOsdLayout.h"
+
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -97,10 +102,12 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.1.1";
+constexpr wchar_t kAppVersionLabel[] = L"v1.1.2.1 Beta";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
+constexpr int kAudioOsdWidth = llcv::audio_osd::kWidth;
+constexpr int kAudioOsdHeight = llcv::audio_osd::kHeight;
 static constexpr int kWasapiBufferOptionsMs[] = {5, 10, 15, 20, 30, 40};
 constexpr int kRecommendedWasapiBufferMs = 20;
 static constexpr int kPcmQueueOptionsMs[] = {10, 15, 20, 30};
@@ -188,6 +195,8 @@ struct AppSettings {
     DriftCorrectionMode driftCorrection = DriftCorrectionMode::Off;
     int pcmQueueTargetMs = kLowestPcmQueueMs;
     int volumePercent = 100;
+    int leftVolumePercent = 100;
+    int rightVolumePercent = 100;
     bool allowVolumeBoost = false;
     VolumeHudPosition volumeHudPosition = VolumeHudPosition::TopLeft;
     bool muteWhenBackground = false;
@@ -204,6 +213,7 @@ struct AppSettings {
     bool saveLog = false;
     bool showDiagnosticConsole = false;
     bool skipStartupSettings = false;
+    bool audioOnly = false;
     bool pixelPerfect = true;
     bool relativeWindowSize = false;
     int relativeWindowScalePpm = 0;
@@ -304,6 +314,8 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"캡처 장치", L"Capture device"},
         {L"자동 선택 (GC573 우선 · 권장)", L"Auto select (GC573 first · recommended)"},
         {L"캡처 오디오 장치", L"Capture audio device"},
+        {L"오디오 only 모드", L"Audio-only mode"},
+        {L"오디오 only: 영상 형식 확인 안 함", L"Audio-only: video mode is not checked"},
         {L"자동 선택 (영상 장치 오디오 우선 · 권장)", L"Auto select (video-device audio first · recommended)"},
         {L"같은 캡처 장치 오디오를 우선 사용하고, 없으면 이름이 일치하는 별도 입력을 찾습니다.", L"Uses audio on the video device first, then finds a separately exposed matching input."},
         {L" (실험적)", L" (experimental)"},
@@ -381,6 +393,7 @@ struct AudioClient3Support {
 constexpr size_t kRingFrames = 48000 / 2;
 
 static HWND g_videoHost = nullptr;
+static bool g_suppressSettingsSave = false;
 static std::atomic<bool> g_running{true};
 static std::atomic<bool> g_restartToSettings{false};
 static std::atomic<uint64_t> g_videoCapturedFrames{0};
@@ -416,6 +429,8 @@ static std::atomic<uint64_t> g_audioResamplerUnderruns{0};
 static std::atomic<UINT32> g_audioMinimumPreRenderFrames{UINT32_MAX};
 static std::atomic<UINT32> g_audioQueueTargetFrames{0};
 static std::atomic<int> g_volumePercent{100};
+static std::atomic<int> g_leftVolumePercent{100};
+static std::atomic<int> g_rightVolumePercent{100};
 static std::atomic<bool> g_backgroundAudioMuted{false};
 static std::atomic<uint64_t> g_volumeHudUntilMs{0};
 enum class TransientHudContent { Volume, OneToOne, OneToOneUnavailable };
@@ -426,6 +441,12 @@ static std::atomic<uint64_t> g_overlayRenderedFrames{0};
 static std::atomic<double> g_osdInputFps{0.0};
 static std::atomic<double> g_osdPresentFps{0.0};
 static std::atomic<bool> g_osdVisible{false};
+static std::atomic<bool> g_audioOsdVisible{false};
+static std::atomic<int> g_audioOsdHoverTarget{0}; // 0 = none, 1 = left, 2 = right
+static std::atomic<int> g_audioPeakLeft{0};
+static std::atomic<int> g_audioPeakRight{0};
+static std::atomic<uint64_t> g_audioClipCount{0};
+static std::atomic<uint64_t> g_audioClipUntilMs{0};
 static constexpr uint64_t kOsdTrackingWarmupMs = 2000;
 static constexpr uint64_t kAudioTrackingWarmupMs = 5000;
 static std::atomic<uint64_t> g_osdTrackingStartMs{UINT64_MAX};
@@ -437,8 +458,7 @@ static std::wstring g_activeAudioOutputName = L"Windows 기본 장치";
 static std::atomic<int> g_activePixelFormat{
     static_cast<int>(VideoPixelFormat::Nv12)};
 static std::atomic<uint64_t> g_defaultAudioEndpointGeneration{0};
-static FILE* g_savedLogFile = nullptr;
-static std::mutex g_logMutex;
+static llcv::diagnostics::Logger g_logger;
 static std::mutex g_activeAudioOutputMutex;
 
 // -----------------------------------------------------------------------------
@@ -451,18 +471,9 @@ static void SafeRelease(T*& p) {
 }
 
 static int TeeFwprintf(FILE* stream, const wchar_t* format, ...) {
-    std::lock_guard<std::mutex> lock(g_logMutex);
     va_list args;
     va_start(args, format);
-    va_list fileArgs;
-    va_copy(fileArgs, args);
-    const int result = vfwprintf(stream, format, args);
-    fflush(stream);
-    if (g_savedLogFile && g_savedLogFile != stream) {
-        vfwprintf(g_savedLogFile, format, fileArgs);
-        fflush(g_savedLogFile);
-    }
-    va_end(fileArgs);
+    const int result = g_logger.PrintV(stream, format, args);
     va_end(args);
     return result;
 }
@@ -716,30 +727,12 @@ static void MigrateLegacySettings() {
 }
 
 static void OpenSavedLog() {
-    if (!g_settings.saveLog || g_savedLogFile) return;
     EnsureUserDataDirectory();
-    const std::wstring directory = LogDirectory();
-    CreateDirectoryW(directory.c_str(), nullptr);
-    SYSTEMTIME time{};
-    GetLocalTime(&time);
-    wchar_t name[96]{};
-    swprintf_s(name, L"LowLatencyCapture_%04u%02u%02u_%02u%02u%02u.log",
-               time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
-               time.wSecond);
-    const std::wstring path = directory + L"\\" + name;
-    FILE* file = nullptr;
-    if (_wfopen_s(&file, path.c_str(), L"wt, ccs=UTF-8") == 0 && file) {
-        g_savedLogFile = file;
-        fwprintf(stderr, L"[log] saving diagnostics: %s\n", path.c_str());
-    }
+    g_logger.Open(g_settings.saveLog, LogDirectory());
 }
 
 static void CloseSavedLog() {
-    std::lock_guard<std::mutex> lock(g_logMutex);
-    if (g_savedLogFile) {
-        fclose(g_savedLogFile);
-        g_savedLogFile = nullptr;
-    }
+    g_logger.Close();
 }
 
 static std::wstring MonikerDisplayName(IMoniker* moniker) {
@@ -961,6 +954,8 @@ static void LoadSettings() {
     wchar_t driftCorrection[32]{};
     wchar_t pcmQueueTargetMs[16]{};
     wchar_t volume[16]{};
+    wchar_t leftVolume[16]{};
+    wchar_t rightVolume[16]{};
     wchar_t allowVolumeBoost[8]{};
     wchar_t volumeHudPosition[32]{};
     wchar_t muteWhenBackground[8]{};
@@ -983,12 +978,15 @@ static void LoadSettings() {
     wchar_t saveLog[8]{};
     wchar_t showDiagnosticConsole[8]{};
     wchar_t skipStartupSettings[8]{};
+    wchar_t audioOnly[8]{};
 
     GetPrivateProfileStringW(L"General", L"Language", L"Auto", language,
                              ARRAYSIZE(language), path.c_str());
     GetPrivateProfileStringW(L"General", L"SkipStartupSettings", L"0",
                              skipStartupSettings,
                              ARRAYSIZE(skipStartupSettings), path.c_str());
+    GetPrivateProfileStringW(L"General", L"AudioOnly", L"0", audioOnly,
+                             ARRAYSIZE(audioOnly), path.c_str());
 
     GetPrivateProfileStringW(L"Audio", L"Mode", L"Shared", audio,
                              ARRAYSIZE(audio), path.c_str());
@@ -1005,6 +1003,10 @@ static void LoadSettings() {
                              path.c_str());
     GetPrivateProfileStringW(L"Audio", L"Volume", L"100", volume,
                              ARRAYSIZE(volume), path.c_str());
+    GetPrivateProfileStringW(L"Audio", L"LeftVolume", L"100", leftVolume,
+                             ARRAYSIZE(leftVolume), path.c_str());
+    GetPrivateProfileStringW(L"Audio", L"RightVolume", L"100", rightVolume,
+                             ARRAYSIZE(rightVolume), path.c_str());
     GetPrivateProfileStringW(L"Audio", L"AllowVolumeBoost", L"0",
                              allowVolumeBoost, ARRAYSIZE(allowVolumeBoost),
                              path.c_str());
@@ -1111,6 +1113,12 @@ static void LoadSettings() {
     g_settings.volumePercent =
         std::clamp(((loadedVolume + 2) / 5) * 5, 0,
                    g_settings.allowVolumeBoost ? kMaximumVolumePercent : 100);
+    g_settings.leftVolumePercent = std::clamp(
+        ((static_cast<int>(wcstol(leftVolume, nullptr, 10)) + 2) / 5) * 5,
+        0, 100);
+    g_settings.rightVolumePercent = std::clamp(
+        ((static_cast<int>(wcstol(rightVolume, nullptr, 10)) + 2) / 5) * 5,
+        0, 100);
     if (_wcsicmp(volumeHudPosition, L"TopRight") == 0) {
         g_settings.volumeHudPosition = VolumeHudPosition::TopRight;
     } else if (_wcsicmp(volumeHudPosition, L"BottomLeft") == 0) {
@@ -1124,6 +1132,10 @@ static void LoadSettings() {
         wcstol(muteWhenBackground, nullptr, 10) != 0;
     g_volumePercent.store(g_settings.volumePercent,
                           std::memory_order_release);
+    g_leftVolumePercent.store(g_settings.leftVolumePercent,
+                              std::memory_order_release);
+    g_rightVolumePercent.store(g_settings.rightVolumePercent,
+                               std::memory_order_release);
     g_settings.presentationMode = (_wcsicmp(presentation, L"VSync") == 0)
                                       ? PresentationMode::VSync
                                       : PresentationMode::AllowTearing;
@@ -1151,6 +1163,7 @@ static void LoadSettings() {
         wcstol(showDiagnosticConsole, nullptr, 10) != 0;
     g_settings.skipStartupSettings =
         wcstol(skipStartupSettings, nullptr, 10) != 0;
+    g_settings.audioOnly = wcstol(audioOnly, nullptr, 10) != 0;
 
     if (_wcsicmp(resolution, L"1920x1080") == 0) {
         g_settings.videoPreset = VideoPreset::R1920x1080;
@@ -1209,6 +1222,9 @@ static void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"SkipStartupSettings",
                                g_settings.skipStartupSettings ? L"1" : L"0",
                                path.c_str());
+    WritePrivateProfileStringW(L"General", L"AudioOnly",
+                               g_settings.audioOnly ? L"1" : L"0",
+                               path.c_str());
     WritePrivateProfileStringW(
         L"Audio", L"Mode",
         g_settings.audioMode == AudioMode::WasapiExclusive ? L"Exclusive" : L"Shared",
@@ -1232,6 +1248,14 @@ static void SaveSettings() {
     wchar_t volume[16]{};
     swprintf_s(volume, L"%d", g_settings.volumePercent);
     WritePrivateProfileStringW(L"Audio", L"Volume", volume, path.c_str());
+    wchar_t leftVolume[16]{};
+    swprintf_s(leftVolume, L"%d", g_settings.leftVolumePercent);
+    WritePrivateProfileStringW(L"Audio", L"LeftVolume", leftVolume,
+                               path.c_str());
+    wchar_t rightVolume[16]{};
+    swprintf_s(rightVolume, L"%d", g_settings.rightVolumePercent);
+    WritePrivateProfileStringW(L"Audio", L"RightVolume", rightVolume,
+                               path.c_str());
     WritePrivateProfileStringW(L"Audio", L"AllowVolumeBoost",
                                g_settings.allowVolumeBoost ? L"1" : L"0",
                                path.c_str());
@@ -1342,6 +1366,48 @@ public:
             data_[dst + 1] = samples[src + 1];
         }
 
+        writeFrame_ = (writeFrame_ + frames) % kRingFrames;
+        available_ += frames;
+        g_audioRingFrames.store(static_cast<UINT32>(available_),
+                                std::memory_order_release);
+    }
+
+    void pushConverted(const BYTE* source, size_t frames,
+                       const llcv::capture_audio::Format& format) {
+        if (!source || frames == 0 || format.blockAlign == 0) return;
+        std::lock_guard<std::mutex> lock(mu_);
+
+        if (frames >= kRingFrames) {
+            source += (frames - kRingFrames) * format.blockAlign;
+            frames = kRingFrames;
+            readFrame_ = 0;
+            writeFrame_ = 0;
+            available_ = 0;
+        }
+
+        while (available_ + frames > kRingFrames) {
+            const size_t drop = std::min(available_ + frames - kRingFrames,
+                                         available_);
+            readFrame_ = (readFrame_ + drop) % kRingFrames;
+            available_ -= drop;
+            if (AudioTrackingActive()) {
+                overruns_++;
+                g_audioOverrunFrames.fetch_add(drop,
+                                               std::memory_order_relaxed);
+                g_audioLastOverrunMs.store(GetTickCount64(),
+                                           std::memory_order_release);
+            }
+        }
+
+        for (size_t i = 0; i < frames; ++i) {
+            int16_t left = 0;
+            int16_t right = 0;
+            llcv::capture_audio::ConvertFrame(
+                source + i * format.blockAlign, format, left, right);
+            const size_t dst = ((writeFrame_ + i) % kRingFrames) * kChannels;
+            data_[dst] = left;
+            data_[dst + 1] = right;
+        }
         writeFrame_ = (writeFrame_ + frames) % kRingFrames;
         available_ += frames;
         g_audioRingFrames.store(static_cast<UINT32>(available_),
@@ -1533,6 +1599,9 @@ private:
 
 class SampleGrabberCB final : public ISampleGrabberCB {
 public:
+    explicit SampleGrabberCB(llcv::capture_audio::Format format)
+        : format_(format) {}
+
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
         if (riid == IID_IUnknown || riid == __uuidof(ISampleGrabberCB)) {
@@ -1562,10 +1631,10 @@ public:
         if (FAILED(hr) || !p) return hr;
 
         const long bytes = pSample->GetActualDataLength();
-        constexpr long bytesPerFrame = kChannels * (kBitsPerSample / 8);
-        if (bytes <= 0 || bytes % bytesPerFrame != 0) return S_OK;
+        if (bytes <= 0 || format_.blockAlign == 0 ||
+            bytes % format_.blockAlign != 0) return S_OK;
 
-        const size_t frames = static_cast<size_t>(bytes / bytesPerFrame);
+        const size_t frames = static_cast<size_t>(bytes / format_.blockAlign);
         const uint64_t nowMs = GetTickCount64();
         const bool track = AudioTrackingActive();
         if (track) {
@@ -1597,7 +1666,11 @@ public:
             g_audioCaptureCallbacks.fetch_add(1, std::memory_order_relaxed);
             g_audioCaptureFrames.fetch_add(frames, std::memory_order_relaxed);
         }
-        g_ring.push(reinterpret_cast<const int16_t*>(p), frames);
+        if (format_.path == llcv::capture_audio::Path::Direct16BitStereo) {
+            g_ring.push(reinterpret_cast<const int16_t*>(p), frames);
+        } else {
+            g_ring.pushConverted(p, frames, format_);
+        }
         return S_OK;
     }
 
@@ -1607,6 +1680,7 @@ public:
 
 private:
     std::atomic<ULONG> ref_{1};
+    llcv::capture_audio::Format format_{};
     std::chrono::steady_clock::time_point previousCallback_{};
     bool hasPreviousCallback_ = false;
 };
@@ -1917,7 +1991,57 @@ static void LogFilterPins(IBaseFilter* filter, const wchar_t* label) {
     SafeRelease(pins);
 }
 
-static void SuggestCaptureBuffer(IPin* audioPin) {
+// Prefer the existing direct 48 kHz / 16-bit stereo route when a device
+// advertises it. Otherwise keep the first supported 24/32-bit or float route
+// and convert at the callback without inserting a DirectShow transform.
+static AM_MEDIA_TYPE* SelectSupportedCaptureAudioType(
+    IPin* audioPin, llcv::capture_audio::Format& selectedFormat,
+    llcv::capture_audio::Rejection* rejection = nullptr) {
+    if (rejection) *rejection = llcv::capture_audio::Rejection::Malformed;
+    if (!audioPin) return nullptr;
+    IEnumMediaTypes* types = nullptr;
+    if (FAILED(audioPin->EnumMediaTypes(&types)) || !types) return nullptr;
+
+    AM_MEDIA_TYPE* fallback = nullptr;
+    llcv::capture_audio::Format fallbackFormat{};
+    llcv::capture_audio::Rejection firstRejection =
+        llcv::capture_audio::Rejection::Malformed;
+    AM_MEDIA_TYPE* type = nullptr;
+    while (types->Next(1, &type, nullptr) == S_OK) {
+        const auto classification = llcv::capture_audio::Classify(*type);
+        if (classification.supported) {
+            if (classification.format.path ==
+                llcv::capture_audio::Path::Direct16BitStereo) {
+                DeleteMediaType(fallback);
+                selectedFormat = classification.format;
+                types->Release();
+                return type;
+            }
+            if (!fallback) {
+                fallback = type;
+                fallbackFormat = classification.format;
+                type = nullptr;
+            }
+        } else if (firstRejection ==
+                       llcv::capture_audio::Rejection::Malformed ||
+                   classification.rejection ==
+                       llcv::capture_audio::Rejection::SampleRate) {
+            firstRejection = classification.rejection;
+        }
+        DeleteMediaType(type);
+        type = nullptr;
+    }
+    types->Release();
+    if (fallback) {
+        selectedFormat = fallbackFormat;
+    } else if (rejection) {
+        *rejection = firstRejection;
+    }
+    return fallback;
+}
+
+static void SuggestCaptureBuffer(IPin* audioPin, WORD blockAlign) {
+    if (blockAlign == 0) return;
     IAMBufferNegotiation* neg = nullptr;
     if (FAILED(audioPin->QueryInterface(IID_PPV_ARGS(&neg)))) {
         fwprintf(stderr, L"[audio] IAMBufferNegotiation unavailable; driver controls capture buffer.\n");
@@ -1926,7 +2050,7 @@ static void SuggestCaptureBuffer(IPin* audioPin) {
 
     ALLOCATOR_PROPERTIES props{};
     props.cBuffers = 4;
-    props.cbBuffer = (kSampleRate * kChannels * (kBitsPerSample / 8) *
+    props.cbBuffer = (kSampleRate * blockAlign *
                       kRecommendedCaptureBufferMs) / 1000;
     props.cbAlign = 1;
     props.cbPrefix = 0;
@@ -1939,7 +2063,7 @@ static void SuggestCaptureBuffer(IPin* audioPin) {
     neg->Release();
 }
 
-static void ReportConnectedAudioAllocator(IPin* inputPin) {
+static void ReportConnectedAudioAllocator(IPin* inputPin, WORD blockAlign) {
     IMemInputPin* memoryInput = nullptr;
     IMemAllocator* allocator = nullptr;
     ALLOCATOR_PROPERTIES properties{};
@@ -1949,10 +2073,8 @@ static void ReportConnectedAudioAllocator(IPin* inputPin) {
     if (SUCCEEDED(hr)) hr = memoryInput->GetAllocator(&allocator);
     if (SUCCEEDED(hr)) hr = allocator->GetProperties(&properties);
     if (SUCCEEDED(hr)) {
-        constexpr LONG bytesPerFrame =
-            kChannels * (kBitsPerSample / 8);
-        const LONG frames = bytesPerFrame > 0
-                                ? properties.cbBuffer / bytesPerFrame : 0;
+        const LONG frames = blockAlign > 0
+                                ? properties.cbBuffer / blockAlign : 0;
         g_audioCaptureAllocatorFrames.store(frames,
                                             std::memory_order_release);
         g_audioCaptureAllocatorBuffers.store(properties.cBuffers,
@@ -2013,6 +2135,19 @@ private:
 static double TargetAudioVolumeGain() {
     if (g_backgroundAudioMuted.load(std::memory_order_acquire)) return 0.0;
     return g_volumePercent.load(std::memory_order_acquire) / 100.0;
+}
+
+static double TargetAudioChannelGain(int channel) {
+    const int percent = channel == 0
+        ? g_leftVolumePercent.load(std::memory_order_acquire)
+        : g_rightVolumePercent.load(std::memory_order_acquire);
+    return percent / 100.0;
+}
+
+static void PublishAudioPeak(std::atomic<int>& destination, int observed) {
+    const int previous = destination.load(std::memory_order_relaxed);
+    destination.store(llcv::audio::DecayAndHoldPeak(previous, observed),
+                      std::memory_order_release);
 }
 
 static bool AudioRenderThreadWasapi(AudioMode mode,
@@ -2249,7 +2384,10 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
         SincDriftResampler driftResampler;
         double filteredQueuedFrames = -1.0;
         double correctionPpm = 0.0;
-        double currentVolumeGain = TargetAudioVolumeGain();
+        const double initialVolumeGain = TargetAudioVolumeGain();
+        llcv::audio::StereoGain currentMix{
+            initialVolumeGain * TargetAudioChannelGain(0),
+            initialVolumeGain * TargetAudioChannelGain(1)};
         bool audioStarted = false;
         const UINT32 queueTargetFrames = static_cast<UINT32>(
             g_settings.pcmQueueTargetMs * kSampleRate / 1000);
@@ -2339,27 +2477,26 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                 g_audioResamplerFrames.store(0, std::memory_order_release);
             }
             const double targetVolumeGain = TargetAudioVolumeGain();
-            if (got && (currentVolumeGain != 1.0 ||
-                        targetVolumeGain != 1.0)) {
-                const double gainStep =
-                    (targetVolumeGain - currentVolumeGain) /
-                    static_cast<double>(got);
-                double gain = currentVolumeGain;
-                for (size_t frame = 0; frame < got; ++frame) {
-                    gain += gainStep;
-                    for (int channel = 0; channel < kChannels; ++channel) {
-                        const size_t index =
-                            frame * kChannels +
-                            static_cast<size_t>(channel);
-                        const long scaled = std::lround(
-                            static_cast<double>(temp[index]) * gain);
-                        temp[index] = static_cast<int16_t>(std::clamp(
-                            scaled, static_cast<long>(INT16_MIN),
-                            static_cast<long>(INT16_MAX)));
-                    }
-                }
+            // Meters are deliberately dormant when the audio OSD is hidden.
+            // The default 100% path remains a direct ring-buffer-to-WASAPI
+            // copy, matching the previous low-overhead implementation.
+            const bool measurePeaks =
+                g_audioOsdVisible.load(std::memory_order_acquire);
+            const llcv::audio::MixMetrics mix =
+                llcv::audio::ProcessStereoPcm(
+                    temp.data(), got, currentMix,
+                    {targetVolumeGain * TargetAudioChannelGain(0),
+                     targetVolumeGain * TargetAudioChannelGain(1)},
+                    measurePeaks);
+            if (measurePeaks) {
+                PublishAudioPeak(g_audioPeakLeft, mix.peakLeft);
+                PublishAudioPeak(g_audioPeakRight, mix.peakRight);
             }
-            currentVolumeGain = targetVolumeGain;
+            if (mix.clipped) {
+                g_audioClipCount.fetch_add(1, std::memory_order_relaxed);
+                g_audioClipUntilMs.store(GetTickCount64() + 1500,
+                                         std::memory_order_release);
+            }
             if (got) memcpy(out, temp.data(), got * wf.nBlockAlign);
             if (got < writable) {
                 memset(out + got * wf.nBlockAlign, 0,
@@ -3284,16 +3421,25 @@ struct DirectD3D11Renderer {
     ID2D1Factory* d2dFactory = nullptr;
     ID2D1RenderTarget* osdCacheTarget = nullptr;
     ID2D1RenderTarget* volumeCacheTarget = nullptr;
+    ID2D1RenderTarget* audioCacheTarget = nullptr;
     ID2D1SolidColorBrush* osdCacheBackgroundBrush = nullptr;
     ID2D1SolidColorBrush* osdCacheTextBrush = nullptr;
     ID2D1SolidColorBrush* volumeCacheBackgroundBrush = nullptr;
     ID2D1SolidColorBrush* volumeCacheTextBrush = nullptr;
     ID2D1SolidColorBrush* volumeCacheBarBackgroundBrush = nullptr;
     ID2D1SolidColorBrush* volumeCacheBarBrush = nullptr;
+    ID2D1SolidColorBrush* audioCacheBackgroundBrush = nullptr;
+    ID2D1SolidColorBrush* audioCacheTextBrush = nullptr;
+    ID2D1SolidColorBrush* audioCacheBarBackgroundBrush = nullptr;
+    ID2D1SolidColorBrush* audioCacheBarBrush = nullptr;
+    ID2D1SolidColorBrush* audioCacheHighlightBrush = nullptr;
+    ID2D1SolidColorBrush* audioCacheClipBrush = nullptr;
     ID3D11Texture2D* osdOverlayTexture = nullptr;
     ID3D11Texture2D* volumeOverlayTexture = nullptr;
+    ID3D11Texture2D* audioOverlayTexture = nullptr;
     ID3D11ShaderResourceView* osdOverlayShaderView = nullptr;
     ID3D11ShaderResourceView* volumeOverlayShaderView = nullptr;
+    ID3D11ShaderResourceView* audioOverlayShaderView = nullptr;
     ID3D11VertexShader* overlayVertexShader = nullptr;
     ID3D11PixelShader* overlayPixelShader = nullptr;
     ID3D11Buffer* overlayRectBuffer = nullptr;
@@ -3302,6 +3448,7 @@ struct DirectD3D11Renderer {
     IDWriteFactory* dwriteFactory = nullptr;
     IDWriteTextFormat* osdTextFormat = nullptr;
     IDWriteTextFormat* volumeTextFormat = nullptr;
+    IDWriteTextFormat* audioTextFormat = nullptr;
     IDWriteTextLayout* osdTextLayout = nullptr;
     IDWriteTextLayout* volumeTextLayout = nullptr;
     UINT outputWidth = 0;
@@ -3329,21 +3476,31 @@ struct DirectD3D11Renderer {
         SafeRelease(overlayRectBuffer);
         SafeRelease(overlayPixelShader);
         SafeRelease(overlayVertexShader);
+        SafeRelease(audioOverlayShaderView);
         SafeRelease(volumeOverlayShaderView);
         SafeRelease(osdOverlayShaderView);
+        SafeRelease(audioOverlayTexture);
         SafeRelease(volumeOverlayTexture);
         SafeRelease(osdOverlayTexture);
+        SafeRelease(audioCacheClipBrush);
+        SafeRelease(audioCacheHighlightBrush);
+        SafeRelease(audioCacheTextBrush);
+        SafeRelease(audioCacheBackgroundBrush);
+        SafeRelease(audioCacheBarBrush);
+        SafeRelease(audioCacheBarBackgroundBrush);
         SafeRelease(volumeCacheBarBrush);
         SafeRelease(volumeCacheBarBackgroundBrush);
         SafeRelease(volumeCacheTextBrush);
         SafeRelease(volumeCacheBackgroundBrush);
         SafeRelease(osdCacheTextBrush);
         SafeRelease(osdCacheBackgroundBrush);
+        SafeRelease(audioCacheTarget);
         SafeRelease(volumeCacheTarget);
         SafeRelease(osdCacheTarget);
         SafeRelease(volumeTextLayout);
         SafeRelease(osdTextLayout);
         SafeRelease(volumeTextFormat);
+        SafeRelease(audioTextFormat);
         SafeRelease(osdTextFormat);
         SafeRelease(dwriteFactory);
         SafeRelease(d2dFactory);
@@ -3574,11 +3731,20 @@ struct DirectD3D11Renderer {
         hr = device->CreateTexture2D(&overlayDesc, nullptr,
                                      &volumeOverlayTexture);
         if (FAILED(hr)) return hr;
+        overlayDesc.Width = kAudioOsdWidth;
+        overlayDesc.Height = kAudioOsdHeight;
+        hr = device->CreateTexture2D(&overlayDesc, nullptr,
+                                     &audioOverlayTexture);
+        if (FAILED(hr)) return hr;
         hr = device->CreateShaderResourceView(
             osdOverlayTexture, nullptr, &osdOverlayShaderView);
         if (SUCCEEDED(hr)) {
             hr = device->CreateShaderResourceView(
                 volumeOverlayTexture, nullptr, &volumeOverlayShaderView);
+        }
+        if (SUCCEEDED(hr)) {
+            hr = device->CreateShaderResourceView(
+                audioOverlayTexture, nullptr, &audioOverlayShaderView);
         }
         if (FAILED(hr)) return hr;
         static constexpr char overlayVertexSource[] =
@@ -3666,10 +3832,15 @@ struct DirectD3D11Renderer {
                                   D2D1_ALPHA_MODE_PREMULTIPLIED));
         IDXGISurface* osdSurface = nullptr;
         IDXGISurface* volumeSurface = nullptr;
+        IDXGISurface* audioSurface = nullptr;
         hr = osdOverlayTexture->QueryInterface(IID_PPV_ARGS(&osdSurface));
         if (SUCCEEDED(hr)) {
             hr = volumeOverlayTexture->QueryInterface(
                 IID_PPV_ARGS(&volumeSurface));
+        }
+        if (SUCCEEDED(hr)) {
+            hr = audioOverlayTexture->QueryInterface(
+                IID_PPV_ARGS(&audioSurface));
         }
         if (SUCCEEDED(hr)) {
             hr = d2dFactory->CreateDxgiSurfaceRenderTarget(
@@ -3679,6 +3850,11 @@ struct DirectD3D11Renderer {
             hr = d2dFactory->CreateDxgiSurfaceRenderTarget(
                 volumeSurface, &d2dProperties, &volumeCacheTarget);
         }
+        if (SUCCEEDED(hr)) {
+            hr = d2dFactory->CreateDxgiSurfaceRenderTarget(
+                audioSurface, &d2dProperties, &audioCacheTarget);
+        }
+        SafeRelease(audioSurface);
         SafeRelease(volumeSurface);
         SafeRelease(osdSurface);
         if (FAILED(hr)) return hr;
@@ -3695,6 +3871,11 @@ struct DirectD3D11Renderer {
             L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 22.0f,
             IsEnglishUi() ? L"en-US" : L"ko-KR", &volumeTextFormat);
+        if (FAILED(hr)) return hr;
+        hr = dwriteFactory->CreateTextFormat(
+            L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.0f,
+            IsEnglishUi() ? L"en-US" : L"ko-KR", &audioTextFormat);
         if (FAILED(hr)) return hr;
         if (SUCCEEDED(hr)) {
             hr = osdCacheTarget->CreateSolidColorBrush(
@@ -3725,6 +3906,36 @@ struct DirectD3D11Renderer {
             hr = volumeCacheTarget->CreateSolidColorBrush(
                 D2D1::ColorF(0.25f, 0.78f, 0.48f, 1.0f),
                 &volumeCacheBarBrush);
+        }
+        if (SUCCEEDED(hr)) {
+            hr = audioCacheTarget->CreateSolidColorBrush(
+                D2D1::ColorF(0.055f, 0.063f, 0.078f, 0.92f),
+                &audioCacheBackgroundBrush);
+        }
+        if (SUCCEEDED(hr)) {
+            hr = audioCacheTarget->CreateSolidColorBrush(
+                D2D1::ColorF(0.91f, 0.93f, 0.95f, 1.0f),
+                &audioCacheTextBrush);
+        }
+        if (SUCCEEDED(hr)) {
+            hr = audioCacheTarget->CreateSolidColorBrush(
+                D2D1::ColorF(0.20f, 0.22f, 0.25f, 1.0f),
+                &audioCacheBarBackgroundBrush);
+        }
+        if (SUCCEEDED(hr)) {
+            hr = audioCacheTarget->CreateSolidColorBrush(
+                D2D1::ColorF(0.25f, 0.78f, 0.48f, 1.0f),
+                &audioCacheBarBrush);
+        }
+        if (SUCCEEDED(hr)) {
+            hr = audioCacheTarget->CreateSolidColorBrush(
+                D2D1::ColorF(0.21f, 0.36f, 0.45f, 0.95f),
+                &audioCacheHighlightBrush);
+        }
+        if (SUCCEEDED(hr)) {
+            hr = audioCacheTarget->CreateSolidColorBrush(
+                D2D1::ColorF(0.93f, 0.34f, 0.29f, 1.0f),
+                &audioCacheClipBrush);
         }
         if (FAILED(hr)) return hr;
 
@@ -3885,6 +4096,90 @@ struct DirectD3D11Renderer {
             }
         }
         hr = volumeCacheTarget->EndDraw();
+        if (FAILED(hr)) return hr;
+
+        if (g_audioOsdVisible.load(std::memory_order_acquire)) {
+            const int maximum = g_settings.allowVolumeBoost
+                ? kMaximumVolumePercent : 100;
+            constexpr int channelMaximum = 100;
+            const int master = g_volumePercent.load(std::memory_order_acquire);
+            const int left = g_leftVolumePercent.load(std::memory_order_acquire);
+            const int right = g_rightVolumePercent.load(std::memory_order_acquire);
+            const int hovered = g_audioOsdHoverTarget.load(
+                std::memory_order_acquire);
+            const double leftDb = llcv::audio::PeakToDbfs(
+                g_audioPeakLeft.load(std::memory_order_acquire));
+            const double rightDb = llcv::audio::PeakToDbfs(
+                g_audioPeakRight.load(std::memory_order_acquire));
+            const bool clipping = GetTickCount64() < g_audioClipUntilMs.load(
+                std::memory_order_acquire);
+
+            audioCacheTarget->BeginDraw();
+            audioCacheTarget->Clear(D2D1::ColorF(0, 0.0f));
+            audioCacheTarget->FillRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f,
+                                               static_cast<float>(kAudioOsdWidth),
+                                               static_cast<float>(kAudioOsdHeight)),
+                                  8.0f, 8.0f),
+                audioCacheBackgroundBrush);
+            const wchar_t* title = IsEnglishUi() ? L"Audio" : L"오디오";
+            audioCacheTarget->DrawTextW(title, static_cast<UINT32>(wcslen(title)),
+                                         audioTextFormat,
+                                         D2D1::RectF(16, 10, 120, 34),
+                                         audioCacheTextBrush);
+            wchar_t masterText[48]{};
+            swprintf_s(masterText, IsEnglishUi() ? L"Master  %d%%" : L"마스터  %d%%",
+                       master);
+            audioCacheTarget->DrawTextW(masterText,
+                                         static_cast<UINT32>(wcslen(masterText)),
+                                         audioTextFormat,
+                                         D2D1::RectF(16, 38, 310, 62),
+                                         audioCacheTextBrush);
+            const D2D1_RECT_F masterBar = D2D1::RectF(16, 64, 320, 71);
+            audioCacheTarget->FillRectangle(masterBar, audioCacheBarBackgroundBrush);
+            D2D1_RECT_F masterFill = masterBar;
+            masterFill.right = masterFill.left +
+                (masterBar.right - masterBar.left) * master / maximum;
+            if (masterFill.right > masterFill.left) {
+                audioCacheTarget->FillRectangle(masterFill, audioCacheBarBrush);
+            }
+
+            const auto drawChannel = [&](int channel, const wchar_t* label,
+                                         int percent, double peakDb,
+                                         float x0, float x1) {
+                const D2D1_ROUNDED_RECT card = D2D1::RoundedRect(
+                    D2D1::RectF(x0, 84, x1, 168), 6.0f, 6.0f);
+                if (hovered == channel) {
+                    audioCacheTarget->FillRoundedRectangle(card,
+                                                            audioCacheHighlightBrush);
+                }
+                audioCacheTarget->DrawRoundedRectangle(card,
+                                                       audioCacheTextBrush, 1.0f);
+                wchar_t text[96]{};
+                swprintf_s(text, L"%s\n%d%%\n%.1f dBFS", label, percent, peakDb);
+                audioCacheTarget->DrawTextW(text, static_cast<UINT32>(wcslen(text)),
+                                             audioTextFormat,
+                                             D2D1::RectF(x0 + 14, 92, x1 - 12, 157),
+                                             audioCacheTextBrush);
+                const D2D1_RECT_F bar = D2D1::RectF(x0 + 14, 157, x1 - 14, 163);
+                audioCacheTarget->FillRectangle(bar, audioCacheBarBackgroundBrush);
+                D2D1_RECT_F fill = bar;
+                fill.right = fill.left + (bar.right - bar.left) * percent /
+                    channelMaximum;
+                if (fill.right > fill.left) audioCacheTarget->FillRectangle(
+                    fill, audioCacheBarBrush);
+            };
+            drawChannel(1, L"L", left, leftDb, 16.0f, 160.0f);
+            drawChannel(2, L"R", right, rightDb, 176.0f, 320.0f);
+            const wchar_t* clipText = clipping
+                ? (IsEnglishUi() ? L"CLIP" : L"클리핑")
+                : (IsEnglishUi() ? L"No clipping" : L"클리핑 없음");
+            audioCacheTarget->DrawTextW(
+                clipText, static_cast<UINT32>(wcslen(clipText)), audioTextFormat,
+                D2D1::RectF(16, 172, 320, 192),
+                clipping ? audioCacheClipBrush : audioCacheTextBrush);
+            hr = audioCacheTarget->EndDraw();
+        }
         return hr;
     }
 
@@ -3893,7 +4188,9 @@ struct DirectD3D11Renderer {
             g_osdVisible.load(std::memory_order_acquire);
         const bool volumeVisible = GetTickCount64() <
             g_volumeHudUntilMs.load(std::memory_order_acquire);
-        if (!osdVisible && !volumeVisible) return S_OK;
+        const bool audioVisible =
+            g_audioOsdVisible.load(std::memory_order_acquire);
+        if (!osdVisible && !volumeVisible && !audioVisible) return S_OK;
         HRESULT hr = refreshOverlayLayouts();
         if (FAILED(hr)) return hr;
 
@@ -3967,6 +4264,12 @@ struct DirectD3D11Renderer {
             draw(volumeOverlayShaderView, x, y, x + hudWidth,
                  y + hudHeight);
         }
+        if (audioVisible) {
+            const llcv::audio_osd::Rect rect =
+                llcv::audio_osd::RectForClient(static_cast<int>(outputWidth));
+            draw(audioOverlayShaderView, rect.left, rect.top,
+                 rect.right, rect.bottom);
+        }
         ID3D11ShaderResourceView* noTexture = nullptr;
         context->PSSetShaderResources(0, 1, &noTexture);
         context->OMSetBlendState(nullptr, nullptr, 0xffffffffu);
@@ -4014,6 +4317,181 @@ struct DirectD3D11Renderer {
     }
 };
 
+// Audio-only mode deliberately builds a graph with no video pin, renderer,
+// swapchain, or Media Foundation decoder. It reuses the same exact PCM/float
+// negotiation and callback path as the normal single graph.
+static bool AudioOnlyCaptureLoop() {
+    g_captureFailureHr.store(S_OK, std::memory_order_release);
+    g_captureAudioAvailable.store(false, std::memory_order_release);
+    g_directVideoActive.store(false, std::memory_order_release);
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(hr)) {
+        LogHr(L"CoInitializeEx(audio-only capture)", hr);
+        g_captureFailureHr.store(hr, std::memory_order_release);
+        return false;
+    }
+
+    DWORD taskIndex = 0;
+    HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
+    if (mmcss) AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_HIGH);
+
+    IGraphBuilder* graph = nullptr;
+    IMediaControl* control = nullptr;
+    IMediaFilter* mediaFilter = nullptr;
+    IBaseFilter* capture = nullptr;
+    IBaseFilter* audioCapture = nullptr;
+    IPin* audioPin = nullptr;
+    IBaseFilter* audioGrabberFilter = nullptr;
+    ISampleGrabber* audioGrabber = nullptr;
+    IBaseFilter* audioNullRenderer = nullptr;
+    IPin* audioGrabberIn = nullptr;
+    IPin* audioGrabberOut = nullptr;
+    IPin* audioNullIn = nullptr;
+    SampleGrabberCB* audioCallback = nullptr;
+    AM_MEDIA_TYPE* selectedAudioType = nullptr;
+    llcv::capture_audio::Format selectedAudioFormat{};
+    bool initialized = false;
+    const wchar_t* initializationStage = L"create audio-only DirectShow graph";
+
+    do {
+        hr = CoCreateInstance(CLSID_FilterGraph, nullptr, CLSCTX_INPROC_SERVER,
+                              IID_PPV_ARGS(&graph));
+        if (FAILED(hr)) break;
+        hr = graph->QueryInterface(IID_PPV_ARGS(&control));
+        if (FAILED(hr)) break;
+        graph->QueryInterface(IID_PPV_ARGS(&mediaFilter));
+        if (mediaFilter) mediaFilter->SetSyncSource(nullptr);
+
+        g_activeCaptureAudioDeviceName.clear();
+        if (g_settings.captureAudioDeviceId.empty()) {
+            initializationStage = L"find selected capture device audio pin";
+            hr = FindCaptureFilter(g_settings.captureDeviceId, &capture,
+                                   &g_activeCaptureDeviceName);
+            if (FAILED(hr)) break;
+            hr = graph->AddFilter(capture, L"Selected Capture Device");
+            if (FAILED(hr)) break;
+            g_activeCaptureAudioDeviceName = g_activeCaptureDeviceName;
+            hr = FindOutputPinByName(capture, kAudioPinName, &audioPin);
+            if (FAILED(hr)) {
+                hr = FindOutputPinByMajorType(capture, MEDIATYPE_Audio,
+                                              &audioPin);
+            }
+        } else {
+            g_activeCaptureDeviceName = L"(audio-only)";
+            hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        }
+
+        if (FAILED(hr)) {
+            initializationStage = L"find selected capture audio filter";
+            hr = FindCaptureAudioFilter(g_settings.captureAudioDeviceId,
+                                        g_activeCaptureDeviceName,
+                                        &audioCapture,
+                                        &g_activeCaptureAudioDeviceName);
+            if (FAILED(hr)) break;
+            hr = graph->AddFilter(audioCapture,
+                                  L"Selected Capture Audio Device");
+            if (FAILED(hr)) break;
+            hr = FindOutputPinByMajorType(audioCapture, MEDIATYPE_Audio,
+                                          &audioPin);
+        }
+        if (FAILED(hr)) break;
+        g_captureAudioAvailable.store(true, std::memory_order_release);
+
+        initializationStage = L"negotiate supported capture audio format";
+        llcv::capture_audio::Rejection rejection =
+            llcv::capture_audio::Rejection::Malformed;
+        selectedAudioType = SelectSupportedCaptureAudioType(
+            audioPin, selectedAudioFormat, &rejection);
+        if (!selectedAudioType) {
+            fwprintf(stderr, L"[audio] capture input rejected: %s\n",
+                     llcv::capture_audio::DescribeRejection(rejection).c_str());
+            hr = VFW_E_TYPE_NOT_ACCEPTED;
+            break;
+        }
+        fwprintf(stderr, L"[audio] capture input: %s\n",
+                 llcv::capture_audio::Describe(selectedAudioFormat).c_str());
+        SuggestCaptureBuffer(audioPin, selectedAudioFormat.blockAlign);
+
+        initializationStage = L"build audio-only sample path";
+        hr = CoCreateInstance(CLSID_SampleGrabber, nullptr,
+                              CLSCTX_INPROC_SERVER,
+                              IID_PPV_ARGS(&audioGrabberFilter));
+        if (FAILED(hr)) break;
+        hr = graph->AddFilter(audioGrabberFilter, L"PCM Latest Audio");
+        if (FAILED(hr)) break;
+        hr = audioGrabberFilter->QueryInterface(
+            __uuidof(ISampleGrabber),
+            reinterpret_cast<void**>(&audioGrabber));
+        if (FAILED(hr)) break;
+        hr = audioGrabber->SetMediaType(selectedAudioType);
+        if (FAILED(hr)) break;
+        audioGrabber->SetOneShot(FALSE);
+        audioGrabber->SetBufferSamples(FALSE);
+        audioCallback = new SampleGrabberCB(selectedAudioFormat);
+        hr = audioGrabber->SetCallback(audioCallback, 0);
+        if (FAILED(hr)) break;
+
+        hr = CoCreateInstance(CLSID_NullRenderer, nullptr,
+                              CLSCTX_INPROC_SERVER,
+                              IID_PPV_ARGS(&audioNullRenderer));
+        if (FAILED(hr)) break;
+        hr = graph->AddFilter(audioNullRenderer, L"Audio Null Renderer");
+        if (FAILED(hr)) break;
+        if (FAILED(hr = GetFirstPin(audioGrabberFilter, PINDIR_INPUT,
+                                    &audioGrabberIn))) break;
+        if (FAILED(hr = GetFirstPin(audioGrabberFilter, PINDIR_OUTPUT,
+                                    &audioGrabberOut))) break;
+        if (FAILED(hr = GetFirstPin(audioNullRenderer, PINDIR_INPUT,
+                                    &audioNullIn))) break;
+        if (FAILED(hr = graph->ConnectDirect(audioPin, audioGrabberIn,
+                                             selectedAudioType))) break;
+        ReportConnectedAudioAllocator(audioGrabberIn,
+                                      selectedAudioFormat.blockAlign);
+        if (FAILED(hr = graph->Connect(audioGrabberOut, audioNullIn))) break;
+
+        initializationStage = L"start audio-only capture graph";
+        hr = control->Run();
+        if (FAILED(hr)) break;
+        initialized = true;
+        fwprintf(stderr,
+                 L"[capture] audio-only graph running: %s · %s\n",
+                 g_activeCaptureAudioDeviceName.c_str(),
+                 llcv::capture_audio::Describe(selectedAudioFormat).c_str());
+        while (g_running.load(std::memory_order_acquire)) Sleep(100);
+        control->Stop();
+    } while (false);
+
+    if (!initialized) {
+        const HRESULT failure = FAILED(hr) ? hr : E_FAIL;
+        g_captureFailureHr.store(failure, std::memory_order_release);
+        fwprintf(stderr, L"[capture] initialization stage: %s\n",
+                 initializationStage);
+        LogHr(L"Audio-only capture graph initialization", failure);
+        LogFilterPins(capture, L"audio-only capture filter");
+        if (audioCapture && audioCapture != capture) {
+            LogFilterPins(audioCapture, L"separate capture audio filter");
+        }
+    }
+    if (audioGrabber) audioGrabber->SetCallback(nullptr, 0);
+    if (audioCallback) audioCallback->Release();
+    SafeRelease(audioNullIn);
+    SafeRelease(audioGrabberOut);
+    SafeRelease(audioGrabberIn);
+    SafeRelease(audioNullRenderer);
+    SafeRelease(audioGrabber);
+    SafeRelease(audioGrabberFilter);
+    DeleteMediaType(selectedAudioType);
+    SafeRelease(audioPin);
+    SafeRelease(audioCapture);
+    SafeRelease(capture);
+    SafeRelease(mediaFilter);
+    SafeRelease(control);
+    SafeRelease(graph);
+    if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
+    CoUninitialize();
+    return initialized;
+}
+
 static bool UnifiedCaptureRenderLoop(HWND host) {
     const auto& preset = CurrentVideoPreset();
     g_captureFailureHr.store(S_OK, std::memory_order_release);
@@ -4054,6 +4532,8 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
     IPin* audioNullIn = nullptr;
     SampleGrabberCB* audioCallback = nullptr;
     AM_MEDIA_TYPE* activeVideoType = nullptr;
+    AM_MEDIA_TYPE* selectedAudioType = nullptr;
+    llcv::capture_audio::Format selectedAudioFormat{};
     HANDLE frameEvent = nullptr;
     bool initialized = false;
     const wchar_t* initializationStage = L"create DirectShow graph";
@@ -4199,9 +4679,24 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         }
         if (FAILED(hr)) break;
         g_captureAudioAvailable.store(true, std::memory_order_release);
-        SuggestCaptureBuffer(audioPin);
 
-        initializationStage = L"build PCM audio sample path";
+        initializationStage = L"negotiate supported capture audio format";
+        llcv::capture_audio::Rejection audioFormatRejection =
+            llcv::capture_audio::Rejection::Malformed;
+        selectedAudioType = SelectSupportedCaptureAudioType(
+            audioPin, selectedAudioFormat, &audioFormatRejection);
+        if (!selectedAudioType) {
+            fwprintf(stderr, L"[audio] capture input rejected: %s\n",
+                     llcv::capture_audio::DescribeRejection(
+                         audioFormatRejection).c_str());
+            hr = VFW_E_TYPE_NOT_ACCEPTED;
+            break;
+        }
+        fwprintf(stderr, L"[audio] capture input: %s\n",
+                 llcv::capture_audio::Describe(selectedAudioFormat).c_str());
+        SuggestCaptureBuffer(audioPin, selectedAudioFormat.blockAlign);
+
+        initializationStage = L"build supported PCM/float audio sample path";
         hr = CoCreateInstance(CLSID_SampleGrabber, nullptr,
                               CLSCTX_INPROC_SERVER,
                               IID_PPV_ARGS(&audioGrabberFilter));
@@ -4213,22 +4708,11 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             reinterpret_cast<void**>(&audioGrabber));
         if (FAILED(hr)) break;
 
-        WAVEFORMATEX audioFormat = PcmOutputFormat();
-        AM_MEDIA_TYPE requestedAudio{};
-        requestedAudio.majortype = MEDIATYPE_Audio;
-        requestedAudio.subtype = MEDIASUBTYPE_PCM;
-        requestedAudio.bFixedSizeSamples = TRUE;
-        requestedAudio.bTemporalCompression = FALSE;
-        requestedAudio.lSampleSize = audioFormat.nBlockAlign;
-        requestedAudio.formattype = FORMAT_WaveFormatEx;
-        requestedAudio.cbFormat = sizeof(audioFormat);
-        requestedAudio.pbFormat =
-            reinterpret_cast<BYTE*>(&audioFormat);
-        hr = audioGrabber->SetMediaType(&requestedAudio);
+        hr = audioGrabber->SetMediaType(selectedAudioType);
         if (FAILED(hr)) break;
         audioGrabber->SetOneShot(FALSE);
         audioGrabber->SetBufferSamples(FALSE);
-        audioCallback = new SampleGrabberCB();
+        audioCallback = new SampleGrabberCB(selectedAudioFormat);
         hr = audioGrabber->SetCallback(audioCallback, 0);
         if (FAILED(hr)) break;
 
@@ -4244,8 +4728,10 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                                     &audioGrabberOut))) break;
         if (FAILED(hr = GetFirstPin(audioNullRenderer, PINDIR_INPUT,
                                     &audioNullIn))) break;
-        if (FAILED(hr = graph->Connect(audioPin, audioGrabberIn))) break;
-        ReportConnectedAudioAllocator(audioGrabberIn);
+        if (FAILED(hr = graph->ConnectDirect(audioPin, audioGrabberIn,
+                                             selectedAudioType))) break;
+        ReportConnectedAudioAllocator(audioGrabberIn,
+                                      selectedAudioFormat.blockAlign);
         if (FAILED(hr = graph->Connect(audioGrabberOut, audioNullIn))) break;
 
         initializationStage = L"connect and start capture graph";
@@ -4258,11 +4744,13 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         g_videoTearing.store(tearingActive, std::memory_order_release);
         fwprintf(stderr,
                  L"[capture] graph running: video %s · audio %s · %s %dx%d @ %d + "
-                 L"PCM 48k stereo, stride %u, frame bytes %lu, present %s\n",
+                 L"%s, stride %u, frame bytes %lu, present %s\n",
                  g_activeCaptureDeviceName.c_str(),
                  g_activeCaptureAudioDeviceName.c_str(),
                  PixelFormatName(configuredFormat), preset.width,
-                 preset.height, configuredFps, stride, imageBytes,
+                 preset.height, configuredFps,
+                 llcv::capture_audio::Describe(selectedAudioFormat).c_str(),
+                 stride, imageBytes,
                  g_settings.presentationMode == PresentationMode::VSync
                      ? L"VSync" : tearingActive ? L"Tearing" : L"Immediate");
         fwprintf(stderr,
@@ -4446,6 +4934,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
     SafeRelease(grabber);
     SafeRelease(grabberFilter);
     DeleteMediaType(activeVideoType);
+    DeleteMediaType(selectedAudioType);
     SafeRelease(videoPin);
     SafeRelease(audioPin);
     SafeRelease(audioCapture);
@@ -4495,6 +4984,7 @@ constexpr int IDC_SETTINGS_SKIP_STARTUP = 2028;
 constexpr int IDC_SETTINGS_VOLUME_BOOST = 2029;
 constexpr int IDC_SETTINGS_VOLUME_BOOST_HELP = 2030;
 constexpr int IDC_SETTINGS_ADVANCED_TOGGLE = 2031;
+constexpr int IDC_SETTINGS_AUDIO_ONLY = 2032;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
@@ -4528,6 +5018,7 @@ struct SettingsDialogState {
     HWND audioOutputCombo = nullptr;
     HWND volumeHudCombo = nullptr;
     HWND muteBackgroundCheck = nullptr;
+    HWND audioOnlyCheck = nullptr;
     HWND driftCombo = nullptr;
     HWND pcmQueueCombo = nullptr;
     HWND audioStatus = nullptr;
@@ -4650,6 +5141,7 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
         // on the next launch is an application-behavior preference, so it
         // stays in the lower settings section with its explanatory text.
         PlaceSettingsControl(state->muteBackgroundCheck, 24, 112, 451, 28, dpi);
+        PlaceSettingsControl(state->audioOnlyCheck, 24, 146, 451, 28, dpi);
         // Leave a deliberate gap before application behavior preferences so
         // language and quick start read as a separate category from audio.
         PlaceSettingsControl(state->languageLabel, 24, 180, 160, 24, dpi);
@@ -4697,7 +5189,8 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->volumeHudCombo, 195, 186, 280, 160, dpi);
     PlaceSettingsControl(state->volumeBoostCheck, 24, 230, 400, 28, dpi);
     PlaceSettingsControl(state->volumeBoostHelp, 438, 226, 24, 24, dpi);
-    PlaceSettingsControl(state->muteBackgroundCheck, 24, 274, 451, 28, dpi);
+    PlaceSettingsControl(state->muteBackgroundCheck, 24, 274, 230, 28, dpi);
+    PlaceSettingsControl(state->audioOnlyCheck, 260, 274, 215, 28, dpi);
     PlaceSettingsControl(state->driftLabel, 24, 318, 140, 24, dpi);
     PlaceSettingsControl(state->driftHelp, 168, 314, 24, 24, dpi);
     PlaceSettingsControl(state->driftCombo, 195, 314, 280, 120, dpi);
@@ -5174,6 +5667,8 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
     if (!state) return;
 
     const bool supported = !state->pixelFormats.empty();
+    const bool audioOnly = state->audioOnlyCheck &&
+        SendMessageW(state->audioOnlyCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (state->pixelFormatCombo) {
         EnableWindow(state->pixelFormatCombo, supported ? TRUE : FALSE);
     }
@@ -5181,12 +5676,14 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
         EnableWindow(state->frameRateCombo, supported ? TRUE : FALSE);
     }
     if (state->startButton) {
-        EnableWindow(state->startButton, supported ? TRUE : FALSE);
+        EnableWindow(state->startButton, (supported || audioOnly) ? TRUE : FALSE);
     }
     if (!state->videoCapabilityStatus) return;
 
     std::wstring message;
-    if (!supported) {
+    if (audioOnly) {
+        message = UI_TEXT(L"오디오 only: 영상 형식 확인 안 함");
+    } else if (!supported) {
         message = UI_TEXT(L"지원 모드 없음: 다른 장치 또는 해상도를 선택하세요.");
     } else {
         message = UI_TEXT(L"자동 인식: ");
@@ -5436,13 +5933,25 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->skipStartupCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.muteWhenBackground = SendMessageW(
             state->muteBackgroundCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_settings.audioOnly = SendMessageW(
+            state->audioOnlyCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.allowVolumeBoost = SendMessageW(
             state->volumeBoostCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (!g_settings.allowVolumeBoost &&
             g_volumePercent.load(std::memory_order_acquire) > 100) {
             g_volumePercent.store(100, std::memory_order_release);
         }
+        g_leftVolumePercent.store((std::min)(
+            100, g_leftVolumePercent.load(std::memory_order_acquire)),
+            std::memory_order_release);
+        g_rightVolumePercent.store((std::min)(
+            100, g_rightVolumePercent.load(std::memory_order_acquire)),
+            std::memory_order_release);
         g_settings.volumePercent = g_volumePercent.load(
+            std::memory_order_acquire);
+        g_settings.leftVolumePercent = g_leftVolumePercent.load(
+            std::memory_order_acquire);
+        g_settings.rightVolumePercent = g_rightVolumePercent.load(
             std::memory_order_acquire);
         g_settings.pixelPerfect = SendMessageW(
             state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -5675,6 +6184,16 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         SendMessageW(state->muteBackgroundCheck, BM_SETCHECK,
                      g_settings.muteWhenBackground
                          ? BST_CHECKED : BST_UNCHECKED, 0);
+
+        state->audioOnlyCheck = CreateWindowExW(
+            0, L"BUTTON", UI_TEXT(L"오디오 only 모드"),
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+            24, 146, 451, 28, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_AUDIO_ONLY)),
+            instance, nullptr);
+        SendMessageW(state->audioOnlyCheck, BM_SETCHECK,
+                     g_settings.audioOnly ? BST_CHECKED : BST_UNCHECKED, 0);
 
         state->languageLabel = makeLabel(
             UI_TEXT(L"언어 / Language"), 24, 392);
@@ -6071,6 +6590,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         if (LOWORD(wParam) == IDC_SETTINGS_CAPTURE_AUDIO_DEVICE &&
             HIWORD(wParam) == CBN_SELCHANGE) {
             UpdateCaptureAudioSelectionUi(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_AUDIO_ONLY &&
+            HIWORD(wParam) == BN_CLICKED) {
+            UpdateVideoCapabilityStatus(state);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_PIXEL &&
@@ -7301,6 +7825,26 @@ static void ToggleRuntimeOsd() {
     g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
 }
 
+static void ToggleAudioOsd() {
+    const bool visible = !g_audioOsdVisible.load(std::memory_order_acquire);
+    g_audioOsdVisible.store(visible, std::memory_order_release);
+    g_audioOsdHoverTarget.store(0, std::memory_order_release);
+    g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Returns: 0 outside the OSD, 1 left card, 2 right card, 3 master row,
+// 4 another part of the OSD. Cards deliberately have large hit areas; the
+// small numbers themselves are not the interaction target.
+static int AudioOsdHitTarget(HWND root, POINT screenPoint) {
+    if (!root || !g_audioOsdVisible.load(std::memory_order_acquire)) return 0;
+    POINT client = screenPoint;
+    if (!ScreenToClient(root, &client)) return 0;
+    RECT bounds{};
+    if (!GetClientRect(root, &bounds)) return 0;
+    return static_cast<int>(llcv::audio_osd::HitTest(
+        bounds.right, bounds.bottom, client.x, client.y));
+}
+
 static bool AdjustVolumeFromWheel(HWND root, WPARAM wParam, LPARAM lParam) {
     const POINT screenPoint{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
     HWND hovered = WindowFromPoint(screenPoint);
@@ -7312,16 +7856,33 @@ static bool AdjustVolumeFromWheel(HWND root, WPARAM wParam, LPARAM lParam) {
     wheelRemainder %= WHEEL_DELTA;
     if (steps == 0) return true;
 
-    const int current = g_volumePercent.load(std::memory_order_acquire);
+    const int target = AudioOsdHitTarget(root, screenPoint);
     const int maximum = g_settings.allowVolumeBoost
         ? kMaximumVolumePercent : 100;
-    const int adjusted = std::clamp(current + steps * 5, 0, maximum);
-    g_volumePercent.store(adjusted, std::memory_order_release);
-    g_settings.volumePercent = adjusted;
-    g_transientHudContent.store(TransientHudContent::Volume,
-                                std::memory_order_release);
-    g_volumeHudUntilMs.store(GetTickCount64() + 1200,
-                             std::memory_order_release);
+    if (target == 1 || target == 2) {
+        std::atomic<int>& channel = target == 1
+            ? g_leftVolumePercent : g_rightVolumePercent;
+        const int adjusted = std::clamp(
+            channel.load(std::memory_order_acquire) + steps * 5, 0, 100);
+        channel.store(adjusted, std::memory_order_release);
+        if (target == 1) g_settings.leftVolumePercent = adjusted;
+        else g_settings.rightVolumePercent = adjusted;
+        g_audioOsdHoverTarget.store(target, std::memory_order_release);
+    } else if (target == 0 || target == 3) {
+        const int adjusted = std::clamp(
+            g_volumePercent.load(std::memory_order_acquire) + steps * 5,
+            0, maximum);
+        g_volumePercent.store(adjusted, std::memory_order_release);
+        g_settings.volumePercent = adjusted;
+        if (!g_audioOsdVisible.load(std::memory_order_acquire)) {
+            g_transientHudContent.store(TransientHudContent::Volume,
+                                        std::memory_order_release);
+            g_volumeHudUntilMs.store(GetTickCount64() + 1200,
+                                     std::memory_order_release);
+        }
+    } else {
+        return true;
+    }
     g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -7336,30 +7897,182 @@ static void UpdateBackgroundAudioMute(bool appActive) {
     g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
 }
 
+// Audio-only mode has no video swap chain to composite the normal D2D OSD
+// onto.  Paint the same compact audio panel directly into the small window
+// instead.  This is UI-thread work only (30 Hz) and never blocks the capture
+// or WASAPI render threads.
+static void PaintAudioOnlyOsd(HDC dc, const RECT& client) {
+    if (!g_audioOsdVisible.load(std::memory_order_acquire)) return;
+
+    const int clientWidth = client.right - client.left;
+    const llcv::audio_osd::Rect panel = llcv::audio_osd::RectForClient(
+        clientWidth);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(232, 237, 242));
+
+    LOGFONTW logFont{};
+    logFont.lfHeight = -16;
+    logFont.lfWeight = FW_SEMIBOLD;
+    wcscpy_s(logFont.lfFaceName, L"Segoe UI");
+    HFONT font = CreateFontIndirectW(&logFont);
+    HGDIOBJ previousFont = SelectObject(dc, font);
+
+    HBRUSH background = CreateSolidBrush(RGB(14, 16, 20));
+    HBRUSH card = CreateSolidBrush(RGB(22, 26, 32));
+    HBRUSH highlight = CreateSolidBrush(RGB(38, 66, 78));
+    HBRUSH barBackground = CreateSolidBrush(RGB(51, 56, 64));
+    HBRUSH bar = CreateSolidBrush(RGB(64, 199, 122));
+    HBRUSH clipBrush = CreateSolidBrush(RGB(237, 87, 74));
+    HPEN outline = CreatePen(PS_SOLID, 1, RGB(232, 237, 242));
+
+    HGDIOBJ oldBrush = SelectObject(dc, background);
+    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+    RoundRect(dc, panel.left, panel.top, panel.right, panel.bottom, 12, 12);
+    SelectObject(dc, oldBrush);
+
+    const auto textAt = [&](int x, int y, const wchar_t* text,
+                            COLORREF color = RGB(232, 237, 242)) {
+        SetTextColor(dc, color);
+        TextOutW(dc, panel.left + x, panel.top + y, text,
+                 static_cast<int>(wcslen(text)));
+    };
+    textAt(16, 10, IsEnglishUi() ? L"Audio" : L"오디오");
+
+    wchar_t masterText[48]{};
+    swprintf_s(masterText, IsEnglishUi() ? L"Master  %d%%" : L"마스터  %d%%",
+               g_volumePercent.load(std::memory_order_acquire));
+    textAt(16, 38, masterText);
+
+    const int maximum = g_settings.allowVolumeBoost ? kMaximumVolumePercent : 100;
+    const int master = g_volumePercent.load(std::memory_order_acquire);
+    const RECT masterBar{panel.left + 16, panel.top + 64,
+                         panel.left + 320, panel.top + 71};
+    SelectObject(dc, barBackground);
+    FillRect(dc, &masterBar, barBackground);
+    RECT masterFill = masterBar;
+    masterFill.right = masterFill.left + (masterBar.right - masterBar.left) *
+        std::clamp(master, 0, maximum) / maximum;
+    if (masterFill.right > masterFill.left) FillRect(dc, &masterFill, bar);
+
+    const int hovered = g_audioOsdHoverTarget.load(std::memory_order_acquire);
+    const int left = g_leftVolumePercent.load(std::memory_order_acquire);
+    const int right = g_rightVolumePercent.load(std::memory_order_acquire);
+    const double leftDb = llcv::audio::PeakToDbfs(
+        g_audioPeakLeft.load(std::memory_order_acquire));
+    const double rightDb = llcv::audio::PeakToDbfs(
+        g_audioPeakRight.load(std::memory_order_acquire));
+
+    const auto drawChannel = [&](int channel, const wchar_t* label,
+                                 int percent, double peakDb, int x0, int x1) {
+        RECT cardRect{panel.left + x0, panel.top + 84,
+                      panel.left + x1, panel.top + 168};
+        SelectObject(dc, channel == hovered ? highlight : card);
+        RoundRect(dc, cardRect.left, cardRect.top, cardRect.right,
+                  cardRect.bottom, 10, 10);
+        SelectObject(dc, outline);
+        RoundRect(dc, cardRect.left, cardRect.top, cardRect.right,
+                  cardRect.bottom, 10, 10);
+        wchar_t line[64]{};
+        swprintf_s(line, L"%s   %d%%", label, percent);
+        textAt(x0 + 14, 92, line);
+        swprintf_s(line, L"%.1f dBFS", peakDb);
+        textAt(x0 + 14, 119, line);
+        RECT channelBar{panel.left + x0 + 14, panel.top + 157,
+                        panel.left + x1 - 14, panel.top + 163};
+        SelectObject(dc, barBackground);
+        FillRect(dc, &channelBar, barBackground);
+        RECT channelFill = channelBar;
+        channelFill.right = channelFill.left +
+            (channelBar.right - channelBar.left) * std::clamp(percent, 0, 100) / 100;
+        if (channelFill.right > channelFill.left) FillRect(dc, &channelFill, bar);
+    };
+    drawChannel(1, L"L", left, leftDb, 16, 160);
+    drawChannel(2, L"R", right, rightDb, 176, 320);
+
+    const bool clipping = GetTickCount64() < g_audioClipUntilMs.load(
+        std::memory_order_acquire);
+    textAt(16, 172, clipping
+               ? (IsEnglishUi() ? L"CLIP" : L"클리핑")
+               : (IsEnglishUi() ? L"No clipping" : L"클리핑 없음"),
+           clipping ? RGB(237, 87, 74) : RGB(232, 237, 242));
+
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, previousFont);
+    DeleteObject(outline);
+    DeleteObject(clipBrush);
+    DeleteObject(bar);
+    DeleteObject(barBackground);
+    DeleteObject(highlight);
+    DeleteObject(card);
+    DeleteObject(background);
+    DeleteObject(font);
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
-        g_videoHost = CreateWindowExW(
-            0, L"STATIC", nullptr,
-            WS_CHILD | WS_VISIBLE | SS_BLACKRECT,
-            0, 0, 100, 100,
-            hwnd, nullptr,
-            reinterpret_cast<LPCREATESTRUCTW>(lParam)->hInstance,
-            nullptr);
-        if (g_videoHost) {
-            SetWindowSubclass(g_videoHost, VideoHostSubclassProc, 1, 0);
+        if (!g_settings.audioOnly) {
+            g_videoHost = CreateWindowExW(
+                0, L"STATIC", nullptr,
+                WS_CHILD | WS_VISIBLE | SS_BLACKRECT,
+                0, 0, 100, 100,
+                hwnd, nullptr,
+                reinterpret_cast<LPCREATESTRUCTW>(lParam)->hInstance,
+                nullptr);
+            if (g_videoHost) {
+                SetWindowSubclass(g_videoHost, VideoHostSubclassProc, 1, 0);
+            }
         }
-        SetTimer(hwnd, 1, 500, nullptr);
+        SetTimer(hwnd, 1, g_settings.audioOnly ? 33 : 500, nullptr);
         return 0;
 
     case WM_SIZE:
         if (g_videoHost) {
             MoveWindow(g_videoHost, 0, 0, LOWORD(lParam), HIWORD(lParam), TRUE);
         }
+        if (g_settings.audioOnly) InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
 
+    case WM_PAINT:
+        if (g_settings.audioOnly) {
+            PAINTSTRUCT paint{};
+            HDC dc = BeginPaint(hwnd, &paint);
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            const int width = client.right - client.left;
+            const int height = client.bottom - client.top;
+            HDC backDc = CreateCompatibleDC(dc);
+            HBITMAP backBitmap = (backDc && width > 0 && height > 0)
+                ? CreateCompatibleBitmap(dc, width, height) : nullptr;
+            if (backDc && backBitmap) {
+                HGDIOBJ oldBitmap = SelectObject(backDc, backBitmap);
+                FillRect(backDc, &client,
+                         reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+                PaintAudioOnlyOsd(backDc, client);
+                BitBlt(dc, 0, 0, width, height, backDc, 0, 0, SRCCOPY);
+                SelectObject(backDc, oldBitmap);
+                DeleteObject(backBitmap);
+                DeleteDC(backDc);
+            } else {
+                if (backBitmap) DeleteObject(backBitmap);
+                if (backDc) DeleteDC(backDc);
+                FillRect(dc, &client,
+                         reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+                PaintAudioOnlyOsd(dc, client);
+            }
+            EndPaint(hwnd, &paint);
+            return 0;
+        }
+        break;
+
+    case WM_ERASEBKGND:
+        if (g_settings.audioOnly) return 1;
+        break;
+
     case WM_SIZING:
-        if (lParam && !g_fullscreen && !g_settings.pixelPerfect) {
+        if (lParam && !g_settings.audioOnly && !g_fullscreen &&
+            !g_settings.pixelPerfect) {
             g_manualResizeInProgress = true;
             ConstrainWindowRectToVideoAspect(
                 hwnd, *reinterpret_cast<RECT*>(lParam),
@@ -7372,6 +8085,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (wParam == 1) {
             UpdateOsdRates();
             g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
+            if (g_settings.audioOnly) InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         break;
@@ -7465,6 +8179,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ToggleRuntimeOsd();
             return 0;
         }
+        if (wParam == VK_F3) {
+            ToggleAudioOsd();
+            return 0;
+        }
         if (wParam == VK_F11) {
             ToggleFullscreen(hwnd);
             return 0;
@@ -7483,6 +8201,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_MOUSEWHEEL:
         if (AdjustVolumeFromWheel(hwnd, wParam, lParam)) return 0;
         break;
+
+    case WM_LBUTTONDBLCLK: {
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        ClientToScreen(hwnd, &point);
+        const int target = AudioOsdHitTarget(hwnd, point);
+        if (target == 1 || target == 2 || target == 3) {
+            if (target == 1) {
+                g_leftVolumePercent.store(100, std::memory_order_release);
+                g_settings.leftVolumePercent = 100;
+            } else if (target == 2) {
+                g_rightVolumePercent.store(100, std::memory_order_release);
+                g_settings.rightVolumePercent = 100;
+            } else {
+                g_volumePercent.store(100, std::memory_order_release);
+                g_settings.volumePercent = 100;
+            }
+            g_audioOsdHoverTarget.store(target == 3 ? 0 : target,
+                                        std::memory_order_release);
+            g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
+            return 0;
+        }
+        break;
+    }
 
     case WM_TOGGLE_RUNTIME_OSD:
         ToggleRuntimeOsd();
@@ -7510,7 +8251,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (!g_windowPositionPersisted) PersistWindowPosition(hwnd);
         g_settings.volumePercent =
             g_volumePercent.load(std::memory_order_acquire);
-        SaveSettings();
+        g_settings.leftVolumePercent =
+            g_leftVolumePercent.load(std::memory_order_acquire);
+        g_settings.rightVolumePercent =
+            g_rightVolumePercent.load(std::memory_order_acquire);
+        if (!g_suppressSettingsSave) SaveSettings();
         g_running.store(false);
         PostQuitMessage(0);
         return 0;
@@ -7553,12 +8298,27 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     InitCommonControlsEx(&commonControls);
 
     LoadSettings();
+    const bool audioOnlySmokeTest = commandLine &&
+        wcsstr(commandLine, L"--smoke-test-audio-only") != nullptr;
+    if (audioOnlySmokeTest) {
+        g_settings.audioOnly = true;
+        g_settings.skipStartupSettings = true;
+    }
     const bool smokeTest = commandLine &&
-        wcsstr(commandLine, L"--smoke-test") != nullptr;
+        (wcsstr(commandLine, L"--smoke-test") != nullptr ||
+         audioOnlySmokeTest);
+    g_suppressSettingsSave = smokeTest;
+    if (smokeTest && !audioOnlySmokeTest) {
+        // Smoke tests must exercise the normal viewer even if a user's saved
+        // profile currently selects audio-only mode.
+        g_settings.audioOnly = false;
+    }
     const bool longSmokeTest = commandLine &&
         wcsstr(commandLine, L"--smoke-test-60") != nullptr;
     const bool overlaySmokeTest = commandLine &&
         wcsstr(commandLine, L"--smoke-test-overlay") != nullptr;
+    const bool audioOsdSmokeTest = commandLine &&
+        wcsstr(commandLine, L"--smoke-test-audio-osd") != nullptr;
     const bool forceSettings = commandLine &&
         wcsstr(commandLine, L"--force-settings") != nullptr;
     if (overlaySmokeTest) {
@@ -7567,12 +8327,21 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                                  std::memory_order_release);
         g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
     }
+    if (audioOsdSmokeTest) {
+        g_audioOsdVisible.store(true, std::memory_order_release);
+        g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
+    }
     const bool shiftLaunch = !smokeTest &&
         (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     const bool showStartupSettings = !smokeTest &&
         (forceSettings || shiftLaunch || !g_settings.skipStartupSettings);
     if (showStartupSettings &&
         !ShowSettingsDialog(hInst, forceSettings)) return 0;
+    if (g_settings.audioOnly) {
+        // Audio-only is an audio meter window, so the existing audio OSD is
+        // visible from the first paint instead of a placeholder status label.
+        g_audioOsdVisible.store(true, std::memory_order_release);
+    }
 
     // Allocate a console for prototype diagnostics.
     const BOOL allocatedConsole = AllocConsole();
@@ -7610,6 +8379,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
+    wc.style = CS_DBLCLKS;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     wc.lpszClassName = L"LowLatencyCaptureViewerClass";
@@ -7628,14 +8398,21 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         g_settings.presentationMode == PresentationMode::VSync
             ? L"Single Graph / Direct D3D11 / VSync"
             : L"Single Graph / Direct D3D11 / Tearing";
-    swprintf_s(title,
-               L"Low Latency Capture Viewer - %dx%d @ %dfps - %s - %s",
-               video.width, video.height, RequestedVideoFrameRate(), audioLabel,
-               videoLabel);
+    if (g_settings.audioOnly) {
+        swprintf_s(title, L"Low Latency Capture Viewer - Audio only - %s",
+                   audioLabel);
+    } else {
+        swprintf_s(title,
+                   L"Low Latency Capture Viewer - %dx%d @ %dfps - %s - %s",
+                   video.width, video.height, RequestedVideoFrameRate(),
+                   audioLabel, videoLabel);
+    }
 
     const DWORD fixedWindowStyle =
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE;
-    const DWORD windowStyle = g_settings.borderlessWindow
+    const DWORD windowStyle = g_settings.audioOnly
+                                  ? fixedWindowStyle
+                                  : g_settings.borderlessWindow
                                   ? (WS_POPUP | WS_VISIBLE)
                                   : g_settings.pixelPerfect
                                         ? fixedWindowStyle
@@ -7646,12 +8423,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         initialMonitor = MonitorFromPoint(
             POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
     }
-    const SIZE initialClient = InitialClientPixelsForMonitor(initialMonitor);
+    const SIZE initialClient = g_settings.audioOnly
+        ? SIZE{380, 230}
+        : InitialClientPixelsForMonitor(initialMonitor);
     const UINT initialDpi = EffectiveMonitorDpi(initialMonitor, nullptr);
     const SIZE outerSize = OuterSizeForClientPixels(
         initialClient.cx, initialClient.cy, windowStyle, windowExStyle,
         initialDpi);
-    if (g_settings.relativeWindowSize) {
+    if (g_settings.relativeWindowSize && !g_settings.audioOnly) {
         fwprintf(stderr,
                  L"[video] monitor-relative scale: %.2f%%, initial client %ld x %ld\n",
                  100.0 * g_settings.relativeWindowScalePpm /
@@ -7674,16 +8453,22 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         CloseSavedLog();
         return 1;
     }
-    NormalizeWindowSize(hwnd, true);
+    if (!g_settings.audioOnly) NormalizeWindowSize(hwnd, true);
     RECT clientRect{};
     GetClientRect(hwnd, &clientRect);
-    fwprintf(stderr, L"[video] window client area: %ld x %ld%s\n",
-             clientRect.right - clientRect.left,
-             clientRect.bottom - clientRect.top,
-             g_settings.pixelPerfect
-                 ? L" (pixel-perfect)"
-                 : g_settings.relativeWindowSize
-                       ? L" (monitor-relative)" : L"");
+    if (g_settings.audioOnly) {
+        fwprintf(stderr, L"[audio] audio-only OSD window: %ld x %ld\n",
+                 clientRect.right - clientRect.left,
+                 clientRect.bottom - clientRect.top);
+    } else {
+        fwprintf(stderr, L"[video] window client area: %ld x %ld%s\n",
+                 clientRect.right - clientRect.left,
+                 clientRect.bottom - clientRect.top,
+                 g_settings.pixelPerfect
+                     ? L" (pixel-perfect)"
+                     : g_settings.relativeWindowSize
+                           ? L" (monitor-relative)" : L"");
+    }
     ShowWindow(hwnd, show);
     UpdateWindow(hwnd);
     DWORD foregroundProcessId = 0;
@@ -7701,9 +8486,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     // oversized decorated 4K window cannot make MonitorFromWindow pick a
     // neighboring display.
     const bool preserveSmallerRelativeWindow =
+        !g_settings.audioOnly &&
         g_settings.relativeWindowSize &&
         !ClientSizeFillsMonitor(initialClient, initialMonitor);
-    if (!preserveSmallerRelativeWindow &&
+    if (!g_settings.audioOnly && !preserveSmallerRelativeWindow &&
         SelectedResolutionMatchesMonitor(initialMonitor)) {
         fwprintf(stderr,
                  L"[video] selected resolution matches monitor; entering borderless fullscreen.\n");
@@ -7726,9 +8512,29 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     // its video and audio branches. WASAPI remains an independent consumer.
     std::thread renderThread(AudioRenderThread);
     std::thread unifiedCaptureThread([hwnd, smokeTest]() {
-        if (!UnifiedCaptureRenderLoop(g_videoHost) && g_running.load()) {
-            fwprintf(stderr, L"[capture] single capture graph stopped.\n");
+        const bool initialized = g_settings.audioOnly
+            ? AudioOnlyCaptureLoop()
+            : UnifiedCaptureRenderLoop(g_videoHost);
+        if (!initialized && g_running.load()) {
+            fwprintf(stderr, g_settings.audioOnly
+                         ? L"[capture] audio-only graph stopped.\n"
+                         : L"[capture] single capture graph stopped.\n");
             if (!smokeTest) {
+                if (g_settings.audioOnly) {
+                    const HRESULT failure =
+                        g_captureFailureHr.load(std::memory_order_acquire);
+                    wchar_t message[512]{};
+                    swprintf_s(message,
+                               IsEnglishUi()
+                                   ? L"Audio-only capture initialization failed.\n\nError: 0x%08X  %s\n\nSelect a compatible capture audio device or close other capture applications."
+                                   : L"오디오 only 캡처 초기화에 실패했습니다.\n\n오류: 0x%08X  %s\n\n호환되는 캡처 오디오 장치를 선택하거나 다른 캡처 프로그램을 종료해 주세요.",
+                               static_cast<unsigned int>(failure),
+                               HrText(failure).c_str());
+                    MessageBoxW(hwnd, message, L"Low Latency Capture Viewer",
+                                MB_OK | MB_ICONERROR);
+                    g_restartToSettings.store(true,
+                                              std::memory_order_release);
+                } else {
                 const HRESULT failure =
                     g_captureFailureHr.load(std::memory_order_acquire);
                 const std::wstring failureText = HrText(failure);
@@ -7759,7 +8565,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                       L"Error: 0x%08X  %s\n\n"
                       L"The selected device may not provide the requested "
                       L"resolution/FPS/pixel format or a compatible 48 kHz "
-                      L"stereo PCM capture-audio input.\n"
+                      L"mono/stereo PCM or 32-bit float capture-audio input.\n"
                       L"Close other apps that may be using the capture device "
                       L"(for example OBS or the vendor capture utility), then "
                       L"Try Auto pixel format, another resolution, or select "
@@ -7768,7 +8574,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                     : L"캡처 영상 초기화에 실패했습니다.\n\n"
                       L"오류: 0x%08X  %s\n\n"
                       L"선택한 장치가 지정한 해상도/FPS/픽셀 포맷 또는 "
-                      L"호환되는 48 kHz 스테레오 PCM 캡처 오디오 입력을 "
+                      L"호환되는 48 kHz mono/stereo PCM 또는 32-bit float "
+                      L"캡처 오디오 입력을 "
                       L"제공하지 않을 수 있습니다.\n"
                       L"OBS 또는 제조사 캡처 프로그램처럼 캡처 장치를 사용 중인 "
                       L"다른 앱을 먼저 종료한 뒤, "
@@ -7783,6 +8590,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                 MessageBoxW(hwnd, message, L"Low Latency Capture Viewer",
                             MB_OK | MB_ICONERROR);
                 g_restartToSettings.store(true, std::memory_order_release);
+                }
             }
             g_running.store(false);
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -7815,6 +8623,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         }
         if (m.message == WM_KEYDOWN && m.wParam == VK_F2) {
             SendMessageW(hwnd, WM_OPEN_SETTINGS, 0, 0);
+            continue;
+        }
+        if (m.message == WM_KEYDOWN && m.wParam == VK_F3) {
+            ToggleAudioOsd();
             continue;
         }
         if (m.message == WM_KEYDOWN && m.wParam == VK_F5) {

@@ -14,6 +14,16 @@ clocks. Over a long session this can move the PCM queue away from its target.
 Clock-drift correction is normally unnecessary for a device with a shared
 clock, but may be useful for separate USB video and audio paths.
 
+## Audio-only mode
+
+Enable **Audio-only mode** to skip the video pin, D3D11 renderer, and video
+presentation path. The app runs only the capture-audio-to-WASAPI path. If audio
+is exposed on the video filter, only that audio pin is connected; when a
+separate capture-audio device is selected, only its DirectShow audio filter is
+used. WASAPI mode, PCM target, and clock-drift correction remain available with
+the same behavior as normal mode. The window shows the same L/R peak, dBFS,
+channel/master volume, and clipping OSD as the video viewer.
+
 ## WASAPI Shared and Exclusive
 
 **WASAPI Shared** allows other applications to use the output device and keeps
