@@ -1,4 +1,4 @@
-Low Latency Capture Viewer v1.1.2.1 Beta 실행 안내
+Low Latency Capture Viewer v1.1.3 실행 안내
 =======================================
 
 1. GC573 또는 지원할 캡처 장치를 연결합니다.

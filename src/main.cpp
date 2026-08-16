@@ -102,7 +102,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.1.2.1 Beta";
+constexpr wchar_t kAppVersionLabel[] = L"v1.1.3";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -3943,6 +3943,12 @@ struct DirectD3D11Renderer {
         RECT outputRect{0, 0, static_cast<LONG>(outputWidth),
                         static_cast<LONG>(outputHeight)};
         RECT videoRect = outputRect;
+        // Scaled mode must preserve the capture aspect ratio even when the
+        // user maximizes the window on an ultrawide monitor.  The window
+        // sizing constraint covers interactive edge-resizing, but it cannot
+        // constrain maximize/DPI transitions or arbitrary window rectangles.
+        // Compute a fit rectangle here as the final rendering safeguard.
+        pixelPerfectBorders = false;
         if (pixelPerfectFullscreen) {
             LONG displayWidth = 0;
             LONG displayHeight = 0;
@@ -3974,6 +3980,25 @@ struct DirectD3D11Renderer {
                          L"aspect-preserving downscale to %ld x %ld in %u x %u.\n",
                          displayWidth, displayHeight, outputWidth, outputHeight);
             }
+            videoRect.left =
+                (static_cast<LONG>(outputWidth) - displayWidth) / 2;
+            videoRect.top =
+                (static_cast<LONG>(outputHeight) - displayHeight) / 2;
+            videoRect.right = videoRect.left + displayWidth;
+            videoRect.bottom = videoRect.top + displayHeight;
+            pixelPerfectBorders =
+                videoRect.left != outputRect.left ||
+                videoRect.top != outputRect.top ||
+                videoRect.right != outputRect.right ||
+                videoRect.bottom != outputRect.bottom;
+        } else {
+            const double scale = (std::min)(
+                static_cast<double>(outputWidth) / width,
+                static_cast<double>(outputHeight) / height);
+            const LONG displayWidth = (std::max)(
+                1L, static_cast<LONG>(std::lround(width * scale)));
+            const LONG displayHeight = (std::max)(
+                1L, static_cast<LONG>(std::lround(height * scale)));
             videoRect.left =
                 (static_cast<LONG>(outputWidth) - displayWidth) / 2;
             videoRect.top =
@@ -6946,6 +6971,7 @@ static void NormalizeWindowSize(HWND hwnd, bool clampToWorkArea) {
 
 static HMONITOR g_relativeMoveMonitor = nullptr;
 static bool g_manualResizeInProgress = false;
+static bool g_outputResizePending = false;
 
 static void RememberRelativeScaleFromWindow(HWND hwnd) {
     if (!hwnd || !g_settings.relativeWindowSize ||
@@ -8031,6 +8057,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (g_videoHost) {
             MoveWindow(g_videoHost, 0, 0, LOWORD(lParam), HIWORD(lParam), TRUE);
         }
+        if (!g_settings.audioOnly && wParam != SIZE_MINIMIZED) {
+            // Recreate the HWND swapchain after a completed resize so its
+            // backbuffer matches the new client area. During an interactive
+            // drag, defer this until WM_EXITSIZEMOVE; rebuilding the D3D11
+            // output for every sizing tick would cause needless stalls.
+            if (g_manualResizeInProgress) {
+                g_outputResizePending = true;
+            } else {
+                g_outputConfigurationGeneration.fetch_add(
+                    1, std::memory_order_acq_rel);
+            }
+        }
         if (g_settings.audioOnly) InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
 
@@ -8158,6 +8196,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         g_manualResizeInProgress = false;
         NormalizeWindowSize(hwnd, true);
+        if (g_outputResizePending) {
+            g_outputResizePending = false;
+            g_outputConfigurationGeneration.fetch_add(
+                1, std::memory_order_acq_rel);
+        }
         return 0;
 
     case WM_NCHITTEST:

@@ -1,4 +1,4 @@
-Low Latency Capture Viewer v1.1.2.1 Beta - dependencies
+Low Latency Capture Viewer v1.1.3 - dependencies
 =================================================
 
 License: GNU General Public License v3.0 or later. See the root LICENSE file.
