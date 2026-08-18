@@ -37,6 +37,7 @@
 #include <mfidl.h>
 #include <mftransform.h>
 #include <mferror.h>
+#include <dxva.h>
 
 #include "audio/AudioMix.h"
 #include "audio/CaptureAudioFormat.h"
@@ -54,6 +55,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <deque>
 #include <string>
 #include <thread>
 #include <vector>
@@ -102,7 +104,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.1.3";
+constexpr wchar_t kAppVersionLabel[] = L"v1.1.4";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -151,6 +153,7 @@ enum class VideoPixelFormat {
     Nv12,
     Yuy2,
     Mjpeg,
+    P010,
 };
 
 enum class UiLanguage {
@@ -214,6 +217,7 @@ struct AppSettings {
     bool showDiagnosticConsole = false;
     bool skipStartupSettings = false;
     bool audioOnly = false;
+    bool forceHdr10 = false;
     bool pixelPerfect = true;
     bool relativeWindowSize = false;
     int relativeWindowScalePpm = 0;
@@ -277,6 +281,8 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"자동 선택 (권장 프레임)", L"Auto select (recommended frame rate)"},
         {L"지원 포맷 없음", L"No supported format"},
         {L"자동 선택 (NV12 우선 · 권장)", L"Auto select (NV12 first · recommended)"},
+        {L"P010 10-bit HDR10 (실험적)", L"P010 10-bit HDR10 (experimental)"},
+        {L"P010 HDR10 강제 (메타데이터 없을 때 · 실험적)", L"Force P010 HDR10 (when metadata is missing · experimental)"},
         {L"MJPEG (실험적 압축 호환)", L"MJPEG (experimental compressed compatibility)"},
         {L"오디오 출력 모드", L"Audio output mode"},
         {L"WASAPI Shared (호환성 우선 · 권장)", L"WASAPI Shared (compatibility · recommended)"},
@@ -361,6 +367,9 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"PCM 버퍼 부족 가능", L"Possible PCM buffer shortage"},
         {L"PCM 버퍼 있음 · 리샘플러 확인", L"PCM buffer available · check resampler"},
         {L"캡처 패킷 지연 감지", L"Capture packet delay detected"},
+        {L"간헐적", L"Intermittent"},
+        {L"연속", L"Burst"},
+        {L"오류 패턴", L"Error pattern"},
         {L"백그라운드 음소거 중", L"Background mute active"},
         {L"PCM 연산 우회", L"PCM processing bypassed"},
         {L"음소거", L"Muted"},
@@ -447,7 +456,7 @@ static std::atomic<int> g_audioPeakLeft{0};
 static std::atomic<int> g_audioPeakRight{0};
 static std::atomic<uint64_t> g_audioClipCount{0};
 static std::atomic<uint64_t> g_audioClipUntilMs{0};
-static constexpr uint64_t kOsdTrackingWarmupMs = 2000;
+static constexpr uint64_t kOsdTrackingWarmupMs = 5000;
 static constexpr uint64_t kAudioTrackingWarmupMs = 5000;
 static std::atomic<uint64_t> g_osdTrackingStartMs{UINT64_MAX};
 static std::atomic<uint64_t> g_audioTrackingStartMs{UINT64_MAX};
@@ -457,9 +466,49 @@ static std::wstring g_activeCaptureAudioDeviceName;
 static std::wstring g_activeAudioOutputName = L"Windows 기본 장치";
 static std::atomic<int> g_activePixelFormat{
     static_cast<int>(VideoPixelFormat::Nv12)};
+static std::atomic<bool> g_hdrOutputActive{false};
 static std::atomic<uint64_t> g_defaultAudioEndpointGeneration{0};
 static llcv::diagnostics::Logger g_logger;
 static std::mutex g_activeAudioOutputMutex;
+
+enum class AudioErrorKind {
+    Underrun,
+    Overrun,
+};
+
+enum class AudioErrorCause {
+    InputLate,
+    PcmDepletion,
+    Resampler,
+    Overrun,
+};
+
+struct AudioErrorEvent {
+    uint64_t timestampMs = 0;
+    uint32_t frames = 0;
+    AudioErrorKind kind = AudioErrorKind::Underrun;
+    AudioErrorCause cause = AudioErrorCause::PcmDepletion;
+};
+
+// Error events are rare. A small bounded history is enough to distinguish a
+// burst from occasional errors without adding work to the normal audio loop.
+constexpr size_t kAudioErrorHistoryCapacity = 128;
+static std::mutex g_audioErrorHistoryMutex;
+static std::deque<AudioErrorEvent> g_audioErrorHistory;
+
+static bool AudioTrackingActive();
+
+static void RecordAudioErrorEvent(uint64_t timestampMs, uint32_t frames,
+                                  AudioErrorKind kind,
+                                  AudioErrorCause cause) {
+    if (!timestampMs || !AudioTrackingActive()) return;
+    std::lock_guard<std::mutex> lock(g_audioErrorHistoryMutex);
+    if (g_audioErrorHistory.size() >= kAudioErrorHistoryCapacity) {
+        g_audioErrorHistory.pop_front();
+    }
+    g_audioErrorHistory.push_back(
+        AudioErrorEvent{timestampMs, frames, kind, cause});
+}
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -485,6 +534,7 @@ static const wchar_t* PixelFormatName(VideoPixelFormat format) {
     case VideoPixelFormat::Mjpeg: return L"MJPEG";
     case VideoPixelFormat::Yuy2: return L"YUY2";
     case VideoPixelFormat::Nv12: return L"NV12";
+    case VideoPixelFormat::P010: return L"P010";
     default: return L"Auto";
     }
 }
@@ -493,6 +543,7 @@ static const GUID& PixelFormatSubtype(VideoPixelFormat format) {
     switch (format) {
     case VideoPixelFormat::Mjpeg: return MEDIASUBTYPE_MJPG;
     case VideoPixelFormat::Yuy2: return MEDIASUBTYPE_YUY2;
+    case VideoPixelFormat::P010: return MFVideoFormat_P010;
     default: return MEDIASUBTYPE_NV12;
     }
 }
@@ -507,12 +558,14 @@ static VideoPixelFormat VideoPixelFormatFromSubtype(const GUID& subtype) {
     if (subtype == MEDIASUBTYPE_MJPG || subtype == MFVideoFormat_MJPG) {
         return VideoPixelFormat::Mjpeg;
     }
+    if (subtype == MFVideoFormat_P010) return VideoPixelFormat::P010;
     return VideoPixelFormat::Auto;
 }
 
 static DXGI_FORMAT PixelFormatDxgi(VideoPixelFormat format) {
     switch (format) {
     case VideoPixelFormat::Yuy2: return DXGI_FORMAT_YUY2;
+    case VideoPixelFormat::P010: return DXGI_FORMAT_P010;
     default: return DXGI_FORMAT_NV12;
     }
 }
@@ -979,6 +1032,7 @@ static void LoadSettings() {
     wchar_t showDiagnosticConsole[8]{};
     wchar_t skipStartupSettings[8]{};
     wchar_t audioOnly[8]{};
+    wchar_t forceHdr10[8]{};
 
     GetPrivateProfileStringW(L"General", L"Language", L"Auto", language,
                              ARRAYSIZE(language), path.c_str());
@@ -987,6 +1041,8 @@ static void LoadSettings() {
                              ARRAYSIZE(skipStartupSettings), path.c_str());
     GetPrivateProfileStringW(L"General", L"AudioOnly", L"0", audioOnly,
                              ARRAYSIZE(audioOnly), path.c_str());
+    GetPrivateProfileStringW(L"Video", L"ForceHdr10", L"0", forceHdr10,
+                             ARRAYSIZE(forceHdr10), path.c_str());
 
     GetPrivateProfileStringW(L"Audio", L"Mode", L"Shared", audio,
                              ARRAYSIZE(audio), path.c_str());
@@ -1150,6 +1206,8 @@ static void LoadSettings() {
         g_settings.pixelFormat = VideoPixelFormat::Yuy2;
     } else if (_wcsicmp(pixelFormat, L"MJPEG") == 0) {
         g_settings.pixelFormat = VideoPixelFormat::Mjpeg;
+    } else if (_wcsicmp(pixelFormat, L"P010") == 0) {
+        g_settings.pixelFormat = VideoPixelFormat::P010;
     } else {
         // Older beta settings may contain H.264 or MPEG-4. Those modes are
         // no longer accepted by this low-latency viewer, so use Auto instead.
@@ -1164,6 +1222,7 @@ static void LoadSettings() {
     g_settings.skipStartupSettings =
         wcstol(skipStartupSettings, nullptr, 10) != 0;
     g_settings.audioOnly = wcstol(audioOnly, nullptr, 10) != 0;
+    g_settings.forceHdr10 = wcstol(forceHdr10, nullptr, 10) != 0;
 
     if (_wcsicmp(resolution, L"1920x1080") == 0) {
         g_settings.videoPreset = VideoPreset::R1920x1080;
@@ -1224,6 +1283,9 @@ static void SaveSettings() {
                                path.c_str());
     WritePrivateProfileStringW(L"General", L"AudioOnly",
                                g_settings.audioOnly ? L"1" : L"0",
+                               path.c_str());
+    WritePrivateProfileStringW(L"Video", L"ForceHdr10",
+                               g_settings.forceHdr10 ? L"1" : L"0",
                                path.c_str());
     WritePrivateProfileStringW(
         L"Audio", L"Mode",
@@ -1351,11 +1413,16 @@ public:
             readFrame_ = (readFrame_ + drop) % kRingFrames;
             available_ -= drop;
             if (AudioTrackingActive()) {
+                const uint64_t nowMs = GetTickCount64();
                 overruns_++;
                 g_audioOverrunFrames.fetch_add(drop,
                                                std::memory_order_relaxed);
-                g_audioLastOverrunMs.store(GetTickCount64(),
+                g_audioLastOverrunMs.store(nowMs,
                                            std::memory_order_release);
+                RecordAudioErrorEvent(
+                    nowMs, static_cast<uint32_t>((std::min)(
+                            drop, static_cast<size_t>(UINT32_MAX))),
+                    AudioErrorKind::Overrun, AudioErrorCause::Overrun);
             }
         }
 
@@ -1391,11 +1458,16 @@ public:
             readFrame_ = (readFrame_ + drop) % kRingFrames;
             available_ -= drop;
             if (AudioTrackingActive()) {
+                const uint64_t nowMs = GetTickCount64();
                 overruns_++;
                 g_audioOverrunFrames.fetch_add(drop,
                                                std::memory_order_relaxed);
-                g_audioLastOverrunMs.store(GetTickCount64(),
+                g_audioLastOverrunMs.store(nowMs,
                                            std::memory_order_release);
+                RecordAudioErrorEvent(
+                    nowMs, static_cast<uint32_t>((std::min)(
+                            drop, static_cast<size_t>(UINT32_MAX))),
+                    AudioErrorKind::Overrun, AudioErrorCause::Overrun);
             }
         }
 
@@ -2502,18 +2574,23 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                 memset(out + got * wf.nBlockAlign, 0,
                        (writable - static_cast<UINT32>(got)) * wf.nBlockAlign);
                 if (audioStarted && AudioTrackingActive()) {
+                    const uint64_t nowMs = GetTickCount64();
+                    const UINT32 missingFrames =
+                        writable - static_cast<UINT32>(got);
+                    AudioErrorCause cause = AudioErrorCause::PcmDepletion;
                     g_underruns++;
                     g_audioUnderrunFrames.fetch_add(
-                        writable - static_cast<UINT32>(got),
+                        missingFrames,
                         std::memory_order_relaxed);
-                    g_audioLastUnderrunMs.store(
-                        GetTickCount64(), std::memory_order_release);
+                    g_audioLastUnderrunMs.store(nowMs,
+                                                std::memory_order_release);
                     if (g_settings.driftCorrection ==
                             DriftCorrectionMode::Resample &&
                         availableBeforeRender >= writable) {
                         // PCM existed for this render request, but the sinc
                         // filter could not produce every output frame (usually
                         // insufficient look-ahead at the lowest queue target).
+                        cause = AudioErrorCause::Resampler;
                         g_audioResamplerUnderruns.fetch_add(
                             1, std::memory_order_relaxed);
                     } else {
@@ -2526,13 +2603,16 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                         const uint64_t lateThresholdMs = packetFrames
                             ? 5 + (1000ull * packetFrames / kSampleRate)
                             : 15;
-                        const uint64_t nowMs = GetTickCount64();
+                        const uint64_t callbackNowMs = GetTickCount64();
                         if (callbackMs &&
-                            nowMs > callbackMs + lateThresholdMs) {
+                            callbackNowMs > callbackMs + lateThresholdMs) {
+                            cause = AudioErrorCause::InputLate;
                             g_audioLatePacketUnderruns.fetch_add(
                                 1, std::memory_order_relaxed);
                         }
                     }
+                    RecordAudioErrorEvent(nowMs, missingFrames,
+                                          AudioErrorKind::Underrun, cause);
                 }
             }
             render->ReleaseBuffer(writable, 0);
@@ -2572,8 +2652,9 @@ static void AudioRenderThread() {
 }
 
 // -----------------------------------------------------------------------------
-// Direct video path: DirectShow NV12 -> latest frame -> D3D11 video processor
-// -> DXGI flip-discard swapchain. No decoder or external player is involved.
+// Direct video path: DirectShow raw video (NV12/YUY2/P010) -> latest frame
+// -> D3D11 video processor -> DXGI flip-discard swapchain. No decoder or
+// external player is involved. P010 uses the separate HDR10 prototype output.
 // -----------------------------------------------------------------------------
 
 class LatestNv12Sample {
@@ -3033,6 +3114,157 @@ static bool VideoFormatDetails(const AM_MEDIA_TYPE* mediaType, int& width,
     return width > 0 && height > 0;
 }
 
+// DirectShow carries extended color information in the upper 24 bits of
+// VIDEOINFOHEADER2::dwControlFlags.  The low eight bits are reserved for the
+// AMCONTROL_* flags.  Some capture drivers return a plain VIDEOINFOHEADER from
+// IAMStreamConfig::GetFormat even when the matching stream-capability entry
+// contains VIDEOINFOHEADER2, so this parser is intentionally independent of
+// the active-format query.
+struct DirectShowColorMetadata {
+    bool present = false;
+    DWORD controlFlags = 0;
+    UINT chromaSubsampling = 0;
+    UINT nominalRange = 0;
+    UINT transferMatrix = 0;
+    UINT lighting = 0;
+    UINT primaries = 0;
+    UINT transferFunction = 0;
+
+    bool hdr10() const {
+        // MF's canonical values are BT.2020 primaries (9), ST.2084/PQ (15),
+        // and a BT.2020 YUV matrix (4 or 5).  The DirectShow bitfield uses
+        // the same semantic values even though older dxva.h headers do not
+        // name the HDR-era enum members.
+        return present && primaries == 9 && transferFunction == 15 &&
+               (transferMatrix == 4 || transferMatrix == 5);
+    }
+};
+
+static void DeleteMediaType(AM_MEDIA_TYPE* mediaType);
+
+static bool ExtractDirectShowColorMetadata(
+    const AM_MEDIA_TYPE* mediaType, DirectShowColorMetadata& metadata) {
+    metadata = {};
+    if (!mediaType || !mediaType->pbFormat) return false;
+
+    const VIDEOINFOHEADER2* info = nullptr;
+    if (mediaType->formattype == FORMAT_VideoInfo2 &&
+        mediaType->cbFormat >= sizeof(VIDEOINFOHEADER2)) {
+        info = reinterpret_cast<const VIDEOINFOHEADER2*>(mediaType->pbFormat);
+    } else if (mediaType->formattype == FORMAT_MPEG2Video &&
+               mediaType->cbFormat >= sizeof(MPEG2VIDEOINFO)) {
+        info = &reinterpret_cast<const MPEG2VIDEOINFO*>(
+                    mediaType->pbFormat)->hdr;
+    }
+    if (!info || (info->dwControlFlags & AMCONTROL_COLORINFO_PRESENT) == 0) {
+        return false;
+    }
+
+    const DWORD flags = info->dwControlFlags;
+    metadata.present = true;
+    metadata.controlFlags = flags;
+    metadata.chromaSubsampling = DXVA_ExtractExtColorData(
+        flags, DXVA_VideoChromaSubsamplingMask,
+        DXVA_VideoChromaSubsamplingShift);
+    metadata.nominalRange = DXVA_ExtractExtColorData(
+        flags, DXVA_NominalRangeMask, DXVA_NominalRangeShift);
+    metadata.transferMatrix = DXVA_ExtractExtColorData(
+        flags, DXVA_VideoTransferMatrixMask, DXVA_VideoTransferMatrixShift);
+    metadata.lighting = DXVA_ExtractExtColorData(
+        flags, DXVA_VideoLightingMask, DXVA_VideoLightingShift);
+    metadata.primaries = DXVA_ExtractExtColorData(
+        flags, DXVA_VideoPrimariesMask, DXVA_VideoPrimariesShift);
+    metadata.transferFunction = DXVA_ExtractExtColorData(
+        flags, DXVA_VideoTransFuncMask, DXVA_VideoTransFuncShift);
+    return true;
+}
+
+static const wchar_t* DirectShowTransferName(UINT value) {
+    switch (value) {
+    case 5: return L"BT.709";
+    case 12: return L"BT.2020 constant";
+    case 13: return L"BT.2020";
+    case 15: return L"PQ/ST.2084";
+    case 16: return L"HLG";
+    default: return value == 0 ? L"unknown" : L"unrecognized";
+    }
+}
+
+static const wchar_t* DirectShowPrimariesName(UINT value) {
+    switch (value) {
+    case 2: return L"BT.709";
+    case 9: return L"BT.2020";
+    case 11: return L"DCI-P3";
+    default: return value == 0 ? L"unknown" : L"unrecognized";
+    }
+}
+
+static void LogDirectShowColorMetadata(const wchar_t* source,
+                                       const DirectShowColorMetadata& metadata) {
+    if (!metadata.present) {
+        fwprintf(stderr, L"[hdr] DirectShow color info (%s): unavailable.\n",
+                 source ? source : L"unknown");
+        return;
+    }
+    fwprintf(stderr,
+             L"[hdr] DirectShow color info (%s): flags=0x%08X, primaries=%u (%s), "
+             L"transfer=%u (%s), matrix=%u, range=%u%s.\n",
+             source ? source : L"unknown",
+             static_cast<unsigned>(metadata.controlFlags), metadata.primaries,
+             DirectShowPrimariesName(metadata.primaries),
+             metadata.transferFunction,
+             DirectShowTransferName(metadata.transferFunction),
+             metadata.transferMatrix, metadata.nominalRange,
+             metadata.hdr10() ? L" [HDR10 candidate]" : L"");
+}
+
+static bool FindMatchingDirectShowColorMetadata(
+    IPin* videoPin, VideoPixelFormat wantedFormat, int wantedWidth,
+    int wantedHeight, int wantedFps, DirectShowColorMetadata& metadata) {
+    metadata = {};
+    if (!videoPin) return false;
+    IAMStreamConfig* config = nullptr;
+    HRESULT hr = videoPin->QueryInterface(IID_PPV_ARGS(&config));
+    if (FAILED(hr)) return false;
+
+    int count = 0;
+    int capBytes = 0;
+    hr = config->GetNumberOfCapabilities(&count, &capBytes);
+    if (FAILED(hr) || capBytes < static_cast<int>(sizeof(VIDEO_STREAM_CONFIG_CAPS))) {
+        SafeRelease(config);
+        return false;
+    }
+    std::vector<BYTE> caps(static_cast<size_t>(capBytes));
+    bool found = false;
+    for (int i = 0; i < count && !found; ++i) {
+        AM_MEDIA_TYPE* candidate = nullptr;
+        if (FAILED(config->GetStreamCaps(i, &candidate, caps.data())) ||
+            !candidate) {
+            continue;
+        }
+        int width = 0;
+        int height = 0;
+        REFERENCE_TIME duration = 0;
+        DWORD bytes = 0;
+        VideoPixelFormat format = VideoPixelFormat::Auto;
+        const bool details = VideoFormatDetails(candidate, width, height,
+                                                duration, bytes, &format);
+        const int fps = duration > 0
+            ? static_cast<int>((10'000'000 + duration / 2) / duration) : 0;
+        DirectShowColorMetadata candidateMetadata{};
+        const bool hasColor = ExtractDirectShowColorMetadata(
+            candidate, candidateMetadata);
+        if (details && format == wantedFormat && width == wantedWidth &&
+            height == wantedHeight && fps == wantedFps && hasColor) {
+            metadata = candidateMetadata;
+            found = true;
+        }
+        DeleteMediaType(candidate);
+    }
+    SafeRelease(config);
+    return found;
+}
+
 static bool SetVideoFrameDuration(AM_MEDIA_TYPE* mediaType,
                                   REFERENCE_TIME frameDuration) {
     if (!mediaType || frameDuration <= 0) return false;
@@ -3162,7 +3394,8 @@ static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
                     switch (format) {
                     case VideoPixelFormat::Nv12: return 0;
                     case VideoPixelFormat::Yuy2: return 1;
-                    case VideoPixelFormat::Mjpeg: return 2;
+                    case VideoPixelFormat::P010: return 2;
+                    case VideoPixelFormat::Mjpeg: return 3;
                     default: return 3;
                     }
                 };
@@ -3195,17 +3428,24 @@ static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
             imageBytes = static_cast<DWORD>(
                 configuredFormat == VideoPixelFormat::Yuy2
                     ? wantedWidth * wantedHeight * 2
-                    : wantedWidth * wantedHeight * 3 / 2);
+                    : configuredFormat == VideoPixelFormat::P010
+                        ? wantedWidth * wantedHeight * 3
+                        : wantedWidth * wantedHeight * 3 / 2);
         }
         const uint64_t derivedStride = configuredFormat ==
                                                 VideoPixelFormat::Yuy2
             ? static_cast<uint64_t>(imageBytes) / wantedHeight
+            : configuredFormat == VideoPixelFormat::P010
+                ? static_cast<uint64_t>(imageBytes) * 2 /
+                      (static_cast<uint64_t>(wantedHeight) * 3)
             : (static_cast<uint64_t>(imageBytes) * 2) /
                   (static_cast<uint64_t>(wantedHeight) * 3);
         const UINT32 minimumStride = configuredFormat ==
                                              VideoPixelFormat::Yuy2
             ? static_cast<UINT32>(wantedWidth * 2)
-            : static_cast<UINT32>(wantedWidth);
+            : configuredFormat == VideoPixelFormat::P010
+                ? static_cast<UINT32>(wantedWidth * 2)
+                : static_cast<UINT32>(wantedWidth);
         stride = IsCompressedVideoFormat(configuredFormat)
             ? 0
             : static_cast<UINT32>(derivedStride >= minimumStride
@@ -3310,7 +3550,8 @@ static std::vector<PixelFormatSupport> ProbePixelFormats(
                           switch (format) {
                           case VideoPixelFormat::Nv12: return 0;
                           case VideoPixelFormat::Yuy2: return 1;
-                          case VideoPixelFormat::Mjpeg: return 2;
+                          case VideoPixelFormat::P010: return 2;
+                          case VideoPixelFormat::Mjpeg: return 3;
                           default: return 3;
                           }
                       };
@@ -3410,6 +3651,7 @@ struct DirectD3D11Renderer {
     ID3D11DeviceContext1* context1 = nullptr;
     ID3D11VideoDevice* videoDevice = nullptr;
     ID3D11VideoContext* videoContext = nullptr;
+    ID3D11VideoContext1* videoContext1 = nullptr;
     IDXGISwapChain1* swapChain = nullptr;
     ID3D11Texture2D* nv12Textures[kUploadSurfaceCount]{};
     ID3D11VideoProcessorEnumerator* enumerator = nullptr;
@@ -3465,6 +3707,7 @@ struct DirectD3D11Renderer {
     bool occluded = false;
     uint64_t nextOcclusionTestMs = 0;
     DXGI_FORMAT inputFormat = DXGI_FORMAT_NV12;
+    bool hdrOutput = false;
 
     void reset() {
         if (context) {
@@ -3517,6 +3760,7 @@ struct DirectD3D11Renderer {
         }
         SafeRelease(swapChain);
         SafeRelease(videoContext);
+        SafeRelease(videoContext1);
         SafeRelease(videoDevice);
         SafeRelease(context1);
         SafeRelease(context);
@@ -3535,6 +3779,8 @@ struct DirectD3D11Renderer {
         occluded = false;
         nextOcclusionTestMs = 0;
         inputFormat = DXGI_FORMAT_NV12;
+        hdrOutput = false;
+        g_hdrOutputActive.store(false, std::memory_order_release);
     }
 
     ~DirectD3D11Renderer() {
@@ -3551,7 +3797,8 @@ struct DirectD3D11Renderer {
     }
 
     HRESULT initialize(HWND hwnd, int width, int height, int fps,
-                       VideoPixelFormat pixelFormat) {
+                       VideoPixelFormat pixelFormat,
+                       bool hdrInputMetadataAvailable = false) {
         reset();
         const uint64_t configurationGeneration =
             g_outputConfigurationGeneration.load(std::memory_order_acquire);
@@ -3578,6 +3825,20 @@ struct DirectD3D11Renderer {
         if (FAILED(hr)) return hr;
         hr = context->QueryInterface(IID_PPV_ARGS(&videoContext));
         if (FAILED(hr)) return hr;
+        if (pixelFormat == VideoPixelFormat::P010 &&
+            hdrInputMetadataAvailable) {
+            hr = context->QueryInterface(IID_PPV_ARGS(&videoContext1));
+            if (FAILED(hr)) {
+                fwprintf(stderr,
+                         L"[hdr] ID3D11VideoContext1 unavailable; HDR10 path rejected.\n");
+                return hr;
+            }
+            hdrOutput = true;
+        } else if (pixelFormat == VideoPixelFormat::P010) {
+            fwprintf(stderr,
+                     L"[hdr] P010 color metadata unavailable; using "
+                     L"BT.709 SDR output to avoid forced HDR color conversion.\n");
+        }
 
         IDXGIDevice* dxgiDevice = nullptr;
         IDXGIAdapter* adapter = nullptr;
@@ -3606,7 +3867,8 @@ struct DirectD3D11Renderer {
         DXGI_SWAP_CHAIN_DESC1 swapDesc{};
         swapDesc.Width = outputWidth;
         swapDesc.Height = outputHeight;
-        swapDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        swapDesc.Format = hdrOutput ? DXGI_FORMAT_R10G10B10A2_UNORM
+                                    : DXGI_FORMAT_B8G8R8A8_UNORM;
         swapDesc.SampleDesc.Count = 1;
         swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         swapDesc.BufferCount = 2;
@@ -3622,6 +3884,46 @@ struct DirectD3D11Renderer {
         SafeRelease(adapter);
         SafeRelease(dxgiDevice);
         if (FAILED(hr)) return hr;
+
+        if (hdrOutput) {
+            IDXGISwapChain3* swapChain3 = nullptr;
+            hr = swapChain->QueryInterface(IID_PPV_ARGS(&swapChain3));
+            if (SUCCEEDED(hr)) {
+                hr = swapChain3->SetColorSpace1(
+                    DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+            }
+            SafeRelease(swapChain3);
+            if (FAILED(hr)) {
+                fwprintf(stderr,
+                         L"[hdr] HDR10 swapchain color space unavailable; "
+                         L"P010 path rejected (0x%08X).\n",
+                         static_cast<unsigned>(hr));
+                return hr;
+            }
+            IDXGISwapChain4* swapChain4 = nullptr;
+            if (SUCCEEDED(swapChain->QueryInterface(IID_PPV_ARGS(&swapChain4)))) {
+                DXGI_HDR_METADATA_HDR10 metadata{};
+                metadata.RedPrimary[0] = 34000;
+                metadata.RedPrimary[1] = 16000;
+                metadata.GreenPrimary[0] = 13250;
+                metadata.GreenPrimary[1] = 34500;
+                metadata.BluePrimary[0] = 7500;
+                metadata.BluePrimary[1] = 3000;
+                metadata.WhitePoint[0] = 15635;
+                metadata.WhitePoint[1] = 16450;
+                metadata.MaxMasteringLuminance = 10000000;
+                metadata.MinMasteringLuminance = 1;
+                metadata.MaxContentLightLevel = 1000;
+                metadata.MaxFrameAverageLightLevel = 400;
+                swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10,
+                                            sizeof(metadata), &metadata);
+                SafeRelease(swapChain4);
+            }
+            fwprintf(stderr,
+                     L"[hdr] experimental HDR10 output active: P010 -> "
+                     L"BT.2020 PQ 10-bit swap chain; no frame queue.\n");
+            g_hdrOutputActive.store(true, std::memory_order_release);
+        }
 
         IDXGISwapChain2* swapChain2 = nullptr;
         if (SUCCEEDED(swapChain->QueryInterface(IID_PPV_ARGS(&swapChain2)))) {
@@ -4017,11 +4319,21 @@ struct DirectD3D11Renderer {
                                                       &videoRect);
         videoContext->VideoProcessorSetOutputTargetRect(processor, TRUE,
                                                         &outputRect);
-        D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputColor{};
-        inputColor.YCbCr_Matrix = 1; // BT.709
-        inputColor.Nominal_Range = 1; // studio 16-235
-        videoContext->VideoProcessorSetStreamColorSpace(processor, 0,
-                                                        &inputColor);
+        if (hdrOutput) {
+            // P010 HDR10 prototype: use the explicit DXGI color-space APIs
+            // instead of the legacy BT.709-only bitfield. This path is only
+            // selected when the user explicitly chooses P010.
+            videoContext1->VideoProcessorSetStreamColorSpace1(
+                processor, 0, DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020);
+            videoContext1->VideoProcessorSetOutputColorSpace1(
+                processor, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+        } else {
+            D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputColor{};
+            inputColor.YCbCr_Matrix = 1; // BT.709
+            inputColor.Nominal_Range = 1; // studio 16-235
+            videoContext->VideoProcessorSetStreamColorSpace(processor, 0,
+                                                            &inputColor);
+        }
         return S_OK;
     }
 
@@ -4609,11 +4921,51 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         g_activePixelFormat.store(static_cast<int>(configuredFormat),
                                   std::memory_order_release);
 
+        DirectShowColorMetadata directShowColorInfo{};
+        bool hdrInputMetadataDetected =
+            configuredFormat == VideoPixelFormat::P010 &&
+            ExtractDirectShowColorMetadata(activeVideoType,
+                                           directShowColorInfo) &&
+            directShowColorInfo.hdr10();
+        if (configuredFormat == VideoPixelFormat::P010 &&
+            !hdrInputMetadataDetected) {
+            // A few capture drivers return a plain VIDEOINFOHEADER from
+            // GetFormat but retain the extended color information on the
+            // matching stream-capability entry.  Check that entry before
+            // falling back to SDR.
+            DirectShowColorMetadata capabilityColorInfo{};
+            if (FindMatchingDirectShowColorMetadata(
+                    videoPin, configuredFormat, preset.width, preset.height,
+                    configuredFps, capabilityColorInfo)) {
+                directShowColorInfo = capabilityColorInfo;
+                hdrInputMetadataDetected = directShowColorInfo.hdr10();
+            }
+        }
+        bool hdrInputMetadataAvailable = hdrInputMetadataDetected;
+        if (configuredFormat == VideoPixelFormat::P010) {
+            LogDirectShowColorMetadata(L"P010 selected format",
+                                       directShowColorInfo);
+            if (g_settings.forceHdr10) {
+                hdrInputMetadataAvailable = true;
+                fwprintf(stderr,
+                         L"[hdr] P010 HDR10 output forced by user; DirectShow "
+                         L"metadata: %s.\n",
+                         hdrInputMetadataDetected ? L"available"
+                                                   : L"unavailable");
+            } else {
+                fwprintf(stderr,
+                         L"[hdr] P010 prototype selected; HDR10 metadata: %s.\n",
+                         hdrInputMetadataDetected ? L"available"
+                                                   : L"unavailable");
+            }
+        }
+
         g_videoConfiguredFps.store(configuredFps,
                                    std::memory_order_release);
         initializationStage = L"initialize D3D11 video renderer";
         hr = renderer.initialize(host, preset.width, preset.height,
-                                 configuredFps, rendererInputFormat);
+                                 configuredFps, rendererInputFormat,
+                                 hdrInputMetadataAvailable);
         if (FAILED(hr)) {
             LogHr(L"DirectD3D11Renderer::initialize", hr);
             break;
@@ -4671,6 +5023,37 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                                     &nullIn))) break;
         if (FAILED(hr = graph->ConnectDirect(videoPin, grabberIn,
                                              nullptr))) break;
+        // Some drivers expose color information only on the negotiated
+        // connection type, not on IAMStreamConfig::GetFormat.  Inspect the
+        // Sample Grabber's connected type before starting the graph and, if
+        // it contains a complete HDR10 description, rebuild only the D3D11
+        // output resources with the HDR color space enabled.
+        if (configuredFormat == VideoPixelFormat::P010) {
+            AM_MEDIA_TYPE connectedVideoType{};
+            const HRESULT connectedTypeHr =
+                grabber->GetConnectedMediaType(&connectedVideoType);
+            if (SUCCEEDED(connectedTypeHr)) {
+                DirectShowColorMetadata connectedColorInfo{};
+                if (ExtractDirectShowColorMetadata(&connectedVideoType,
+                                                   connectedColorInfo)) {
+                    LogDirectShowColorMetadata(L"P010 connected media type",
+                                               connectedColorInfo);
+                    if (!hdrInputMetadataAvailable &&
+                        connectedColorInfo.hdr10()) {
+                        hdrInputMetadataAvailable = true;
+                        hr = renderer.initialize(
+                            host, preset.width, preset.height, configuredFps,
+                            rendererInputFormat, true);
+                        if (FAILED(hr)) {
+                            LogHr(L"DirectD3D11Renderer::initialize(HDR metadata)",
+                                  hr);
+                            break;
+                        }
+                    }
+                }
+            }
+            FreeMediaType(connectedVideoType);
+        }
         if (FAILED(hr = graph->ConnectDirect(grabberOut, nullIn,
                                              nullptr))) break;
         // Prefer an audio pin on the selected video filter. Many USB UVC
@@ -4808,7 +5191,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                 if (retryDelaysMs[attempt]) Sleep(retryDelaysMs[attempt]);
                 const HRESULT recoveryHr = renderer.initialize(
                     host, preset.width, preset.height, configuredFps,
-                    rendererInputFormat);
+                    rendererInputFormat, hdrInputMetadataAvailable);
                 if (SUCCEEDED(recoveryHr)) {
                     const bool recoveredTearing = renderer.allowTearing &&
                         g_settings.presentationMode ==
@@ -4852,7 +5235,8 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             if (renderer.outputConfigurationChanged()) {
                 hr = renderer.initialize(host, preset.width, preset.height,
                                          configuredFps,
-                                         rendererInputFormat);
+                                         rendererInputFormat,
+                                         hdrInputMetadataAvailable);
                 if (FAILED(hr)) {
                     if (recoverRenderer(L"D3D11 output resize", hr)) {
                         hr = S_OK;
@@ -5010,6 +5394,8 @@ constexpr int IDC_SETTINGS_VOLUME_BOOST = 2029;
 constexpr int IDC_SETTINGS_VOLUME_BOOST_HELP = 2030;
 constexpr int IDC_SETTINGS_ADVANCED_TOGGLE = 2031;
 constexpr int IDC_SETTINGS_AUDIO_ONLY = 2032;
+constexpr int IDC_SETTINGS_FORCE_HDR10 = 2033;
+constexpr int IDC_SETTINGS_FORCE_HDR10_HELP = 2034;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
@@ -5044,6 +5430,8 @@ struct SettingsDialogState {
     HWND volumeHudCombo = nullptr;
     HWND muteBackgroundCheck = nullptr;
     HWND audioOnlyCheck = nullptr;
+    HWND forceHdr10Check = nullptr;
+    HWND forceHdr10Help = nullptr;
     HWND driftCombo = nullptr;
     HWND pcmQueueCombo = nullptr;
     HWND audioStatus = nullptr;
@@ -5097,7 +5485,7 @@ static int SettingsPixels(int dips, UINT dpi) {
 
 static constexpr int kSettingsClientWidthDip = 950;
 static constexpr int kSettingsBasicClientHeightDip = 510;
-static constexpr int kSettingsAdvancedClientHeightDip = 640;
+static constexpr int kSettingsAdvancedClientHeightDip = 690;
 
 static int SettingsClientHeightDip(const SettingsDialogState* state) {
     return state && state->showAdvanced
@@ -5235,7 +5623,7 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     const bool relativeSize = state->relativeSizeCheck &&
         SendMessageW(state->relativeSizeCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     const bool showRelativeWarning = pixelPerfect && relativeSize;
-    const int borderlessY = showRelativeWarning ? 448 : 412;
+    const int borderlessY = showRelativeWarning ? 482 : 446;
     const int snapY = borderlessY + 34;
 
     PlaceSettingsControl(state->presentationLabel, 505, 24, 95, 24, dpi);
@@ -5256,17 +5644,19 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     // Match the compact layout: choose pixel-perfect first, then its
     // applicable scaling method immediately underneath.
     PlaceSettingsControl(state->pixelCheck, 505, 310, 420, 28, dpi);
+    PlaceSettingsControl(state->forceHdr10Check, 505, 378, 390, 28, dpi);
+    PlaceSettingsControl(state->forceHdr10Help, 900, 374, 24, 24, dpi);
     PlaceSettingsControl(state->scalingLabel, 505, 344, 120, 24, dpi);
     PlaceSettingsControl(state->scalingCombo, 630, 340, 295, 120, dpi);
-    PlaceSettingsControl(state->relativeSizeCheck, 505, 378, 420, 28, dpi);
-    PlaceSettingsControl(state->relativeSizeWarning, 525, 406, 400, 36, dpi);
+    PlaceSettingsControl(state->relativeSizeCheck, 505, 412, 420, 28, dpi);
+    PlaceSettingsControl(state->relativeSizeWarning, 525, 440, 400, 36, dpi);
     // Window behavior stays together; diagnostics are a separate group below.
     PlaceSettingsControl(state->borderlessCheck, 505, borderlessY, 420, 28, dpi);
     PlaceSettingsControl(state->windowSnapCheck, 505, snapY, 420, 28, dpi);
-    PlaceSettingsControl(state->saveLogCheck, 505, 524, 420, 28, dpi);
-    PlaceSettingsControl(state->showConsoleCheck, 505, 558, 420, 28, dpi);
-    PlaceSettingsControl(state->startButton, 745, 590, 80, 30, dpi);
-    PlaceSettingsControl(state->cancelButton, 835, 590, 80, 30, dpi);
+    PlaceSettingsControl(state->saveLogCheck, 505, 550, 420, 28, dpi);
+    PlaceSettingsControl(state->showConsoleCheck, 505, 584, 420, 28, dpi);
+    PlaceSettingsControl(state->startButton, 745, 624, 80, 30, dpi);
+    PlaceSettingsControl(state->cancelButton, 835, 624, 80, 30, dpi);
 }
 
 static void SetSettingsControlVisible(HWND control, bool visible) {
@@ -5308,6 +5698,7 @@ static void UpdateAdvancedControlVisibility(SettingsDialogState* state) {
              state->volumeBoostCheck, state->volumeBoostHelp,
              state->driftLabel, state->driftHelp, state->driftCombo,
              state->pcmQueueLabel, state->pcmQueueHelp, state->pcmQueueCombo,
+             state->forceHdr10Check, state->forceHdr10Help,
              state->windowSnapCheck, state->saveLogCheck,
              state->showConsoleCheck}) {
         SetSettingsControlVisible(control, visible);
@@ -5364,7 +5755,8 @@ static bool IsSettingsHelpControl(const SettingsDialogState* state,
     return state && (target == state->driftHelp ||
                      target == state->pcmQueueHelp ||
                      target == state->presentationHelp ||
-                     target == state->volumeBoostHelp);
+                     target == state->volumeBoostHelp ||
+                     target == state->forceHdr10Help);
 }
 
 enum class SettingsHelpTopic {
@@ -5372,6 +5764,7 @@ enum class SettingsHelpTopic {
     PcmQueue,
     Presentation,
     VolumeBoost,
+    ForceHdr10,
 };
 
 static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
@@ -5414,6 +5807,13 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
                    L"No audio buffer or frame queue is added, so this option does not add audio latency. "
                    L"At high source volumes, boosting can clip peaks and cause distortion. Keep it off unless "
                    L"the capture audio is genuinely too quiet.";
+        case SettingsHelpTopic::ForceHdr10:
+            return L"Force HDR10 output\n\n"
+                   L"Use this only when the source is confirmed to be HDR and the capture driver does not expose "
+                   L"color metadata. It treats P010 as BT.2020/PQ and enables the HDR10 swap chain.\n\n"
+                   L"If the source is SDR, or the monitor is not handling HDR correctly, colors can look strongly "
+                   L"oversaturated or otherwise wrong. Turn it off in that case. This does not add a frame queue; "
+                   L"it only changes the output color interpretation.";
         }
     }
     switch (topic) {
@@ -5451,6 +5851,12 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
                L"그 이상은 이 앱 안에서만 디지털 증폭을 적용합니다.\n\n"
                L"추가 오디오 버퍼나 프레임 큐를 만들지 않으므로 오디오 지연은 늘지 않습니다. 다만 원본 "
                L"소리가 이미 큰 경우에는 피크가 잘려 왜곡될 수 있으니, 실제로 음량이 부족할 때만 켜세요.";
+    case SettingsHelpTopic::ForceHdr10:
+        return L"HDR10 강제 출력 안내\n\n"
+               L"캡처 드라이버가 색공간 메타데이터를 제공하지 않지만 입력이 HDR임을 확인한 경우에만 사용하세요. "
+               L"P010을 BT.2020/PQ로 처리하고 HDR10 출력으로 표시합니다.\n\n"
+               L"입력이 SDR이거나 모니터의 HDR 처리가 맞지 않으면 색상이 과포화되거나 부정확해질 수 있습니다. "
+               L"그 경우 이 옵션을 끄세요. 프레임 큐를 추가하지 않으므로 표시 지연은 늘지 않고 출력 색상 해석만 바뀝니다.";
     }
     return L"";
 }
@@ -5720,6 +6126,7 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
         bool firstFormat = true;
         for (const auto format : {VideoPixelFormat::Nv12,
                                   VideoPixelFormat::Yuy2,
+                                  VideoPixelFormat::P010,
                                   VideoPixelFormat::Mjpeg}) {
             if (realtimeRawAvailable && IsCompressedVideoFormat(format)) {
                 continue;
@@ -5841,6 +6248,7 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
         state->pixelFormats);
     for (const auto format : {VideoPixelFormat::Nv12,
                               VideoPixelFormat::Yuy2,
+                              VideoPixelFormat::P010,
                               VideoPixelFormat::Mjpeg}) {
         if (realtimeRawAvailable && IsCompressedVideoFormat(format)) continue;
         const bool available = std::any_of(
@@ -5853,7 +6261,9 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
             ? L"NV12 8-bit 4:2:0"
             : format == VideoPixelFormat::Yuy2
                 ? L"YUY2 8-bit 4:2:2"
-                : UI_TEXT(L"MJPEG (실험적 압축 호환)");
+                : format == VideoPixelFormat::P010
+                    ? UI_TEXT(L"P010 10-bit HDR10 (실험적)")
+                    : UI_TEXT(L"MJPEG (실험적 압축 호환)");
         const LRESULT index = SendMessageW(
             state->pixelFormatCombo, CB_ADDSTRING, 0,
             reinterpret_cast<LPARAM>(label));
@@ -5960,6 +6370,8 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->muteBackgroundCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.audioOnly = SendMessageW(
             state->audioOnlyCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_settings.forceHdr10 = SendMessageW(
+            state->forceHdr10Check, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.allowVolumeBoost = SendMessageW(
             state->volumeBoostCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (!g_settings.allowVolumeBoost &&
@@ -6406,6 +6818,27 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         SendMessageW(state->scalingCombo, CB_SETCURSEL,
                      g_settings.scalingMode == ScalingMode::Sharp ? 1 : 0, 0);
 
+        state->forceHdr10Check = CreateWindowExW(
+            0, L"BUTTON", UI_TEXT(
+                L"P010 HDR10 강제 (메타데이터 없을 때 · 실험적)"),
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+            505, 376, 390, 28, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_FORCE_HDR10)),
+            instance, nullptr);
+        SendMessageW(state->forceHdr10Check, BM_SETCHECK,
+                     g_settings.forceHdr10 ? BST_CHECKED : BST_UNCHECKED, 0);
+        state->forceHdr10Help = CreateWindowExW(
+            0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                BS_PUSHBUTTON,
+            900, 372, 24, 24, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_FORCE_HDR10_HELP)),
+            instance, nullptr);
+        AddSettingsTooltip(
+            state, hwnd, state->forceHdr10Help,
+            SettingsHelpText(SettingsHelpTopic::ForceHdr10));
+
         state->pixelCheck = CreateWindowExW(
             0, L"BUTTON", UI_TEXT(L"Pixel-perfect (1:1 · 창 크기 고정)"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
@@ -6675,6 +7108,14 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 hwnd,
                 SettingsHelpText(SettingsHelpTopic::VolumeBoost),
                 UI_TEXT(L"100% 이상 볼륨 증폭"), MB_OK | MB_ICONINFORMATION);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_FORCE_HDR10_HELP &&
+            HIWORD(wParam) == BN_CLICKED) {
+            MessageBoxW(
+                hwnd,
+                SettingsHelpText(SettingsHelpTopic::ForceHdr10),
+                UI_TEXT(L"HDR10 강제 출력"), MB_OK | MB_ICONINFORMATION);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_PCM_QUEUE_HELP &&
@@ -7553,6 +7994,52 @@ static void FormatAudioErrorAge(uint64_t lastErrorMs, uint64_t nowMs,
     }
 }
 
+struct AudioPatternStats {
+    size_t recentEvents = 0;
+    size_t recentUnderruns = 0;
+    size_t maxConsecutiveUnderruns = 0;
+    uint64_t lastEventMs = 0;
+};
+
+static AudioPatternStats GetAudioPatternStats(uint64_t nowMs,
+                                              UINT32 packetFrames) {
+    constexpr uint64_t kPatternWindowMs = 5 * 60 * 1000;
+    const uint64_t windowStartMs = nowMs > kPatternWindowMs
+        ? nowMs - kPatternWindowMs : 0;
+    const uint64_t packetPeriodMs = packetFrames
+        ? (1000ull * packetFrames + kSampleRate - 1) / kSampleRate : 10;
+    // Two packet periods apart still belong to the same short burst. This is
+    // only used for display classification, not for underrun accounting.
+    const uint64_t burstGapMs = (std::max)(20ull, packetPeriodMs * 2);
+
+    AudioPatternStats stats;
+    size_t currentBurst = 0;
+    uint64_t previousUnderrunMs = 0;
+    std::lock_guard<std::mutex> lock(g_audioErrorHistoryMutex);
+    for (const AudioErrorEvent& event : g_audioErrorHistory) {
+        if (event.timestampMs < windowStartMs) continue;
+        ++stats.recentEvents;
+        stats.lastEventMs = (std::max)(stats.lastEventMs, event.timestampMs);
+        if (event.kind != AudioErrorKind::Underrun) {
+            currentBurst = 0;
+            previousUnderrunMs = 0;
+            continue;
+        }
+        ++stats.recentUnderruns;
+        if (previousUnderrunMs != 0 &&
+            event.timestampMs >= previousUnderrunMs &&
+            event.timestampMs - previousUnderrunMs <= burstGapMs) {
+            ++currentBurst;
+        } else {
+            currentBurst = 1;
+        }
+        stats.maxConsecutiveUnderruns =
+            (std::max)(stats.maxConsecutiveUnderruns, currentBurst);
+        previousUnderrunMs = event.timestampMs;
+    }
+    return stats;
+}
+
 static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     const auto& preset = CurrentVideoPreset();
     auto compactName = [](const std::wstring& value, size_t maximum) {
@@ -7564,21 +8051,33 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     const VideoPixelFormat activeFormat = static_cast<VideoPixelFormat>(
         g_activePixelFormat.load(std::memory_order_acquire));
     const bool compressedVideo = IsCompressedVideoFormat(activeFormat);
+    const bool p010Video = activeFormat == VideoPixelFormat::P010;
+    const bool hdrVideo = p010Video &&
+        g_hdrOutputActive.load(std::memory_order_acquire);
     const wchar_t* chromaText = compressedVideo
                                     ? L"decode→4:2:0"
                                     : activeFormat == VideoPixelFormat::Yuy2
-                                          ? L"4:2:2" : L"4:2:0";
+                                          ? L"4:2:2"
+                                          : hdrVideo ? L"4:2:0 · BT.2020"
+                                              : p010Video ? L"4:2:0 · P010"
+                                                           : L"4:2:0";
     const wchar_t* bitDepthText = compressedVideo
                                       ? L"compressed"
-                                      : L"8-bit";
-    const wchar_t* qualityText = compressedVideo
+                                      : p010Video ? L"10-bit" : L"8-bit";
+    const wchar_t* qualityText = hdrVideo
+        ? L"BT.2020 · PQ · HDR10 prototype"
+        : p010Video
+        ? L"P010 · HDR output unavailable"
+        : compressedVideo
         ? (IsEnglishUi()
             ? L"Experimental compressed input · Media Foundation decode · NV12 D3D11 output"
             : L"실험적 압축 입력 · Media Foundation 디코드 · NV12 D3D11 출력")
         : IsEnglishUi()
         ? L"BT.709 · Limited range · D3D11 Video Processor"
         : L"BT.709 · Limited range · D3D11 Video Processor";
-    const wchar_t* videoPath = compressedVideo
+    const wchar_t* videoPath = hdrVideo
+        ? L"DirectShow P010 → D3D11 HDR10"
+        : compressedVideo
         ? L"DirectShow → Media Foundation → D3D11"
         : L"DirectShow → D3D11";
     const int configuredFps =
@@ -7658,6 +8157,17 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     const int activeCorrectionPpm =
         g_audioResamplePpm.load(std::memory_order_acquire);
     const bool trackingActive = AudioTrackingActive();
+    const AudioPatternStats patternStats =
+        GetAudioPatternStats(nowMs, capturePacketFrames);
+    wchar_t patternLastText[64]{};
+    FormatAudioErrorAge(patternStats.lastEventMs, nowMs, patternLastText,
+                        ARRAYSIZE(patternLastText));
+    const wchar_t* patternText = !trackingActive
+        ? UI_TEXT(L"측정 중")
+        : patternStats.recentUnderruns == 0
+              ? UI_TEXT(L"없음")
+              : patternStats.maxConsecutiveUnderruns >= 2
+                    ? UI_TEXT(L"연속") : UI_TEXT(L"간헐적");
     const wchar_t* clockDiagnosis = trackingActive
         ? UI_TEXT(L"측정 중") : UI_TEXT(L"워밍업 · 시작 5초 제외");
     if (monitorStartMs) {
@@ -7739,13 +8249,14 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
           L"App latency   %s  (not total HDMI latency)\n"
           L"Frames        Input %llu · Output %llu · Replaced %llu\n"
           L"Audio output  WASAPI %s · %s · buffer %.2f ms · padding %.2f ms\n"
-          L"Capture audio packet %.2f ms · callback period %.2f ms\n"
+          L"Audio input   packet %.2f ms · arrival period %.2f ms\n"
           L"Clock drift   %s · applied %+d ppm · %s\n"
-          L"PCM buffer    current %.2f ms · target %.2f ms (pre-render) · min %.2f ms\n"
-          L"PCM diagnosis %s\n"
+          L"App audio buffer current %.2f ms · target %.2f ms · min %.2f ms\n"
+          L"Buffer diagnosis %s\n"
           L"Volume        %d%% · %s\n"
-          L"Audio errors  underrun %llu / %.2f ms · overrun %llu / %.2f ms\n"
-          L"Error causes  input delay %llu · PCM depletion %llu · resampler %llu\n"
+          L"Audio errors  underrun %llu · missing audio %.2f ms · overrun %llu\n"
+          L"Error causes  input late %llu · buffer shortage %llu · resampler %llu\n"
+          L"Error pattern %s · last %s · max burst %llu\n"
           L"Error trend   %.1f/h · PCM imbalance %+.0f ppm (estimated) · last %s"
         : L"캡처 실시간 정보                              [Tab 닫기]\n"
           L"경로          %s · %s\n"
@@ -7756,13 +8267,14 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
           L"앱 처리 지연  %s  (총 HDMI 지연 아님)\n"
           L"프레임        입력 %llu · 출력 %llu · 최신화 건너뜀 %llu\n"
           L"오디오 출력   WASAPI %s · %s · 버퍼 %.2f ms · 점유 %.2f ms\n"
-          L"캡처 오디오   입력 패킷 %.2f ms · 콜백 주기 %.2f ms\n"
+          L"오디오 입력   패킷 %.2f ms · 도착 주기 %.2f ms\n"
           L"클록 보정     %s · 적용 %+d ppm · %s\n"
-          L"PCM 버퍼      현재 %.2f ms · 목표 %.2f ms(렌더 전) · 최저 %.2f ms\n"
-          L"PCM 버퍼 진단 %s\n"
+          L"앱 오디오 버퍼 현재 %.2f ms · 목표 %.2f ms · 최저 %.2f ms\n"
+          L"버퍼 진단     %s\n"
           L"음량          %d%% · %s\n"
-          L"오디오 오류   underrun %llu회 / %.2f ms · overrun %llu회 / %.2f ms\n"
-          L"오류 원인     입력 지연 %llu회 · PCM 버퍼 소진 %llu회 · 리샘플러 %llu회\n"
+          L"오디오 오류   underrun %llu회 · 누락 오디오 %.2f ms · overrun %llu회\n"
+          L"오류 원인     입력 늦음 %llu회 · 버퍼 부족 %llu회 · 리샘플러 %llu회\n"
+          L"오류 패턴     %s · 최근 %s · 최대 연속 %llu회\n"
           L"오류 추세     %.1f회/h · PCM 불균형 %+.0f ppm(추정) · 최근 %s";
     wchar_t text[2300]{};
     swprintf_s(
@@ -7803,6 +8315,8 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         static_cast<unsigned long long>(latePacketUnderruns),
         static_cast<unsigned long long>(queueDepletionUnderruns),
         static_cast<unsigned long long>(resamplerUnderruns),
+        patternText, patternLastText,
+        static_cast<unsigned long long>(patternStats.maxConsecutiveUnderruns),
         eventRatePerHour, imbalancePpm, lastErrorText);
     return text;
 }

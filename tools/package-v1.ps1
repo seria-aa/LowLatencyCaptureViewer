@@ -1,14 +1,14 @@
 param(
     [string]$BuildDir = "..\..\audio-osd-refactor-build\Release",
-    [string]$OutputDir = "..\..\outputs\v1.1.3"
+    [string]$OutputDir = "..\..\outputs\v1.1.4"
 )
 
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot ".." )).Path
 $build = (Resolve-Path (Join-Path $PSScriptRoot $BuildDir)).Path
 $output = Join-Path $root $OutputDir
-$portable = Join-Path $output "LowLatencyCaptureViewer_v1.1.3_x64"
-$zip = Join-Path $output "LowLatencyCaptureViewer_v1.1.3_x64.zip"
+$portable = Join-Path $output "LowLatencyCaptureViewer_v1.1.4_x64"
+$zip = Join-Path $output "LowLatencyCaptureViewer_v1.1.4_x64.zip"
 $exe = Join-Path $build "LowLatencyCaptureViewer.exe"
 
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {

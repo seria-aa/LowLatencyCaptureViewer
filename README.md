@@ -47,7 +47,7 @@ settings, `F3` shows or hides the audio meter OSD, and `Esc` exits.
 - D3D11 Video Processor, flip-discard presentation, and maximum frame latency of 1
 - Immediate low-latency presentation or VSync
 - WASAPI Shared or Exclusive output with `IAudioClient3` low-period support
-- Automatic device mode detection for resolution, NV12/YUY2/MJPEG, and FPS
+- Automatic device mode detection for resolution, NV12/YUY2/MJPEG/P010, and FPS
 - Pixel-perfect 1:1 display, aspect-ratio resizing, borderless fullscreen, and F5 restore
 - Multi-monitor DPI-aware window sizing and edge snap
 - Volume control, background auto-mute, logs, and a Tab diagnostics overlay
@@ -71,9 +71,20 @@ settings, `F3` shows or hides the audio meter OSD, and `Esc` exits.
 AVerMedia GC573 is the primary tested device. Other DirectShow capture devices
 are supported experimentally.
 
-- **Video:** progressive NV12 or YUY2; MJPEG is an experimental compatibility mode.
+- **Video:** progressive NV12 or YUY2; MJPEG is experimental compatibility, and P010 HDR10 is a separate experimental path.
 - **Audio:** 48 kHz stereo PCM from the video device or a separate DirectShow audio input.
-- **Not supported:** H.264/AVC, MPEG-4, P010/HDR, and automatic device reconnect.
+- **Experimental:** P010 HDR10. It must be selected explicitly; HDR output is enabled only when trustworthy color-space metadata is available.
+- **Not supported:** H.264/AVC, MPEG-4, and automatic device reconnect.
+
+The P010 path is enabled only by selecting `P010 10-bit HDR10 (experimental)` in the
+pixel-format list. Auto selection still prefers NV12/YUY2. During startup the viewer
+checks the active DirectShow type, the matching stream-capability entry, and the
+negotiated sample type for BT.2020/PQ metadata. If the capture driver does not expose
+that metadata, it falls back to BT.709 SDR output to avoid forced HDR saturation.
+The HDR path is a prototype and has not been validated across all HDR sources and displays.
+If a confirmed HDR source still reports no DirectShow color metadata, the advanced
+settings include an explicit `Force P010 HDR10` option. It is off by default: enabling it
+treats P010 as BT.2020/PQ, so SDR input can appear strongly oversaturated.
 
 MJPEG is shown only when the selected resolution has no raw NV12/YUY2 mode at
 30 fps or higher. Close any vendor capture utility before starting the viewer;
