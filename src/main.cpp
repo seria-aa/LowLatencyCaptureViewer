@@ -8311,7 +8311,6 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         static_cast<unsigned long long>(underrunEvents),
         1000.0 * underrunFrames / kSampleRate,
         static_cast<unsigned long long>(overrunEvents),
-        1000.0 * overrunFrames / kSampleRate,
         static_cast<unsigned long long>(latePacketUnderruns),
         static_cast<unsigned long long>(queueDepletionUnderruns),
         static_cast<unsigned long long>(resamplerUnderruns),
