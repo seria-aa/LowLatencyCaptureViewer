@@ -3637,9 +3637,7 @@ static void UpdateConfiguredVideoTitle(HWND videoHost, int configuredFps) {
     SetWindowTextW(root, title);
 }
 
-static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
-                                         size_t outputNameLimit = 64,
-                                         size_t captureNameLimit = 42);
+static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight);
 
 struct DirectD3D11Renderer {
     static constexpr UINT kUploadSurfaceCount = 3;
@@ -4362,47 +4360,17 @@ struct DirectD3D11Renderer {
         SafeRelease(osdTextLayout);
         SafeRelease(volumeTextLayout);
 
-        // Keep the diagnostics panel at a stable size, but adapt long device
-        // names to the actual rendered line width. A wrapped line must not
-        // push the final audio diagnostics below the panel's bottom edge.
+        // Keep the diagnostics panel at a stable size. Device names are kept
+        // verbatim; the output device has its own line so long names do not
+        // need an ellipsis just to share a line with the audio mode.
         std::wstring osdText;
         HRESULT hr = E_FAIL;
-        constexpr UINT32 kExpectedOsdLineCount = 19;
-        constexpr size_t kMinimumOutputNameLimit = 20;
-        constexpr size_t kMinimumCaptureNameLimit = 20;
-        // Start with a more generous name budget now that the diagnostics
-        // layout has dedicated lines for the device/buffer information. The
-        // line-count check below still backs these values down on narrower
-        // fonts or unusually long endpoint names, so the OSD cannot clip.
-        size_t outputNameLimit = 64;
-        size_t captureNameLimit = 42;
-        for (;;) {
-            osdText = BuildRuntimeOsdText(
-                static_cast<int>(outputWidth), static_cast<int>(outputHeight),
-                outputNameLimit, captureNameLimit);
-            IDWriteTextLayout* candidate = nullptr;
-            hr = dwriteFactory->CreateTextLayout(
-                osdText.c_str(), static_cast<UINT32>(osdText.size()),
-                osdTextFormat, kOsdTextWidth, kOsdTextHeight, &candidate);
-            if (FAILED(hr)) return hr;
-            UINT32 lineCount = 0;
-            candidate->GetLineMetrics(nullptr, 0, &lineCount);
-            if (lineCount <= kExpectedOsdLineCount ||
-                (outputNameLimit <= kMinimumOutputNameLimit &&
-                 captureNameLimit <= kMinimumCaptureNameLimit)) {
-                osdTextLayout = candidate;
-                break;
-            }
-            candidate->Release();
-            if (outputNameLimit > kMinimumOutputNameLimit + 1) {
-                outputNameLimit -= 2;
-            } else if (captureNameLimit > kMinimumCaptureNameLimit + 1) {
-                captureNameLimit -= 2;
-            } else {
-                outputNameLimit = kMinimumOutputNameLimit;
-                captureNameLimit = kMinimumCaptureNameLimit;
-            }
-        }
+        osdText = BuildRuntimeOsdText(
+            static_cast<int>(outputWidth), static_cast<int>(outputHeight));
+        hr = dwriteFactory->CreateTextLayout(
+            osdText.c_str(), static_cast<UINT32>(osdText.size()),
+            osdTextFormat, kOsdTextWidth, kOsdTextHeight, &osdTextLayout);
+        if (FAILED(hr)) return hr;
 
         const TransientHudContent hudContent =
             g_transientHudContent.load(std::memory_order_acquire);
@@ -8076,29 +8044,10 @@ static AudioPatternStats GetAudioPatternStats(uint64_t nowMs,
     return stats;
 }
 
-static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
-                                        size_t outputNameLimit,
-                                        size_t captureNameLimit) {
+static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     const auto& preset = CurrentVideoPreset();
-    auto compactName = [](const std::wstring& value, size_t maximum) {
-        if (value.size() <= maximum) return value;
-        return value.substr(0, maximum > 1 ? maximum - 1 : 0) + L"…";
-    };
-    auto compactEndpointName = [](const std::wstring& value, size_t maximum) {
-        if (value.size() <= maximum) return value;
-        if (maximum == 0) return std::wstring{};
-        if (maximum <= 2) return value.substr(0, maximum - 1) + L"…";
-        // Keep both the device prefix and the endpoint/status suffix visible.
-        const size_t available = maximum - 1; // one slot for the ellipsis
-        const size_t prefix = (available + 1) / 2;
-        const size_t suffix = available - prefix;
-        return value.substr(0, prefix) + L"…" +
-               value.substr(value.size() - suffix);
-    };
-    const std::wstring captureName = compactName(g_activeCaptureDeviceName,
-                                                 captureNameLimit);
-    const std::wstring outputName = compactEndpointName(
-        ActiveAudioOutputName(), outputNameLimit);
+    const std::wstring& captureName = g_activeCaptureDeviceName;
+    const std::wstring outputName = ActiveAudioOutputName();
     const VideoPixelFormat activeFormat = static_cast<VideoPixelFormat>(
         g_activePixelFormat.load(std::memory_order_acquire));
     const bool compressedVideo = IsCompressedVideoFormat(activeFormat);
