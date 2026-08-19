@@ -3638,15 +3638,15 @@ static void UpdateConfiguredVideoTitle(HWND videoHost, int configuredFps) {
 }
 
 static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
-                                         size_t outputNameLimit = 34,
+                                         size_t outputNameLimit = 64,
                                          size_t captureNameLimit = 42);
 
 struct DirectD3D11Renderer {
     static constexpr UINT kUploadSurfaceCount = 3;
     static constexpr UINT kOsdOverlayWidth = 700;
-    static constexpr UINT kOsdOverlayHeight = 420;
+    static constexpr UINT kOsdOverlayHeight = 440;
     static constexpr float kOsdTextWidth = 668.0f;
-    static constexpr float kOsdTextHeight = 394.0f;
+    static constexpr float kOsdTextHeight = 414.0f;
 
     ID3D11Device* device = nullptr;
     ID3D11DeviceContext* context = nullptr;
@@ -4367,14 +4367,14 @@ struct DirectD3D11Renderer {
         // push the final audio diagnostics below the panel's bottom edge.
         std::wstring osdText;
         HRESULT hr = E_FAIL;
-        constexpr UINT32 kExpectedOsdLineCount = 18;
-        constexpr size_t kMinimumOutputNameLimit = 8;
+        constexpr UINT32 kExpectedOsdLineCount = 19;
+        constexpr size_t kMinimumOutputNameLimit = 20;
         constexpr size_t kMinimumCaptureNameLimit = 20;
         // Start with a more generous name budget now that the diagnostics
         // layout has dedicated lines for the device/buffer information. The
         // line-count check below still backs these values down on narrower
         // fonts or unusually long endpoint names, so the OSD cannot clip.
-        size_t outputNameLimit = 34;
+        size_t outputNameLimit = 64;
         size_t captureNameLimit = 42;
         for (;;) {
             osdText = BuildRuntimeOsdText(
@@ -8299,7 +8299,8 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
           L"Actual FPS    Input %.1f · Present %.1f\n"
           L"App latency   %s  (not total HDMI latency)\n"
           L"Frames        Input %llu · Output %llu · Replaced %llu\n"
-          L"Audio output  WASAPI %s · %s\n"
+          L"Audio output  WASAPI %s\n"
+          L"Output device %s\n"
           L"Device buffer %.2f ms · queued %.2f ms · input packet %.2f ms · period %.2f ms\n"
           L"Clock drift   %s · applied %+d ppm · %s\n"
           L"App PCM queue current %.2f ms · target %.2f ms · observed min %.2f ms\n"
@@ -8317,7 +8318,8 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
           L"실제 FPS      입력 %.1f · Present %.1f\n"
           L"앱 처리 지연  %s  (총 HDMI 지연 아님)\n"
           L"프레임        입력 %llu · 출력 %llu · 최신화 건너뜀 %llu\n"
-          L"오디오 출력   WASAPI %s · %s\n"
+          L"오디오 출력   WASAPI %s\n"
+          L"출력 장치     %s\n"
           L"출력 버퍼(장치) %.2f ms · 현재 대기 %.2f ms · 입력 패킷 %.2f ms · 주기 %.2f ms\n"
           L"클록 보정     %s · 적용 %+d ppm · %s\n"
           L"앱 PCM 버퍼(대기) 현재 %.2f ms · 목표 %.2f ms · 관측 최저 %.2f ms\n"
