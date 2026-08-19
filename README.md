@@ -48,6 +48,7 @@ settings, `F3` shows or hides the audio meter OSD, and `Esc` exits.
 - Immediate low-latency presentation or VSync
 - WASAPI Shared or Exclusive output with `IAudioClient3` low-period support
 - Automatic device mode detection for resolution, NV12/YUY2/MJPEG/P010, and FPS
+- Experimental P010 10-bit HDR10 path with metadata checks and SDR fallback
 - Pixel-perfect 1:1 display, aspect-ratio resizing, borderless fullscreen, and F5 restore
 - Multi-monitor DPI-aware window sizing and edge snap
 - Volume control, background auto-mute, logs, and a Tab diagnostics overlay

@@ -47,6 +47,7 @@ Windows 10/11 x64와 캡처보드 드라이버가 필요합니다.
 - 저지연 표시 또는 VSync 선택
 - WASAPI Shared/Exclusive와 `IAudioClient3` 저주기 출력 지원
 - 장치별 해상도, NV12/YUY2/MJPEG/P010과 프레임 자동 인식
+- 메타데이터 확인과 SDR 대체 경로를 포함한 P010 10-bit HDR10 실험 경로
 - Pixel-perfect 1:1, 비율 고정 크기 조절, 보더리스 전체화면과 F5 복원
 - 멀티 모니터 DPI 대응 창 크기 유지와 가장자리 스냅
 - 볼륨 조절, 백그라운드 자동 음소거, 로그와 Tab 실시간 정보창

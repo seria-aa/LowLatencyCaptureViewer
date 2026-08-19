@@ -104,7 +104,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.1.4";
+constexpr wchar_t kAppVersionLabel[] = L"v1.1.5";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -3637,7 +3637,9 @@ static void UpdateConfiguredVideoTitle(HWND videoHost, int configuredFps) {
     SetWindowTextW(root, title);
 }
 
-static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight);
+static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
+                                         size_t outputNameLimit = 26,
+                                         size_t captureNameLimit = 34);
 
 struct DirectD3D11Renderer {
     static constexpr UINT kUploadSurfaceCount = 3;
@@ -4360,13 +4362,43 @@ struct DirectD3D11Renderer {
         SafeRelease(osdTextLayout);
         SafeRelease(volumeTextLayout);
 
-        const std::wstring osdText = BuildRuntimeOsdText(
-            static_cast<int>(outputWidth), static_cast<int>(outputHeight));
-        HRESULT hr = dwriteFactory->CreateTextLayout(
-            osdText.c_str(), static_cast<UINT32>(osdText.size()),
-            osdTextFormat, kOsdTextWidth, kOsdTextHeight,
-            &osdTextLayout);
-        if (FAILED(hr)) return hr;
+        // Keep the diagnostics panel at a stable size, but adapt long device
+        // names to the actual rendered line width. A wrapped line must not
+        // push the final audio diagnostics below the panel's bottom edge.
+        std::wstring osdText;
+        HRESULT hr = E_FAIL;
+        constexpr UINT32 kExpectedOsdLineCount = 18;
+        constexpr size_t kMinimumOutputNameLimit = 8;
+        constexpr size_t kMinimumCaptureNameLimit = 20;
+        size_t outputNameLimit = 26;
+        size_t captureNameLimit = 34;
+        for (;;) {
+            osdText = BuildRuntimeOsdText(
+                static_cast<int>(outputWidth), static_cast<int>(outputHeight),
+                outputNameLimit, captureNameLimit);
+            IDWriteTextLayout* candidate = nullptr;
+            hr = dwriteFactory->CreateTextLayout(
+                osdText.c_str(), static_cast<UINT32>(osdText.size()),
+                osdTextFormat, kOsdTextWidth, kOsdTextHeight, &candidate);
+            if (FAILED(hr)) return hr;
+            UINT32 lineCount = 0;
+            candidate->GetLineMetrics(nullptr, 0, &lineCount);
+            if (lineCount <= kExpectedOsdLineCount ||
+                (outputNameLimit <= kMinimumOutputNameLimit &&
+                 captureNameLimit <= kMinimumCaptureNameLimit)) {
+                osdTextLayout = candidate;
+                break;
+            }
+            candidate->Release();
+            if (outputNameLimit > kMinimumOutputNameLimit + 1) {
+                outputNameLimit -= 2;
+            } else if (captureNameLimit > kMinimumCaptureNameLimit + 1) {
+                captureNameLimit -= 2;
+            } else {
+                outputNameLimit = kMinimumOutputNameLimit;
+                captureNameLimit = kMinimumCaptureNameLimit;
+            }
+        }
 
         const TransientHudContent hudContent =
             g_transientHudContent.load(std::memory_order_acquire);
@@ -8040,14 +8072,29 @@ static AudioPatternStats GetAudioPatternStats(uint64_t nowMs,
     return stats;
 }
 
-static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
+static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
+                                        size_t outputNameLimit,
+                                        size_t captureNameLimit) {
     const auto& preset = CurrentVideoPreset();
     auto compactName = [](const std::wstring& value, size_t maximum) {
         if (value.size() <= maximum) return value;
         return value.substr(0, maximum > 1 ? maximum - 1 : 0) + L"…";
     };
-    const std::wstring captureName = compactName(g_activeCaptureDeviceName, 34);
-    const std::wstring outputName = compactName(ActiveAudioOutputName(), 26);
+    auto compactEndpointName = [](const std::wstring& value, size_t maximum) {
+        if (value.size() <= maximum) return value;
+        if (maximum == 0) return std::wstring{};
+        if (maximum <= 2) return value.substr(0, maximum - 1) + L"…";
+        // Keep both the device prefix and the endpoint/status suffix visible.
+        const size_t available = maximum - 1; // one slot for the ellipsis
+        const size_t prefix = (available + 1) / 2;
+        const size_t suffix = available - prefix;
+        return value.substr(0, prefix) + L"…" +
+               value.substr(value.size() - suffix);
+    };
+    const std::wstring captureName = compactName(g_activeCaptureDeviceName,
+                                                 captureNameLimit);
+    const std::wstring outputName = compactEndpointName(
+        ActiveAudioOutputName(), outputNameLimit);
     const VideoPixelFormat activeFormat = static_cast<VideoPixelFormat>(
         g_activePixelFormat.load(std::memory_order_acquire));
     const bool compressedVideo = IsCompressedVideoFormat(activeFormat);
@@ -8070,7 +8117,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         ? L"P010 · HDR output unavailable"
         : compressedVideo
         ? (IsEnglishUi()
-            ? L"Experimental compressed input · Media Foundation decode · NV12 D3D11 output"
+            ? L"Compressed input · Media Foundation decode · NV12 output"
             : L"실험적 압축 입력 · Media Foundation 디코드 · NV12 D3D11 출력")
         : IsEnglishUi()
         ? L"BT.709 · Limited range · D3D11 Video Processor"
@@ -8248,10 +8295,10 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
           L"Actual FPS    Input %.1f · Present %.1f\n"
           L"App latency   %s  (not total HDMI latency)\n"
           L"Frames        Input %llu · Output %llu · Replaced %llu\n"
-          L"Audio output  WASAPI %s · %s · buffer %.2f ms · padding %.2f ms\n"
-          L"Audio input   packet %.2f ms · arrival period %.2f ms\n"
+          L"Audio output  WASAPI %s · %s\n"
+          L"Device buffer %.2f ms · queued %.2f ms · input packet %.2f ms · period %.2f ms\n"
           L"Clock drift   %s · applied %+d ppm · %s\n"
-          L"App audio buffer current %.2f ms · target %.2f ms · min %.2f ms\n"
+          L"App PCM queue current %.2f ms · target %.2f ms · observed min %.2f ms\n"
           L"Buffer diagnosis %s\n"
           L"Volume        %d%% · %s\n"
           L"Audio errors  underrun %llu · missing audio %.2f ms · overrun %llu\n"
@@ -8266,10 +8313,10 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
           L"실제 FPS      입력 %.1f · Present %.1f\n"
           L"앱 처리 지연  %s  (총 HDMI 지연 아님)\n"
           L"프레임        입력 %llu · 출력 %llu · 최신화 건너뜀 %llu\n"
-          L"오디오 출력   WASAPI %s · %s · 버퍼 %.2f ms · 점유 %.2f ms\n"
-          L"오디오 입력   패킷 %.2f ms · 도착 주기 %.2f ms\n"
+          L"오디오 출력   WASAPI %s · %s\n"
+          L"출력 버퍼(장치) %.2f ms · 현재 대기 %.2f ms · 입력 패킷 %.2f ms · 주기 %.2f ms\n"
           L"클록 보정     %s · 적용 %+d ppm · %s\n"
-          L"앱 오디오 버퍼 현재 %.2f ms · 목표 %.2f ms · 최저 %.2f ms\n"
+          L"앱 PCM 버퍼(대기) 현재 %.2f ms · 목표 %.2f ms · 관측 최저 %.2f ms\n"
           L"버퍼 진단     %s\n"
           L"음량          %d%% · %s\n"
           L"오디오 오류   underrun %llu회 · 누락 오디오 %.2f ms · overrun %llu회\n"
