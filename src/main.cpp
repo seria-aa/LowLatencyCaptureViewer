@@ -3638,8 +3638,8 @@ static void UpdateConfiguredVideoTitle(HWND videoHost, int configuredFps) {
 }
 
 static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
-                                         size_t outputNameLimit = 26,
-                                         size_t captureNameLimit = 34);
+                                         size_t outputNameLimit = 34,
+                                         size_t captureNameLimit = 42);
 
 struct DirectD3D11Renderer {
     static constexpr UINT kUploadSurfaceCount = 3;
@@ -4370,8 +4370,12 @@ struct DirectD3D11Renderer {
         constexpr UINT32 kExpectedOsdLineCount = 18;
         constexpr size_t kMinimumOutputNameLimit = 8;
         constexpr size_t kMinimumCaptureNameLimit = 20;
-        size_t outputNameLimit = 26;
-        size_t captureNameLimit = 34;
+        // Start with a more generous name budget now that the diagnostics
+        // layout has dedicated lines for the device/buffer information. The
+        // line-count check below still backs these values down on narrower
+        // fonts or unusually long endpoint names, so the OSD cannot clip.
+        size_t outputNameLimit = 34;
+        size_t captureNameLimit = 42;
         for (;;) {
             osdText = BuildRuntimeOsdText(
                 static_cast<int>(outputWidth), static_cast<int>(outputHeight),
