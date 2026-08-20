@@ -18,6 +18,8 @@
 
 #include <windows.h>
 #include <windowsx.h>
+#include <shellapi.h>
+#include <winhttp.h>
 #include <dshow.h>
 #include <dvdmedia.h>
 #include <mmdeviceapi.h>
@@ -105,7 +107,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.1.6";
+constexpr wchar_t kAppVersionLabel[] = L"v1.1.7";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -226,6 +228,7 @@ struct AppSettings {
     bool saveLog = false;
     bool showDiagnosticConsole = false;
     bool skipStartupSettings = false;
+    bool checkForUpdates = false;
     bool audioOnly = false;
     bool forceHdr10 = false;
     bool pixelPerfect = true;
@@ -357,6 +360,10 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"진단 콘솔 창 표시", L"Show diagnostic console window"},
         {L"다음 실행부터 바로 시작", L"Start directly next time"},
         {L"저장된 설정으로 바로 실행 · Shift 실행 또는 F2로 설정 열기", L"Starts with saved settings · hold Shift at launch or press F2 for settings"},
+        {L"업데이트 자동 확인 (시작 후 백그라운드)", L"Check for updates automatically (in background after startup)"},
+        {L"새 버전이 있습니다. 공식 설치 파일을 다운로드하시겠습니까?", L"A new version is available. Open the official installer download?"},
+        {L"업데이트 확인", L"Update check"},
+        {L"업데이트를 확인할 수 없습니다.", L"Could not check for updates."},
         {L"언어 / Language", L"Language"},
         {L"Low Latency Capture Viewer 설정", L"Low Latency Capture Viewer Settings"},
         {L"시작", L"Start"},
@@ -428,6 +435,8 @@ constexpr size_t kRingFrames = 48000 / 2;
 static HWND g_videoHost = nullptr;
 static bool g_suppressSettingsSave = false;
 static std::atomic<bool> g_running{true};
+static std::atomic<bool> g_updateCheckStop{false};
+static std::thread g_updateCheckThread;
 static std::atomic<bool> g_restartToSettings{false};
 static std::atomic<uint64_t> g_videoCapturedFrames{0};
 static std::atomic<uint64_t> g_videoPresentedFrames{0};
@@ -1073,6 +1082,7 @@ static void LoadSettings() {
     wchar_t saveLog[8]{};
     wchar_t showDiagnosticConsole[8]{};
     wchar_t skipStartupSettings[8]{};
+    wchar_t checkForUpdates[8]{};
     wchar_t audioOnly[8]{};
     wchar_t forceHdr10[8]{};
 
@@ -1081,6 +1091,9 @@ static void LoadSettings() {
     GetPrivateProfileStringW(L"General", L"SkipStartupSettings", L"0",
                              skipStartupSettings,
                              ARRAYSIZE(skipStartupSettings), path.c_str());
+    GetPrivateProfileStringW(L"General", L"CheckForUpdates", L"0",
+                             checkForUpdates,
+                             ARRAYSIZE(checkForUpdates), path.c_str());
     GetPrivateProfileStringW(L"General", L"AudioOnly", L"0", audioOnly,
                              ARRAYSIZE(audioOnly), path.c_str());
     GetPrivateProfileStringW(L"Video", L"ForceHdr10", L"0", forceHdr10,
@@ -1171,6 +1184,8 @@ static void LoadSettings() {
     } else {
         g_settings.uiLanguage = UiLanguage::Auto;
     }
+    g_settings.checkForUpdates =
+        wcstol(checkForUpdates, nullptr, 10) != 0;
 
     if (_wcsicmp(audio, L"Exclusive") == 0) {
         // WASAPI Exclusive is temporarily hidden from the settings UI while
@@ -1347,6 +1362,9 @@ static void SaveSettings() {
                                path.c_str());
     WritePrivateProfileStringW(L"General", L"SkipStartupSettings",
                                g_settings.skipStartupSettings ? L"1" : L"0",
+                               path.c_str());
+    WritePrivateProfileStringW(L"General", L"CheckForUpdates",
+                               g_settings.checkForUpdates ? L"1" : L"0",
                                path.c_str());
     WritePrivateProfileStringW(L"General", L"AudioOnly",
                                g_settings.audioOnly ? L"1" : L"0",
@@ -5828,10 +5846,12 @@ constexpr int IDC_SETTINGS_ADVANCED_TOGGLE = 2031;
 constexpr int IDC_SETTINGS_AUDIO_ONLY = 2032;
 constexpr int IDC_SETTINGS_FORCE_HDR10 = 2033;
 constexpr int IDC_SETTINGS_FORCE_HDR10_HELP = 2034;
+constexpr int IDC_SETTINGS_UPDATE_CHECK = 2035;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
 constexpr UINT WM_CAPTURE_AUDIO_PROBE_COMPLETE = WM_APP + 76;
+constexpr UINT WM_UPDATE_CHECK_COMPLETE = WM_APP + 77;
 
 struct SettingsDialogState {
     HWND languageLabel = nullptr;
@@ -5883,6 +5903,7 @@ struct SettingsDialogState {
     HWND showConsoleCheck = nullptr;
     HWND skipStartupCheck = nullptr;
     HWND skipStartupHint = nullptr;
+    HWND checkForUpdatesCheck = nullptr;
     HWND versionWatermark = nullptr;
     HWND advancedToggle = nullptr;
     HWND startButton = nullptr;
@@ -5995,7 +6016,8 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
         PlaceSettingsControl(state->languageCombo, 195, 176, 280, 120, dpi);
         PlaceSettingsControl(state->skipStartupCheck, 24, 224, 451, 28, dpi);
         PlaceSettingsControl(state->skipStartupHint, 44, 252, 431, 42, dpi);
-        PlaceSettingsControl(state->advancedToggle, 24, 316, 190, 28, dpi);
+        PlaceSettingsControl(state->checkForUpdatesCheck, 24, 296, 451, 28, dpi);
+        PlaceSettingsControl(state->advancedToggle, 24, 336, 190, 28, dpi);
         PlaceSettingsControl(state->versionWatermark, 24, 466, 260, 20, dpi);
 
         PlaceSettingsControl(state->presentationLabel, 505, 24, 95, 24, dpi);
@@ -6049,8 +6071,9 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->languageCombo, 195, 408, 280, 120, dpi);
     PlaceSettingsControl(state->skipStartupCheck, 24, 456, 451, 28, dpi);
     PlaceSettingsControl(state->skipStartupHint, 44, 484, 431, 42, dpi);
-    PlaceSettingsControl(state->advancedToggle, 24, 540, 190, 28, dpi);
-    PlaceSettingsControl(state->versionWatermark, 24, 596, 260, 20, dpi);
+    PlaceSettingsControl(state->checkForUpdatesCheck, 24, 530, 451, 28, dpi);
+    PlaceSettingsControl(state->advancedToggle, 24, 566, 190, 28, dpi);
+    PlaceSettingsControl(state->versionWatermark, 24, 640, 260, 20, dpi);
 
     const bool pixelPerfect = state->pixelCheck &&
         SendMessageW(state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -6089,8 +6112,8 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->windowSnapCheck, 505, snapY, 420, 28, dpi);
     PlaceSettingsControl(state->saveLogCheck, 505, 550, 420, 28, dpi);
     PlaceSettingsControl(state->showConsoleCheck, 505, 584, 420, 28, dpi);
-    PlaceSettingsControl(state->startButton, 745, 624, 80, 30, dpi);
-    PlaceSettingsControl(state->cancelButton, 835, 624, 80, 30, dpi);
+    PlaceSettingsControl(state->startButton, 745, 650, 80, 30, dpi);
+    PlaceSettingsControl(state->cancelButton, 835, 650, 80, 30, dpi);
 }
 
 static void SetSettingsControlVisible(HWND control, bool visible) {
@@ -6897,6 +6920,8 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->showConsoleCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.skipStartupSettings = SendMessageW(
             state->skipStartupCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_settings.checkForUpdates = SendMessageW(
+            state->checkForUpdatesCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.muteWhenBackground = SendMessageW(
             state->muteBackgroundCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.audioOnly = SendMessageW(
@@ -7192,6 +7217,16 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 L"저장된 설정으로 바로 실행 · Shift 실행 또는 F2로 설정 열기"),
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
             44, 424, 431, 42, hwnd, nullptr, instance, nullptr);
+        state->checkForUpdatesCheck = CreateWindowExW(
+            0, L"BUTTON", UI_TEXT(L"업데이트 자동 확인 (시작 후 백그라운드)"),
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+            24, 466, 451, 28, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_UPDATE_CHECK)),
+            instance, nullptr);
+        SendMessageW(state->checkForUpdatesCheck, BM_SETCHECK,
+                     g_settings.checkForUpdates
+                         ? BST_CHECKED : BST_UNCHECKED, 0);
         state->advancedToggle = CreateWindowExW(
             0, L"BUTTON", UI_TEXT(L"▸ 고급 설정"),
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
@@ -8504,6 +8539,208 @@ static constexpr UINT WM_TOGGLE_RUNTIME_OSD = WM_APP + 91;
 static constexpr UINT WM_OPEN_SETTINGS = WM_APP + 92;
 static constexpr UINT WM_RESTORE_ONE_TO_ONE = WM_APP + 93;
 
+struct UpdateCheckResult {
+    bool newer = false;
+    std::wstring latestTag;
+    std::wstring installerUrl;
+};
+
+static std::wstring Utf8ToWide(const std::string& value) {
+    if (value.empty()) return {};
+    const int length = MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+        static_cast<int>(value.size()), nullptr, 0);
+    if (length <= 0) return {};
+    std::wstring result(static_cast<size_t>(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+                        static_cast<int>(value.size()), result.data(), length);
+    return result;
+}
+
+static bool ExtractJsonString(const std::string& json, const char* key,
+                              size_t searchFrom, std::string& value,
+                              size_t* nextPosition = nullptr) {
+    if (!key) return false;
+    const std::string marker = std::string("\"") + key + "\"";
+    const size_t markerPos = json.find(marker, searchFrom);
+    if (markerPos == std::string::npos) return false;
+    size_t cursor = json.find(':', markerPos + marker.size());
+    if (cursor == std::string::npos) return false;
+    ++cursor;
+    while (cursor < json.size() &&
+           (json[cursor] == ' ' || json[cursor] == '\t' ||
+            json[cursor] == '\r' || json[cursor] == '\n')) {
+        ++cursor;
+    }
+    if (cursor >= json.size() || json[cursor] != '"') return false;
+    ++cursor;
+    value.clear();
+    bool escaped = false;
+    for (; cursor < json.size(); ++cursor) {
+        const char ch = json[cursor];
+        if (escaped) {
+            // Release tags and GitHub asset URLs do not contain escaped
+            // unicode, but preserve the common JSON escapes safely.
+            switch (ch) {
+            case '"': value.push_back('"'); break;
+            case '\\': value.push_back('\\'); break;
+            case '/': value.push_back('/'); break;
+            case 'n': value.push_back('\n'); break;
+            case 'r': value.push_back('\r'); break;
+            case 't': value.push_back('\t'); break;
+            default: value.push_back(ch); break;
+            }
+            escaped = false;
+        } else if (ch == '\\') {
+            escaped = true;
+        } else if (ch == '"') {
+            if (nextPosition) *nextPosition = cursor + 1;
+            return true;
+        } else {
+            value.push_back(ch);
+        }
+    }
+    return false;
+}
+
+static bool IsNewerReleaseTag(const std::wstring& latestTag) {
+    auto parse = [](const std::wstring& input) {
+        std::vector<int> parts;
+        size_t index = 0;
+        while (index < input.size() &&
+               (input[index] == L'v' || input[index] == L'V' ||
+                input[index] == L' ')) {
+            ++index;
+        }
+        while (index < input.size()) {
+            while (index < input.size() && !iswdigit(input[index])) ++index;
+            if (index >= input.size()) break;
+            int value = 0;
+            while (index < input.size() && iswdigit(input[index])) {
+                value = (std::min)(value * 10 + (input[index] - L'0'), 1000000);
+                ++index;
+            }
+            parts.push_back(value);
+        }
+        return parts;
+    };
+    const auto latest = parse(latestTag);
+    const auto current = parse(kAppVersionLabel);
+    const size_t count = (std::max)(latest.size(), current.size());
+    for (size_t i = 0; i < count; ++i) {
+        const int lhs = i < latest.size() ? latest[i] : 0;
+        const int rhs = i < current.size() ? current[i] : 0;
+        if (lhs != rhs) return lhs > rhs;
+    }
+    return false;
+}
+
+static bool FetchLatestRelease(UpdateCheckResult& result) {
+    HINTERNET session = WinHttpOpen(
+        L"LowLatencyCaptureViewer/1.1.7",
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return false;
+    WinHttpSetTimeouts(session, 2500, 2500, 2500, 2500);
+    HINTERNET connection = WinHttpConnect(
+        session, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!connection) {
+        WinHttpCloseHandle(session);
+        return false;
+    }
+    HINTERNET request = WinHttpOpenRequest(
+        connection, L"GET", L"/repos/seria-aa/LowLatencyCaptureViewer/releases/latest",
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        WINHTTP_FLAG_SECURE);
+    if (!request) {
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+    WinHttpAddRequestHeaders(
+        request, L"Accept: application/vnd.github+json\r\n",
+        static_cast<DWORD>(-1L), WINHTTP_ADDREQ_FLAG_ADD);
+    const bool sent = WinHttpSendRequest(
+        request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA,
+        0, 0, 0) && WinHttpReceiveResponse(request, nullptr);
+    if (!sent) {
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    std::string json;
+    for (;;) {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(request, &available) || available == 0) {
+            break;
+        }
+        std::string chunk(static_cast<size_t>(available), '\0');
+        DWORD read = 0;
+        if (!WinHttpReadData(request, chunk.data(), available, &read) ||
+            read == 0) {
+            break;
+        }
+        chunk.resize(read);
+        json += chunk;
+        if (json.size() > 2 * 1024 * 1024) break;
+    }
+    WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+
+    std::string tag;
+    if (!ExtractJsonString(json, "tag_name", 0, tag)) return false;
+    result.latestTag = Utf8ToWide(tag);
+    if (result.latestTag.empty() || !IsNewerReleaseTag(result.latestTag)) {
+        return true;
+    }
+
+    size_t cursor = 0;
+    std::string assetUrl;
+    while (ExtractJsonString(json, "browser_download_url", cursor,
+                             assetUrl, &cursor)) {
+        if (assetUrl.find("_Setup.exe") != std::string::npos) break;
+        assetUrl.clear();
+    }
+    const std::wstring installerUrl = Utf8ToWide(assetUrl);
+    constexpr wchar_t kOfficialAssetPrefix[] =
+        L"https://github.com/seria-aa/LowLatencyCaptureViewer/releases/download/";
+    if (installerUrl.empty() || installerUrl.rfind(kOfficialAssetPrefix, 0) != 0) {
+        return true;
+    }
+    result.installerUrl = installerUrl;
+    result.newer = true;
+    return true;
+}
+
+static void StartBackgroundUpdateCheck(HWND hwnd) {
+    if (!hwnd || !g_settings.checkForUpdates || g_updateCheckThread.joinable()) {
+        return;
+    }
+    g_updateCheckStop.store(false, std::memory_order_release);
+    g_updateCheckThread = std::thread([hwnd]() {
+        Sleep(2000);
+        if (g_updateCheckStop.load(std::memory_order_acquire) ||
+            !g_running.load(std::memory_order_acquire) || !IsWindow(hwnd)) {
+            return;
+        }
+        UpdateCheckResult result;
+        if (!FetchLatestRelease(result) || !result.newer ||
+            result.installerUrl.empty() ||
+            g_updateCheckStop.load(std::memory_order_acquire) ||
+            !g_running.load(std::memory_order_acquire) || !IsWindow(hwnd)) {
+            return;
+        }
+        auto* message = new UpdateCheckResult(std::move(result));
+        if (!PostMessageW(hwnd, WM_UPDATE_CHECK_COMPLETE, 0,
+                          reinterpret_cast<LPARAM>(message))) {
+            delete message;
+        }
+    });
+}
+
 static void FormatAudioErrorAge(uint64_t lastErrorMs, uint64_t nowMs,
                                 wchar_t* output, size_t outputCount) {
     if (!output || outputCount == 0) return;
@@ -9354,6 +9591,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         RestoreOneToOneWindow(hwnd);
         return 0;
 
+    case WM_UPDATE_CHECK_COMPLETE: {
+        std::unique_ptr<UpdateCheckResult> result(
+            reinterpret_cast<UpdateCheckResult*>(lParam));
+        if (!result || result->latestTag.empty() ||
+            result->installerUrl.empty()) {
+            return 0;
+        }
+        std::wstring message = UI_TEXT(
+            L"새 버전이 있습니다. 공식 설치 파일을 다운로드하시겠습니까?");
+        message += L"\n\n";
+        message += result->latestTag;
+        const int choice = MessageBoxW(
+            hwnd, message.c_str(), UI_TEXT(L"업데이트 확인"),
+            MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON1);
+        if (choice == IDYES) {
+            ShellExecuteW(hwnd, L"open", result->installerUrl.c_str(),
+                          nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        return 0;
+    }
+
     case WM_CLOSE:
         PersistWindowPosition(hwnd);
         g_windowPositionPersisted = true;
@@ -9720,6 +9978,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
             if (g_running.load()) PostMessageW(hwnd, WM_CLOSE, 0, 0);
         });
     }
+    if (!smokeTest) StartBackgroundUpdateCheck(hwnd);
 
     MSG m{};
     while (g_running.load() && GetMessageW(&m, nullptr, 0, 0) > 0) {
@@ -9752,10 +10011,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     }
 
     g_running.store(false);
+    g_updateCheckStop.store(true, std::memory_order_release);
 
     if (renderThread.joinable()) renderThread.join();
     if (unifiedCaptureThread.joinable()) unifiedCaptureThread.join();
     if (smokeTestStopper.joinable()) smokeTestStopper.join();
+    if (g_updateCheckThread.joinable()) g_updateCheckThread.join();
     if (smokeTest) {
         fwprintf(stderr,
                  L"[smoke] captured=%llu presented=%llu replaced=%llu "

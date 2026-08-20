@@ -128,6 +128,12 @@ Enable **Start directly next time** to skip the settings window on later runs.
 Hold **Shift** while launching, or press **F2** in the viewer, to open settings
 again.
 
+**Check for updates automatically** is off by default. When enabled, the viewer
+checks the latest GitHub release in a background thread after startup and asks
+before opening the official installer download when a newer version exists. It
+never installs or launches an update silently, and the check is separate from
+video/audio initialization.
+
 ## Detailed documentation
 
 - [Video modes, scaling, and fullscreen](docs/VIDEO.md)

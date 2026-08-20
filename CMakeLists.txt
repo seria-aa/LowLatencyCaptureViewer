@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 1.1.6 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 1.1.7 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -62,6 +62,7 @@ target_link_libraries(LowLatencyCaptureViewer PRIVATE
     mfplat
     mfuuid
     advapi32
+    winhttp
 )
 
 if (MSVC)
