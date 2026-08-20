@@ -17,7 +17,7 @@ clock, but may be useful for separate USB video and audio paths.
 ## Audio-only mode
 
 Enable **Audio-only mode** to skip the video pin, D3D11 renderer, and video
-presentation path. The app runs only the capture-audio-to-WASAPI path. If audio
+presentation path. The app runs only the capture-audio-to-selected-output path. If audio
 is exposed on the video filter, only that audio pin is connected; when a
 separate capture-audio device is selected, only its DirectShow audio filter is
 used. WASAPI mode, PCM target, and clock-drift correction remain available with
@@ -25,6 +25,11 @@ the same behavior as normal mode. The window shows the same L/R peak, dBFS,
 channel/master volume, and clipping OSD as the video viewer.
 
 ## WASAPI Shared and Exclusive
+
+In this release, WASAPI Exclusive is temporarily hidden from the settings UI
+while that backend is being investigated. Existing Exclusive profiles are
+migrated to WASAPI Shared on the next run. The Exclusive notes below are kept
+for reference if the backend is re-enabled later.
 
 **WASAPI Shared** allows other applications to use the output device and keeps
 Windows shared-mode effects available. It is the recommended default.
@@ -43,6 +48,17 @@ shared-mixer path, but other applications may be unable to use that endpoint at
 the same time. Shared-mode APO/DSP processing such as Equalizer APO, HeSuVi, or
 Windows spatial effects may also be bypassed. Use Shared when those effects or
 general compatibility are required.
+
+## ASIO (experimental)
+
+ASIO appears in the settings only when an installed ASIO driver is detected.
+Driver DLLs are not bundled; the selected driver's own buffer size is used. The
+capture path supplies 48 kHz PCM, so a driver that cannot run at 48 kHz is
+rejected and that run falls back to WASAPI Shared. This prototype follows the
+ASIO driver's output clock, but it supports the same app-side Off/Auto/On
+clock-drift correction choices as WASAPI. When enabled, the resampler adjusts
+the capture PCM rate without adding a separate queue. Use WASAPI Shared when
+Windows APO/DSP effects are required.
 
 ## Output-device switching
 
@@ -75,9 +91,12 @@ amount of audio queued by this application.
 
 ## Clock-drift correction
 
-With correction off, PCM samples remain unaltered. Enable correction when a
-long-running session shows repeated breakup or a persistent, growing PCM queue
-imbalance—especially when video and audio use separate capture filters.
+**Off** leaves PCM samples unaltered. **Auto** watches the PCM queue and starts
+correction only after an imbalance has remained for five seconds; once started,
+it stays on for that session instead of repeatedly toggling. **On** uses the
+resampler from startup. Choose Auto when a long-running session shows repeated
+breakup or a persistent, growing PCM queue imbalance—especially when video and
+audio use separate capture filters.
 
 Correction makes small continuous rate adjustments to keep the PCM queue near
 its target. It does not intentionally add another frame or packet queue. Use the

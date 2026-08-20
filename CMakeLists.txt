@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 1.1.5 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 1.1.6 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,13 +9,33 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_executable(LowLatencyCaptureViewer
     src/main.cpp
     src/app.rc
+    src/audio/AsioOutput.cpp
     src/audio/AudioMix.cpp
     src/audio/CaptureAudioFormat.cpp
     src/diagnostics/Logger.cpp
     src/ui/AudioOsdLayout.cpp
 )
 
-target_include_directories(LowLatencyCaptureViewer PRIVATE src)
+target_include_directories(LowLatencyCaptureViewer PRIVATE
+    src
+    third_party/asio/common
+    third_party/asio/host
+    third_party/asio/host/pc
+)
+
+# Steinberg's host-side ASIO helper is compiled into the optional backend.
+# Driver DLLs are not bundled; installed ASIO drivers are discovered at runtime.
+target_sources(LowLatencyCaptureViewer PRIVATE
+    third_party/asio/common/asio.cpp
+    third_party/asio/host/asiodrivers.cpp
+    third_party/asio/host/pc/asiolist.cpp
+)
+set_source_files_properties(
+    third_party/asio/common/asio.cpp
+    third_party/asio/host/asiodrivers.cpp
+    third_party/asio/host/pc/asiolist.cpp
+    PROPERTIES COMPILE_OPTIONS "/UUNICODE;/U_UNICODE"
+)
 
 target_compile_definitions(LowLatencyCaptureViewer PRIVATE
     UNICODE
@@ -41,6 +61,7 @@ target_link_libraries(LowLatencyCaptureViewer PRIVATE
     comctl32
     mfplat
     mfuuid
+    advapi32
 )
 
 if (MSVC)
@@ -90,4 +111,5 @@ endif()
 install(TARGETS LowLatencyCaptureViewer RUNTIME DESTINATION .)
 install(FILES LICENSE README.md README.ko.md DESIGN.txt BUILD_INFO.txt DEPENDENCIES.txt
         "실행안내.txt" GITHUB_PREP.md DESTINATION .)
+install(FILES third_party/asio/LICENSE.txt DESTINATION . RENAME ASIO-SDK-LICENSE.txt)
 install(DIRECTORY docs DESTINATION .)

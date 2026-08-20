@@ -11,6 +11,10 @@ separate Visual C++ Redistributable installation. The target PC needs:
 - A card exposing uncompressed NV12 or YUY2 and 48 kHz stereo PCM, either on
   the video filter or as a separate DirectShow audio-input filter
 - D3D11, DXGI, DirectShow, and WASAPI Windows system components
+- Optional ASIO mode: an ASIO-compatible output driver installed by the user.
+  ASIO drivers are not included. The bundled Steinberg ASIO SDK host headers and
+  helper sources are used under the SDK's GPLv3 option; see
+  ASIO-SDK-LICENSE.txt in installed/source packages.
 
 The tested/recommended card is AVerMedia GC573. Other cards are experimental;
 when their video and audio filters are separate, enable drift correction for
