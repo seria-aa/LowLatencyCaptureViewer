@@ -58,6 +58,37 @@ repeat, first confirm that the output device is stable, then raise the PCM targe
 one step. Enable clock correction only for a persistent drift pattern rather
 than an isolated scheduling interruption.
 
+## Buffer diagnosis
+
+Use the Tab overlay in this order:
+
+- **Current PCM queue:** the app queue at the instant the OSD was refreshed. It can
+  briefly look low just after a render callback.
+- **Target:** the PCM queue the app tries to maintain.
+- **Observed minimum:** the lowest queue depth observed at a render-callback
+  boundary during the session. It is sampled at a different time from Current, so
+  the two values do not have to match.
+- **Underrun:** the number of times output actually ran out of PCM.
+
+Use these rules:
+
+1. **Zero underruns + normal buffer diagnosis:** keep the current setting.
+2. Repeated **`buffer shortage`** or **`resampler output shortage`**: raise the PCM
+   target one step at a time, `10 → 15 → 20 ms`. Both can indicate that the app's
+   PCM safety margin is too small, so adjust the PCM target first.
+3. Repeated **`input late`** alone points to capture-callback or system-scheduling
+   delays; increasing the PCM target may not fix it.
+4. Prefer the **recent error pattern and maximum consecutive count** over one old
+   event. A single isolated event may never be audible; repeated or consecutive
+   events justify a larger buffer.
+
+With ASIO, the **app PCM queue and the ASIO driver output buffer are separate**. If
+the app PCM diagnosis is normal but ASIO still breaks up, check the output buffer in
+the ASIO driver's control panel as well.
+
+Use `10 ms (minimum latency)` to start, `15 ms (low-latency target)` for recurring
+errors, and `20 ms (stability recommendation)` when stability matters more.
+
 ## Log files
 
 Enable **Save diagnostic log file** in advanced settings. Logs are written to:

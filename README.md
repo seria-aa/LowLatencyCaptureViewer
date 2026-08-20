@@ -81,6 +81,17 @@ optional app resampler adjusts the capture PCM rate without adding a separate
 queue. Use WASAPI Shared when Windows audio effects are needed. If ASIO
 initialization fails, that run falls back to WASAPI Shared.
 
+### PCM buffer diagnosis summary
+
+**Current PCM queue** is an instantaneous value, while **Observed minimum** is the
+session low recorded at a render-callback boundary, so the two numbers can differ.
+Keep the setting when underruns are zero and the diagnosis is normal. Only when
+`buffer shortage` or `resampler output shortage` repeats, raise the PCM target in
+the order `10 → 15 → 20 ms`; repeated `input late` points instead to capture
+callback or system-scheduling delays. Prefer the recent pattern and maximum
+consecutive count over one isolated event. ASIO's app PCM queue and driver output
+buffer are separate, so check the ASIO driver's buffer settings too when needed.
+
 ## Compatibility
 
 AVerMedia GC573 is the primary tested device. Other DirectShow capture devices
