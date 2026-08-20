@@ -8,7 +8,8 @@ processing such as scene composition and encoding, allowing it to remain light
 and responsive.
 
 Video is captured through DirectShow and presented with D3D11. Audio is sent
-directly to WASAPI. No FFmpeg, third-party codec pack, or separate Visual C++
+directly to WASAPI. An experimental ASIO output is also available when an ASIO
+driver is installed. No FFmpeg, third-party codec pack, or separate Visual C++
 Redistributable installation is required.
 
 ## Download
@@ -37,7 +38,7 @@ input under **Capture audio device**.
 
 To listen without displaying video, enable **Audio-only mode**. The viewer then
 skips the video pin, D3D11 renderer, and video presentation path and runs only
-capture audio plus WASAPI output. The window shows the same L/R peak, dBFS,
+capture audio plus the selected audio output. The window shows the same L/R peak, dBFS,
 channel/master volume, and clipping OSD as the video viewer. `F2` opens
 settings, `F3` shows or hides the audio meter OSD, and `Esc` exits.
 
@@ -46,13 +47,14 @@ settings, `F3` shows or hides the audio meter OSD, and `Esc` exits.
 - Latest-frame-only video path that discards stale frames instead of queueing them
 - D3D11 Video Processor, flip-discard presentation, and maximum frame latency of 1
 - Immediate low-latency presentation or VSync
-- WASAPI Shared or Exclusive output with `IAudioClient3` low-period support
+- WASAPI Shared output with `IAudioClient3` low-period support
+- Experimental ASIO output shown only when an installed ASIO driver is detected
 - Automatic device mode detection for resolution, NV12/YUY2/MJPEG/P010, and FPS
 - Experimental P010 10-bit HDR10 path with metadata checks and SDR fallback
 - Pixel-perfect 1:1 display, aspect-ratio resizing, borderless fullscreen, and F5 restore
 - Multi-monitor DPI-aware window sizing and edge snap
 - Volume control, background auto-mute, logs, and a Tab diagnostics overlay
-- **Audio-only mode** that opens only capture audio and WASAPI output
+- **Audio-only mode** that opens only capture audio and the selected output
 
 ## Recommended starting settings
 
@@ -64,8 +66,20 @@ settings, `F3` shows or hides the audio meter OSD, and `Esc` exits.
 | Capture format | **Auto / NV12 preferred** |
 | Capture FPS | Match the source's actual output rate |
 | PCM buffer target | **10 ms**; increase only if underruns repeat |
-| Clock-drift correction | **Off** unless separate video/audio devices drift during long sessions |
+| Clock-drift correction | **Off** by default; choose **Auto** when long-session drift is observed, or On to always resample |
 | Pixel-perfect | On for exact 1:1 output; off for a freely resizable window |
+
+WASAPI Exclusive is temporarily hidden from the settings UI while that backend is
+being investigated. Existing profiles saved with Exclusive are migrated to WASAPI
+Shared on the next run.
+
+ASIO appears in the settings only when an ASIO driver is detected. ASIO drivers
+are not bundled; the mode uses the buffer size chosen by the driver. The current
+prototype requires a 48 kHz driver. ASIO still supports the app's Off/Auto/On
+clock-drift correction choices: the driver owns the output clock, while the
+optional app resampler adjusts the capture PCM rate without adding a separate
+queue. Use WASAPI Shared when Windows audio effects are needed. If ASIO
+initialization fails, that run falls back to WASAPI Shared.
 
 ## Compatibility
 
@@ -113,6 +127,12 @@ the channel cards changes the master volume. L/R channel gain is limited to
 Enable **Start directly next time** to skip the settings window on later runs.
 Hold **Shift** while launching, or press **F2** in the viewer, to open settings
 again.
+
+**Check for updates automatically** is off by default. When enabled, the viewer
+checks the latest GitHub release in a background thread after startup and asks
+before opening the official installer download when a newer version exists. It
+never installs or launches an update silently, and the check is separate from
+video/audio initialization.
 
 ## Detailed documentation
 

@@ -18,6 +18,8 @@
 
 #include <windows.h>
 #include <windowsx.h>
+#include <shellapi.h>
+#include <winhttp.h>
 #include <dshow.h>
 #include <dvdmedia.h>
 #include <mmdeviceapi.h>
@@ -40,6 +42,7 @@
 #include <dxva.h>
 
 #include "audio/AudioMix.h"
+#include "audio/AsioOutput.h"
 #include "audio/CaptureAudioFormat.h"
 #include "diagnostics/Logger.h"
 #include "ui/AudioOsdLayout.h"
@@ -104,7 +107,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.1.5";
+constexpr wchar_t kAppVersionLabel[] = L"v1.1.7";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -114,14 +117,22 @@ static constexpr int kWasapiBufferOptionsMs[] = {5, 10, 15, 20, 30, 40};
 constexpr int kRecommendedWasapiBufferMs = 20;
 static constexpr int kPcmQueueOptionsMs[] = {10, 15, 20, 30};
 constexpr int kLowestPcmQueueMs = 10;
+// Auto correction deliberately uses a wide hysteresis window and latches on
+// for the rest of the session once sustained drift is observed. This avoids
+// repeatedly inserting/removing the resampler while still leaving the normal
+// path untouched for short-lived scheduling jitter.
+constexpr double kAutoCorrectionEngageDeviationFrames = 96.0;
+constexpr uint64_t kAutoCorrectionEngageHoldMs = 5000;
 
 enum class AudioMode {
     WasapiShared,
     WasapiExclusive,
+    Asio,
 };
 
 enum class DriftCorrectionMode {
     Off,
+    Auto,
     Resample,
 };
 
@@ -213,9 +224,11 @@ struct AppSettings {
     // try a clearly matching DirectShow audio-capture filter.
     std::wstring captureAudioDeviceId;
     std::wstring audioOutputDeviceId;
+    std::wstring asioDriverName;
     bool saveLog = false;
     bool showDiagnosticConsole = false;
     bool skipStartupSettings = false;
+    bool checkForUpdates = false;
     bool audioOnly = false;
     bool forceHdr10 = false;
     bool pixelPerfect = true;
@@ -269,6 +282,9 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"선택한 출력 장치", L"Selected output device"},
         {L" (기본 추적)", L" (following default)"},
         {L"음량  %d%%", L"Volume  %d%%"},
+        {L"클리핑 없음", L"No clipping"},
+        {L"클리핑 감지 중 (%llu회)", L"Clipping active (%llu events)"},
+        {L"클리핑 기록 (%llu회)", L"Clipping recorded (%llu events)"},
         {L"%.2f ms (권장)", L"%.2f ms (recommended)"},
         {L"%.2f ms (최저)", L"%.2f ms (minimum)"},
         {L"%d ms (권장)", L"%d ms (recommended)"},
@@ -287,10 +303,15 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"오디오 출력 모드", L"Audio output mode"},
         {L"WASAPI Shared (호환성 우선 · 권장)", L"WASAPI Shared (compatibility · recommended)"},
         {L"WASAPI Exclusive (지연 최소화 · 장치 독점)", L"WASAPI Exclusive (minimum latency · exclusive device)"},
+        {L"ASIO (지연 최소화 · 드라이버 필요 · 실험적)", L"ASIO (minimum latency · driver required · experimental)"},
+        {L"오디오 출력 장치", L"Audio output device"},
         {L"WASAPI 출력 장치", L"WASAPI output device"},
+        {L"ASIO 출력 드라이버", L"ASIO output driver"},
         {L"Windows 기본 출력 장치 따라가기 (권장)", L"Follow Windows default output (recommended)"},
         {L" (현재 기본)", L" (current default)"},
-        {L"WASAPI 출력 버퍼", L"WASAPI output buffer"},
+        {L"오디오 출력 버퍼", L"Audio output buffer"},
+        {L"ASIO 드라이버 선호 버퍼 (드라이버 설정 사용)", L"ASIO driver preferred buffer (driver setting)"},
+        {L"ASIO 출력 · 드라이버 기본 버퍼 사용 · 앱 클록 보정 가능", L"ASIO output · driver buffer · app clock correction available"},
         {L"볼륨 HUD 위치", L"Volume HUD position"},
         {L"100% 이상 볼륨 증폭 허용 (최대 200%)", L"Allow volume boost above 100% (up to 200%)"},
         {L"▸ 고급 설정", L"▸ Advanced settings"},
@@ -305,7 +326,8 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"우측 하단", L"Bottom-right"},
         {L"클록 드리프트 보정", L"Clock-drift correction"},
         {L"끔 (원본 PCM · 음질 우선)", L"Off (unaltered PCM · quality first)"},
-        {L"자동 리샘플링 (장시간 안정성 권장)", L"Automatic resampling (recommended for long sessions)"},
+        {L"자동 (권장 · 필요 시 보정)", L"Auto (recommended · correct only when needed)"},
+        {L"켬 (항상 리샘플링)", L"On (always resample)"},
         {L"PCM 버퍼 목표", L"PCM buffer target"},
         {L"10 ms (최저 지연)", L"10 ms (minimum latency)"},
         {L"15 ms (저지연 목표)", L"15 ms (low-latency target)"},
@@ -338,6 +360,10 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"진단 콘솔 창 표시", L"Show diagnostic console window"},
         {L"다음 실행부터 바로 시작", L"Start directly next time"},
         {L"저장된 설정으로 바로 실행 · Shift 실행 또는 F2로 설정 열기", L"Starts with saved settings · hold Shift at launch or press F2 for settings"},
+        {L"업데이트 자동 확인 (시작 후 백그라운드)", L"Check for updates automatically (in background after startup)"},
+        {L"새 버전이 있습니다. 공식 설치 파일을 다운로드하시겠습니까?", L"A new version is available. Open the official installer download?"},
+        {L"업데이트 확인", L"Update check"},
+        {L"업데이트를 확인할 수 없습니다.", L"Could not check for updates."},
         {L"언어 / Language", L"Language"},
         {L"Low Latency Capture Viewer 설정", L"Low Latency Capture Viewer Settings"},
         {L"시작", L"Start"},
@@ -370,6 +396,11 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"간헐적", L"Intermittent"},
         {L"연속", L"Burst"},
         {L"오류 패턴", L"Error pattern"},
+        {L"자동 관찰 중 · 원본 PCM", L"Auto observing · original PCM"},
+        {L"자동 · 보정 작동", L"Auto · correction active"},
+        {L"자동 · 관찰 중", L"Auto · observing"},
+        {L"켬 · 리샘플러 사용", L"On · resampler active"},
+        {L"끔 · 원본 PCM", L"Off · original PCM"},
         {L"백그라운드 음소거 중", L"Background mute active"},
         {L"PCM 연산 우회", L"PCM processing bypassed"},
         {L"음소거", L"Muted"},
@@ -404,6 +435,8 @@ constexpr size_t kRingFrames = 48000 / 2;
 static HWND g_videoHost = nullptr;
 static bool g_suppressSettingsSave = false;
 static std::atomic<bool> g_running{true};
+static std::atomic<bool> g_updateCheckStop{false};
+static std::thread g_updateCheckThread;
 static std::atomic<bool> g_restartToSettings{false};
 static std::atomic<uint64_t> g_videoCapturedFrames{0};
 static std::atomic<uint64_t> g_videoPresentedFrames{0};
@@ -416,6 +449,7 @@ static std::atomic<bool> g_directVideoActive{false};
 static std::atomic<HRESULT> g_captureFailureHr{S_OK};
 static std::atomic<UINT32> g_audioActualBufferFrames{0};
 static std::atomic<UINT32> g_audioWasapiPaddingFrames{0};
+static std::atomic<bool> g_asioAudioStarted{false};
 static std::atomic<UINT32> g_audioCapturePacketFrames{0};
 static std::atomic<int64_t> g_audioCaptureIntervalUs{0};
 static std::atomic<LONG> g_audioCaptureAllocatorFrames{0};
@@ -423,6 +457,7 @@ static std::atomic<LONG> g_audioCaptureAllocatorBuffers{0};
 static std::atomic<UINT32> g_audioRingFrames{0};
 static std::atomic<UINT32> g_audioResamplerFrames{0};
 static std::atomic<int> g_audioResamplePpm{0};
+static std::atomic<bool> g_audioResamplerActive{false};
 static std::atomic<uint64_t> g_audioResampledOutputFrames{0};
 static std::atomic<uint64_t> g_audioCaptureCallbacks{0};
 static std::atomic<uint64_t> g_audioCaptureFrames{0};
@@ -578,6 +613,10 @@ static bool OsdTrackingActive() {
 static bool AudioTrackingActive() {
     return GetTickCount64() >=
         g_audioTrackingStartMs.load(std::memory_order_acquire);
+}
+
+static bool AudioResamplerActive() {
+    return g_audioResamplerActive.load(std::memory_order_acquire);
 }
 
 static void SetActiveAudioOutputName(const std::wstring& name) {
@@ -995,6 +1034,17 @@ static std::wstring SettingsPath() {
     return UserDataDirectory() + L"\\settings.ini";
 }
 
+static std::wstring AsioDriverNameWide(const std::string& name) {
+    if (name.empty()) return {};
+    const int required = MultiByteToWideChar(
+        CP_ACP, 0, name.c_str(), static_cast<int>(name.size()), nullptr, 0);
+    if (required <= 0) return std::wstring(name.begin(), name.end());
+    std::wstring result(static_cast<size_t>(required), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, name.c_str(),
+                        static_cast<int>(name.size()), result.data(), required);
+    return result;
+}
+
 static HMONITOR SavedViewerMonitor();
 
 static void LoadSettings() {
@@ -1013,6 +1063,7 @@ static void LoadSettings() {
     wchar_t volumeHudPosition[32]{};
     wchar_t muteWhenBackground[8]{};
     wchar_t audioOutputDeviceId[1024]{};
+    wchar_t asioDriverName[128]{};
     wchar_t resolution[32]{};
     wchar_t captureDeviceId[1024]{};
     wchar_t captureAudioDeviceId[1024]{};
@@ -1031,6 +1082,7 @@ static void LoadSettings() {
     wchar_t saveLog[8]{};
     wchar_t showDiagnosticConsole[8]{};
     wchar_t skipStartupSettings[8]{};
+    wchar_t checkForUpdates[8]{};
     wchar_t audioOnly[8]{};
     wchar_t forceHdr10[8]{};
 
@@ -1039,6 +1091,9 @@ static void LoadSettings() {
     GetPrivateProfileStringW(L"General", L"SkipStartupSettings", L"0",
                              skipStartupSettings,
                              ARRAYSIZE(skipStartupSettings), path.c_str());
+    GetPrivateProfileStringW(L"General", L"CheckForUpdates", L"0",
+                             checkForUpdates,
+                             ARRAYSIZE(checkForUpdates), path.c_str());
     GetPrivateProfileStringW(L"General", L"AudioOnly", L"0", audioOnly,
                              ARRAYSIZE(audioOnly), path.c_str());
     GetPrivateProfileStringW(L"Video", L"ForceHdr10", L"0", forceHdr10,
@@ -1073,8 +1128,10 @@ static void LoadSettings() {
                              muteWhenBackground,
                              ARRAYSIZE(muteWhenBackground), path.c_str());
     GetPrivateProfileStringW(L"Audio", L"OutputDeviceId", L"",
-                             audioOutputDeviceId,
-                             ARRAYSIZE(audioOutputDeviceId), path.c_str());
+                              audioOutputDeviceId,
+                              ARRAYSIZE(audioOutputDeviceId), path.c_str());
+    GetPrivateProfileStringW(L"Audio", L"AsioDriver", L"", asioDriverName,
+                              ARRAYSIZE(asioDriverName), path.c_str());
     GetPrivateProfileStringW(L"Video", L"Resolution", L"1920x1080", resolution,
                              ARRAYSIZE(resolution), path.c_str());
     GetPrivateProfileStringW(L"Video", L"CaptureDeviceId", L"",
@@ -1127,10 +1184,32 @@ static void LoadSettings() {
     } else {
         g_settings.uiLanguage = UiLanguage::Auto;
     }
+    g_settings.checkForUpdates =
+        wcstol(checkForUpdates, nullptr, 10) != 0;
 
-    g_settings.audioMode = (_wcsicmp(audio, L"Exclusive") == 0)
-                               ? AudioMode::WasapiExclusive
-                               : AudioMode::WasapiShared;
+    if (_wcsicmp(audio, L"Exclusive") == 0) {
+        // WASAPI Exclusive is temporarily hidden from the settings UI while
+        // its output path is being investigated. Migrate old profiles to the
+        // safe Shared path instead of silently starting the unstable mode.
+        g_settings.audioMode = AudioMode::WasapiShared;
+    } else if (_wcsicmp(audio, L"ASIO") == 0) {
+        g_settings.audioMode = AudioMode::Asio;
+    } else {
+        g_settings.audioMode = AudioMode::WasapiShared;
+    }
+    g_settings.asioDriverName = asioDriverName;
+    if (g_settings.audioMode == AudioMode::Asio) {
+        const auto drivers = llcv::asio::EnumerateDrivers();
+        const bool found = std::any_of(
+            drivers.begin(), drivers.end(), [&](const auto& driver) {
+                return AsioDriverNameWide(driver.name) ==
+                       g_settings.asioDriverName;
+            });
+        if (!found) {
+            g_settings.audioMode = AudioMode::WasapiShared;
+            g_settings.asioDriverName.clear();
+        }
+    }
     const int requestedBufferMs = static_cast<int>(wcstol(bufferMs, nullptr, 10));
     g_settings.wasapiBufferMs = kRecommendedWasapiBufferMs;
     for (const int option : kWasapiBufferOptionsMs) {
@@ -1141,10 +1220,13 @@ static void LoadSettings() {
     }
     g_settings.wasapiSharedPeriodFrames =
         static_cast<UINT32>(wcstoul(sharedPeriodFrames, nullptr, 10));
-    g_settings.driftCorrection =
-        _wcsicmp(driftCorrection, L"Resample") == 0
-            ? DriftCorrectionMode::Resample
-            : DriftCorrectionMode::Off;
+    if (_wcsicmp(driftCorrection, L"Resample") == 0) {
+        g_settings.driftCorrection = DriftCorrectionMode::Resample;
+    } else if (_wcsicmp(driftCorrection, L"Auto") == 0) {
+        g_settings.driftCorrection = DriftCorrectionMode::Auto;
+    } else {
+        g_settings.driftCorrection = DriftCorrectionMode::Off;
+    }
     // v0.13 and older implicitly used 20 ms with resampling and the first
     // available 10 ms packet without it. Preserve that behavior when the new
     // independent key is absent.
@@ -1281,16 +1363,24 @@ static void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"SkipStartupSettings",
                                g_settings.skipStartupSettings ? L"1" : L"0",
                                path.c_str());
+    WritePrivateProfileStringW(L"General", L"CheckForUpdates",
+                               g_settings.checkForUpdates ? L"1" : L"0",
+                               path.c_str());
     WritePrivateProfileStringW(L"General", L"AudioOnly",
                                g_settings.audioOnly ? L"1" : L"0",
                                path.c_str());
     WritePrivateProfileStringW(L"Video", L"ForceHdr10",
                                g_settings.forceHdr10 ? L"1" : L"0",
                                path.c_str());
-    WritePrivateProfileStringW(
-        L"Audio", L"Mode",
-        g_settings.audioMode == AudioMode::WasapiExclusive ? L"Exclusive" : L"Shared",
-        path.c_str());
+    const wchar_t* audioMode = L"Shared";
+    if (g_settings.audioMode == AudioMode::WasapiExclusive) {
+        audioMode = L"Exclusive";
+    } else if (g_settings.audioMode == AudioMode::Asio) {
+        audioMode = L"ASIO";
+    }
+    WritePrivateProfileStringW(L"Audio", L"Mode", audioMode, path.c_str());
+    WritePrivateProfileStringW(L"Audio", L"AsioDriver",
+                               g_settings.asioDriverName.c_str(), path.c_str());
     wchar_t bufferMs[16]{};
     swprintf_s(bufferMs, L"%d", g_settings.wasapiBufferMs);
     WritePrivateProfileStringW(L"Audio", L"BufferMs", bufferMs, path.c_str());
@@ -1298,11 +1388,14 @@ static void SaveSettings() {
     swprintf_s(sharedPeriodFrames, L"%u", g_settings.wasapiSharedPeriodFrames);
     WritePrivateProfileStringW(L"Audio", L"SharedPeriodFrames",
                                sharedPeriodFrames, path.c_str());
-    WritePrivateProfileStringW(
-        L"Audio", L"DriftCorrection",
-        g_settings.driftCorrection == DriftCorrectionMode::Resample
-            ? L"Resample" : L"Off",
-        path.c_str());
+    const wchar_t* driftCorrection = L"Off";
+    if (g_settings.driftCorrection == DriftCorrectionMode::Auto) {
+        driftCorrection = L"Auto";
+    } else if (g_settings.driftCorrection == DriftCorrectionMode::Resample) {
+        driftCorrection = L"Resample";
+    }
+    WritePrivateProfileStringW(L"Audio", L"DriftCorrection", driftCorrection,
+                               path.c_str());
     wchar_t pcmQueueTargetMs[16]{};
     swprintf_s(pcmQueueTargetMs, L"%d", g_settings.pcmQueueTargetMs);
     WritePrivateProfileStringW(L"Audio", L"PcmQueueTargetMs",
@@ -1536,6 +1629,24 @@ static std::atomic<uint64_t> g_underruns{0};
 // class is bypassed completely, preserving the original integer PCM samples.
 class SincDriftResampler {
 public:
+    // Reserve the bounded working set before entering a realtime callback.
+    // The ASIO callback cannot afford a vector growth after the driver starts;
+    // WASAPI also benefits from keeping this capacity between resets.
+    void prepare(size_t maxOutputFrames) {
+        const size_t sourceFrames = (std::max)(
+            static_cast<size_t>(32768), maxOutputFrames * 4 + 64);
+        source_.reserve(sourceFrames * kChannels);
+        transfer_.reserve((maxOutputFrames + kHalfTaps * 2 + 8) * kChannels);
+    }
+
+    void reset() {
+        source_.clear();
+        transfer_.clear();
+        position_ = 0.0;
+        primed_ = false;
+        g_audioResamplerFrames.store(0, std::memory_order_release);
+    }
+
     size_t render(int16_t* output, size_t outputFrames, double ratio) {
         if (!output || outputFrames == 0) return 0;
         ratio = std::clamp(ratio, 0.999, 1.001);
@@ -2222,6 +2333,183 @@ static void PublishAudioPeak(std::atomic<int>& destination, int observed) {
                       std::memory_order_release);
 }
 
+struct AsioRenderState {
+    SincDriftResampler driftResampler;
+    double filteredQueuedFrames = -1.0;
+    double correctionPpm = 0.0;
+    uint64_t autoCandidateSinceMs = 0;
+    bool audioStarted = false;
+    bool autoCorrectionActive = false;
+};
+
+// ASIO supplies its own driver-sized output period. The driver still owns the
+// output clock, while this callback can apply the same optional app-side
+// resampler as WASAPI to keep the capture PCM queue near its target.
+static size_t FillAsioPcm(void* user, int16_t* out, size_t frames) {
+    if (!out || frames == 0) return 0;
+    std::memset(out, 0, frames * kChannels * sizeof(int16_t));
+    auto* state = static_cast<AsioRenderState*>(user);
+    if (!state) return 0;
+    const UINT32 targetFrames = g_audioQueueTargetFrames.load(
+        std::memory_order_acquire);
+    const size_t availableBeforeRender =
+        g_ring.availableFrames() + state->driftResampler.bufferedFrames();
+    if (state->audioStarted && AudioTrackingActive()) {
+        UINT32 observed = static_cast<UINT32>((std::min)(
+            availableBeforeRender, static_cast<size_t>(UINT32_MAX)));
+        UINT32 previousMinimum = g_audioMinimumPreRenderFrames.load(
+            std::memory_order_relaxed);
+        while (observed < previousMinimum &&
+               !g_audioMinimumPreRenderFrames.compare_exchange_weak(
+                   previousMinimum, observed, std::memory_order_release,
+                   std::memory_order_relaxed)) {
+        }
+    }
+
+    size_t got = 0;
+    const bool correctionConfigured =
+        g_settings.driftCorrection != DriftCorrectionMode::Off;
+    bool correctionActive = false;
+    if (correctionConfigured) {
+        const double target = static_cast<double>(targetFrames);
+        const double queued = static_cast<double>(
+            g_audioRingFrames.load(std::memory_order_acquire) +
+            static_cast<UINT32>((std::min)(
+                state->driftResampler.bufferedFrames(),
+                static_cast<size_t>(UINT32_MAX))));
+        if (!state->audioStarted && queued >= target) {
+            state->audioStarted = true;
+            g_asioAudioStarted.store(true, std::memory_order_release);
+        }
+        if (state->filteredQueuedFrames < 0.0) {
+            state->filteredQueuedFrames = queued;
+        } else {
+            state->filteredQueuedFrames +=
+                (queued - state->filteredQueuedFrames) * 0.02;
+        }
+
+        if (g_settings.driftCorrection == DriftCorrectionMode::Auto &&
+            !state->autoCorrectionActive && state->audioStarted &&
+            AudioTrackingActive()) {
+            const double deviation = std::abs(
+                state->filteredQueuedFrames - target);
+            const uint64_t nowMs = GetTickCount64();
+            if (deviation >= kAutoCorrectionEngageDeviationFrames) {
+                if (!state->autoCandidateSinceMs) {
+                    state->autoCandidateSinceMs = nowMs;
+                } else if (nowMs >= state->autoCandidateSinceMs &&
+                           nowMs - state->autoCandidateSinceMs >=
+                               kAutoCorrectionEngageHoldMs &&
+                           queued >= static_cast<double>(frames)) {
+                    state->autoCorrectionActive = true;
+                    state->driftResampler.reset();
+                    state->correctionPpm = 0.0;
+                    fwprintf(stderr,
+                             L"[audio] ASIO auto clock-drift correction "
+                             L"engaged after sustained queue drift.\n");
+                }
+            } else {
+                state->autoCandidateSinceMs = 0;
+            }
+        }
+
+        correctionActive =
+            g_settings.driftCorrection == DriftCorrectionMode::Resample ||
+            state->autoCorrectionActive;
+        g_audioResamplerActive.store(correctionActive,
+                                     std::memory_order_release);
+        if (correctionActive) {
+            const double requestedPpm = std::clamp(
+                (state->filteredQueuedFrames - target) * 2.0,
+                -1000.0, 1000.0);
+            state->correctionPpm +=
+                (requestedPpm - state->correctionPpm) * 0.02;
+            const double ratio = 1.0 + state->correctionPpm / 1'000'000.0;
+            if (state->audioStarted) {
+                got = state->driftResampler.render(out, frames, ratio);
+            }
+            g_audioResamplePpm.store(
+                static_cast<int>(std::lround(state->correctionPpm)),
+                std::memory_order_release);
+            g_audioResampledOutputFrames.fetch_add(
+                got, std::memory_order_relaxed);
+        } else {
+            if (state->audioStarted) got = g_ring.pop(out, frames);
+            state->correctionPpm = 0.0;
+            g_audioResamplePpm.store(0, std::memory_order_release);
+            g_audioResamplerFrames.store(0, std::memory_order_release);
+        }
+    } else {
+        if (!state->audioStarted &&
+            g_ring.availableFrames() >= targetFrames) {
+            state->audioStarted = true;
+            g_asioAudioStarted.store(true, std::memory_order_release);
+        }
+        if (state->audioStarted) got = g_ring.pop(out, frames);
+        state->correctionPpm = 0.0;
+        g_audioResamplePpm.store(0, std::memory_order_release);
+        g_audioResamplerFrames.store(0, std::memory_order_release);
+        g_audioResamplerActive.store(false, std::memory_order_release);
+    }
+
+    static thread_local llcv::audio::StereoGain currentMix{};
+    const bool measurePeaks =
+        g_audioOsdVisible.load(std::memory_order_acquire);
+    const llcv::audio::MixMetrics mix = llcv::audio::ProcessStereoPcm(
+        out, got, currentMix,
+        {TargetAudioVolumeGain() * TargetAudioChannelGain(0),
+         TargetAudioVolumeGain() * TargetAudioChannelGain(1)},
+        measurePeaks);
+    if (measurePeaks) {
+        PublishAudioPeak(g_audioPeakLeft, mix.peakLeft);
+        PublishAudioPeak(g_audioPeakRight, mix.peakRight);
+    }
+    if (mix.clipped) {
+        g_audioClipCount.fetch_add(1, std::memory_order_relaxed);
+        g_audioClipUntilMs.store(GetTickCount64() + 1500,
+                                 std::memory_order_release);
+    }
+    if (got < frames && state->audioStarted && AudioTrackingActive()) {
+        const UINT32 missing = static_cast<UINT32>(frames - got);
+        const uint64_t nowMs = GetTickCount64();
+        g_underruns.fetch_add(1, std::memory_order_relaxed);
+        g_audioUnderrunFrames.fetch_add(missing, std::memory_order_relaxed);
+        g_audioLastUnderrunMs.store(nowMs, std::memory_order_release);
+        AudioErrorCause cause = AudioErrorCause::PcmDepletion;
+        if (correctionActive && availableBeforeRender >= frames) {
+            cause = AudioErrorCause::Resampler;
+            g_audioResamplerUnderruns.fetch_add(1,
+                                                 std::memory_order_relaxed);
+        } else {
+            const uint64_t callbackMs =
+                g_audioLastCaptureCallbackMs.load(std::memory_order_acquire);
+            const UINT32 packetFrames =
+                g_audioCapturePacketFrames.load(std::memory_order_acquire);
+            const uint64_t lateThresholdMs = packetFrames
+                ? 5 + (1000ull * packetFrames / kSampleRate) : 15;
+            if (callbackMs && GetTickCount64() > callbackMs + lateThresholdMs) {
+                cause = AudioErrorCause::InputLate;
+                g_audioLatePacketUnderruns.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+        }
+        RecordAudioErrorEvent(nowMs, missing, AudioErrorKind::Underrun,
+                              cause);
+    }
+    const UINT32 queued = static_cast<UINT32>((std::min)(
+        g_audioRingFrames.load(std::memory_order_acquire) +
+            state->driftResampler.bufferedFrames(),
+        static_cast<size_t>(UINT32_MAX)));
+    UINT32 previous = g_audioMinimumPreRenderFrames.load(
+        std::memory_order_acquire);
+    while (queued < previous &&
+           !g_audioMinimumPreRenderFrames.compare_exchange_weak(
+               previous, queued, std::memory_order_acq_rel,
+               std::memory_order_acquire)) {
+    }
+    return got;
+}
+
 static bool AudioRenderThreadWasapi(AudioMode mode,
                                     bool reinitializingEndpoint) {
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -2383,12 +2671,36 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                          L"[audio] classic WASAPI Shared fallback active.\n");
             }
         } else {
-            const REFERENCE_TIME hns =
-                static_cast<REFERENCE_TIME>(g_settings.wasapiBufferMs) * 10'000;
+            REFERENCE_TIME hns = static_cast<REFERENCE_TIME>(
+                g_settings.wasapiBufferMs) * 10'000;
             hr = client->Initialize(
                 AUDCLNT_SHAREMODE_EXCLUSIVE,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                 hns, hns, &wf, nullptr);
+            if (hr == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
+                // Many exclusive endpoints require a period aligned to the
+                // device's native packet size. Windows exposes the aligned
+                // frame count after the first Initialize attempt; retry with
+                // that exact duration instead of treating the mode as broken.
+                UINT32 alignedFrames = 0;
+                const HRESULT alignHr = client->GetBufferSize(&alignedFrames);
+                if (SUCCEEDED(alignHr) && alignedFrames > 0) {
+                    hns = static_cast<REFERENCE_TIME>(
+                        (10'000'000.0 * alignedFrames / kSampleRate) + 0.5);
+                    fwprintf(stderr,
+                             L"[audio] WASAPI exclusive period aligned: "
+                             L"%u frames (%.2f ms)\n",
+                             alignedFrames,
+                             1000.0 * alignedFrames / kSampleRate);
+                    hr = client->Initialize(
+                        AUDCLNT_SHAREMODE_EXCLUSIVE,
+                        AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                        hns, hns, &wf, nullptr);
+                } else {
+                    LogHr(L"WASAPI exclusive GetBufferSize(alignment)",
+                          alignHr);
+                }
+            }
             if (FAILED(hr)) {
                 LogHr(L"IAudioClient::Initialize(exclusive/event)", hr);
                 break;
@@ -2447,15 +2759,22 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
         fwprintf(stderr, L"[audio] WASAPI %s render running.\n",
                   exclusive ? L"exclusive" : L"shared");
         fwprintf(stderr, L"[audio] clock-drift correction: %s\n",
-                 g_settings.driftCorrection ==
-                         DriftCorrectionMode::Resample
-                     ? L"16-tap windowed-sinc resampling (+/-1000 ppm)"
-                     : L"off (unaltered PCM samples)");
+                 g_settings.driftCorrection == DriftCorrectionMode::Resample
+                     ? L"on (16-tap windowed-sinc, +/-1000 ppm)"
+                     : g_settings.driftCorrection == DriftCorrectionMode::Auto
+                           ? L"auto (observe first; latch on when sustained drift is detected)"
+                           : L"off (unaltered PCM samples)");
 
         std::vector<int16_t> temp(static_cast<size_t>(bufferFrames) * kChannels);
         SincDriftResampler driftResampler;
         double filteredQueuedFrames = -1.0;
         double correctionPpm = 0.0;
+        uint64_t autoCandidateSinceMs = 0;
+        bool autoCorrectionActive =
+            g_settings.driftCorrection == DriftCorrectionMode::Resample;
+        g_audioResamplerActive.store(autoCorrectionActive,
+                                     std::memory_order_release);
+        g_audioResamplePpm.store(0, std::memory_order_release);
         const double initialVolumeGain = TargetAudioVolumeGain();
         llcv::audio::StereoGain currentMix{
             initialVolumeGain * TargetAudioChannelGain(0),
@@ -2506,8 +2825,9 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                            std::memory_order_release,
                            std::memory_order_relaxed)) {}
             }
-            if (g_settings.driftCorrection ==
-                DriftCorrectionMode::Resample) {
+            const bool correctionConfigured =
+                g_settings.driftCorrection != DriftCorrectionMode::Off;
+            if (correctionConfigured) {
                 const double targetFrames =
                     static_cast<double>(queueTargetFrames);
                 const double queuedFrames = static_cast<double>(
@@ -2524,19 +2844,63 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                     filteredQueuedFrames +=
                         (queuedFrames - filteredQueuedFrames) * 0.02;
                 }
-                const double requestedPpm = std::clamp(
-                    (filteredQueuedFrames - targetFrames) * 2.0,
-                    -1000.0, 1000.0);
-                correctionPpm += (requestedPpm - correctionPpm) * 0.02;
-                const double ratio = 1.0 + correctionPpm / 1'000'000.0;
-                if (audioStarted) {
-                    got = driftResampler.render(temp.data(), writable, ratio);
+
+                if (g_settings.driftCorrection == DriftCorrectionMode::Auto &&
+                    !autoCorrectionActive && audioStarted &&
+                    AudioTrackingActive()) {
+                    const double deviation =
+                        std::abs(filteredQueuedFrames - targetFrames);
+                    const uint64_t nowMs = GetTickCount64();
+                    if (deviation >= kAutoCorrectionEngageDeviationFrames) {
+                        if (!autoCandidateSinceMs) {
+                            autoCandidateSinceMs = nowMs;
+                        } else if (nowMs >= autoCandidateSinceMs &&
+                                   nowMs - autoCandidateSinceMs >=
+                                       kAutoCorrectionEngageHoldMs &&
+                                   queuedFrames >=
+                                       static_cast<double>(writable)) {
+                            // SincDriftResampler starts with a short history
+                            // copied from the ring, so activation does not add
+                            // a queue-sized delay. Once active it is latched
+                            // until this WASAPI session is restarted.
+                            autoCorrectionActive = true;
+                            driftResampler.reset();
+                            correctionPpm = 0.0;
+                            fwprintf(stderr,
+                                     L"[audio] auto clock-drift correction "
+                                     L"engaged after sustained queue drift.\n");
+                        }
+                    } else {
+                        autoCandidateSinceMs = 0;
+                    }
                 }
-                g_audioResamplePpm.store(
-                    static_cast<int>(std::lround(correctionPpm)),
-                    std::memory_order_release);
-                g_audioResampledOutputFrames.fetch_add(
-                    got, std::memory_order_relaxed);
+
+                const bool correctionActive =
+                    g_settings.driftCorrection == DriftCorrectionMode::Resample ||
+                    autoCorrectionActive;
+                g_audioResamplerActive.store(correctionActive,
+                                             std::memory_order_release);
+                if (correctionActive) {
+                    const double requestedPpm = std::clamp(
+                        (filteredQueuedFrames - targetFrames) * 2.0,
+                        -1000.0, 1000.0);
+                    correctionPpm += (requestedPpm - correctionPpm) * 0.02;
+                    const double ratio = 1.0 + correctionPpm / 1'000'000.0;
+                    if (audioStarted) {
+                        got = driftResampler.render(temp.data(), writable, ratio);
+                    }
+                    g_audioResamplePpm.store(
+                        static_cast<int>(std::lround(correctionPpm)),
+                        std::memory_order_release);
+                    g_audioResampledOutputFrames.fetch_add(
+                        got, std::memory_order_relaxed);
+                } else {
+                    if (audioStarted) {
+                        got = g_ring.pop(temp.data(), writable);
+                    }
+                    g_audioResamplePpm.store(0, std::memory_order_release);
+                    g_audioResamplerFrames.store(0, std::memory_order_release);
+                }
             } else {
                 if (!audioStarted &&
                     g_ring.availableFrames() >= queueTargetFrames) {
@@ -2547,6 +2911,7 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                 }
                 g_audioResamplePpm.store(0, std::memory_order_release);
                 g_audioResamplerFrames.store(0, std::memory_order_release);
+                g_audioResamplerActive.store(false, std::memory_order_release);
             }
             const double targetVolumeGain = TargetAudioVolumeGain();
             // Meters are deliberately dormant when the audio OSD is hidden.
@@ -2584,8 +2949,7 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                         std::memory_order_relaxed);
                     g_audioLastUnderrunMs.store(nowMs,
                                                 std::memory_order_release);
-                    if (g_settings.driftCorrection ==
-                            DriftCorrectionMode::Resample &&
+                    if (AudioResamplerActive() &&
                         availableBeforeRender >= writable) {
                         // PCM existed for this render request, but the sinc
                         // filter could not produce every output frame (usually
@@ -2632,6 +2996,9 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
     if (endpointNotification) endpointNotification->Release();
     SafeRelease(en);
     if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
+    g_audioResamplerActive.store(false, std::memory_order_release);
+    g_audioResamplePpm.store(0, std::memory_order_release);
+    g_audioResamplerFrames.store(0, std::memory_order_release);
     CoUninitialize();
     if (followDefault && notificationRegistered &&
         g_defaultAudioEndpointGeneration.load(std::memory_order_acquire) !=
@@ -2641,7 +3008,84 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
     return restartForDefaultChange;
 }
 
+static bool AudioRenderThreadAsio() {
+    std::string driverName;
+    if (!g_settings.asioDriverName.empty()) {
+        const int required = WideCharToMultiByte(
+            CP_ACP, 0, g_settings.asioDriverName.c_str(), -1, nullptr, 0,
+            nullptr, nullptr);
+        if (required > 1) {
+            driverName.resize(static_cast<size_t>(required));
+            WideCharToMultiByte(CP_ACP, 0, g_settings.asioDriverName.c_str(), -1,
+                                driverName.data(), required, nullptr, nullptr);
+            driverName.pop_back();
+        }
+    }
+    g_asioAudioStarted.store(false, std::memory_order_release);
+    g_audioWasapiPaddingFrames.store(0, std::memory_order_release);
+    const bool resamplerConfigured =
+        g_settings.driftCorrection == DriftCorrectionMode::Resample;
+    g_audioResamplerActive.store(resamplerConfigured,
+                                 std::memory_order_release);
+    g_audioResamplePpm.store(0, std::memory_order_release);
+    g_audioResamplerFrames.store(0, std::memory_order_release);
+    g_audioQueueTargetFrames.store(
+        static_cast<UINT32>(g_settings.pcmQueueTargetMs * kSampleRate / 1000),
+        std::memory_order_release);
+    // ASIO's preferred buffer is only known after the driver is opened. A
+    // conservative reservation keeps the callback allocation-free for normal
+    // driver periods; the resampler retains this capacity across resets.
+    AsioRenderState renderState;
+    renderState.autoCorrectionActive = resamplerConfigured;
+    renderState.driftResampler.prepare(32768);
+    llcv::asio::Output output(driverName, g_videoHost, &FillAsioPcm,
+                              &renderState);
+    if (!output.Start()) {
+        fwprintf(stderr, L"[audio] ASIO start failed: %S\n",
+                 output.Error().c_str());
+        return false;
+    }
+    g_audioActualBufferFrames.store(static_cast<UINT32>(output.BufferFrames()),
+                                    std::memory_order_release);
+    SetActiveAudioOutputName(L"ASIO: " + g_settings.asioDriverName);
+    fwprintf(stderr,
+             L"[audio] ASIO render running: %s, buffer %ld frames (%.2f ms)\n",
+             g_settings.asioDriverName.c_str(), output.BufferFrames(),
+             1000.0 * output.BufferFrames() / kSampleRate);
+    fwprintf(stderr, L"[audio] ASIO clock-drift correction: %s\n",
+             g_settings.driftCorrection == DriftCorrectionMode::Resample
+                 ? L"on (16-tap windowed-sinc, +/-1000 ppm)"
+                 : g_settings.driftCorrection == DriftCorrectionMode::Auto
+                       ? L"auto (observe first; latch on when sustained drift is detected)"
+                       : L"off (unaltered PCM samples)");
+    while (g_running.load(std::memory_order_acquire)) {
+        Sleep(50);
+    }
+    output.Stop();
+    g_asioAudioStarted.store(false, std::memory_order_release);
+    g_audioActualBufferFrames.store(0, std::memory_order_release);
+    g_audioResamplerActive.store(false, std::memory_order_release);
+    g_audioResamplePpm.store(0, std::memory_order_release);
+    return true;
+}
+
 static void AudioRenderThread() {
+    if (g_settings.audioMode == AudioMode::Asio) {
+        if (AudioRenderThreadAsio()) return;
+        // A broken/unavailable ASIO driver must not leave the viewer silent.
+        // Fall back to the unchanged WASAPI Shared path for this session.
+        fwprintf(stderr,
+                 L"[audio] ASIO unavailable; falling back to WASAPI Shared.\n");
+        // Keep diagnostics and the next settings save truthful. The selected
+        // driver may have disappeared or rejected 48 kHz, so do not continue
+        // reporting ASIO while the actual renderer is Shared.
+        g_settings.audioMode = AudioMode::WasapiShared;
+        g_settings.asioDriverName.clear();
+        SetActiveAudioOutputName(ConfiguredAudioEndpointName(
+            g_settings.audioOutputDeviceId));
+        AudioRenderThreadWasapi(AudioMode::WasapiShared, false);
+        return;
+    }
     bool reinitializingEndpoint = false;
     while (g_running.load(std::memory_order_acquire)) {
         const bool restart = AudioRenderThreadWasapi(
@@ -3610,7 +4054,9 @@ static void UpdateConfiguredVideoTitle(HWND videoHost, int configuredFps) {
     const auto& video = CurrentVideoPreset();
     const wchar_t* audioLabel =
         g_settings.audioMode == AudioMode::WasapiExclusive
-            ? L"WASAPI Exclusive" : L"WASAPI Shared";
+            ? L"WASAPI Exclusive"
+            : g_settings.audioMode == AudioMode::Asio ? L"ASIO"
+                                                       : L"WASAPI Shared";
     const wchar_t* presentationLabel =
         g_settings.presentationMode == PresentationMode::VSync
             ? L"VSync" : L"Immediate";
@@ -3637,16 +4083,14 @@ static void UpdateConfiguredVideoTitle(HWND videoHost, int configuredFps) {
     SetWindowTextW(root, title);
 }
 
-static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
-                                         size_t outputNameLimit = 26,
-                                         size_t captureNameLimit = 34);
+static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight);
 
 struct DirectD3D11Renderer {
     static constexpr UINT kUploadSurfaceCount = 3;
     static constexpr UINT kOsdOverlayWidth = 700;
-    static constexpr UINT kOsdOverlayHeight = 420;
+    static constexpr UINT kOsdOverlayHeight = 440;
     static constexpr float kOsdTextWidth = 668.0f;
-    static constexpr float kOsdTextHeight = 394.0f;
+    static constexpr float kOsdTextHeight = 414.0f;
 
     ID3D11Device* device = nullptr;
     ID3D11DeviceContext* context = nullptr;
@@ -4362,43 +4806,17 @@ struct DirectD3D11Renderer {
         SafeRelease(osdTextLayout);
         SafeRelease(volumeTextLayout);
 
-        // Keep the diagnostics panel at a stable size, but adapt long device
-        // names to the actual rendered line width. A wrapped line must not
-        // push the final audio diagnostics below the panel's bottom edge.
+        // Keep the diagnostics panel at a stable size. Device names are kept
+        // verbatim; the output device has its own line so long names do not
+        // need an ellipsis just to share a line with the audio mode.
         std::wstring osdText;
         HRESULT hr = E_FAIL;
-        constexpr UINT32 kExpectedOsdLineCount = 18;
-        constexpr size_t kMinimumOutputNameLimit = 8;
-        constexpr size_t kMinimumCaptureNameLimit = 20;
-        size_t outputNameLimit = 26;
-        size_t captureNameLimit = 34;
-        for (;;) {
-            osdText = BuildRuntimeOsdText(
-                static_cast<int>(outputWidth), static_cast<int>(outputHeight),
-                outputNameLimit, captureNameLimit);
-            IDWriteTextLayout* candidate = nullptr;
-            hr = dwriteFactory->CreateTextLayout(
-                osdText.c_str(), static_cast<UINT32>(osdText.size()),
-                osdTextFormat, kOsdTextWidth, kOsdTextHeight, &candidate);
-            if (FAILED(hr)) return hr;
-            UINT32 lineCount = 0;
-            candidate->GetLineMetrics(nullptr, 0, &lineCount);
-            if (lineCount <= kExpectedOsdLineCount ||
-                (outputNameLimit <= kMinimumOutputNameLimit &&
-                 captureNameLimit <= kMinimumCaptureNameLimit)) {
-                osdTextLayout = candidate;
-                break;
-            }
-            candidate->Release();
-            if (outputNameLimit > kMinimumOutputNameLimit + 1) {
-                outputNameLimit -= 2;
-            } else if (captureNameLimit > kMinimumCaptureNameLimit + 1) {
-                captureNameLimit -= 2;
-            } else {
-                outputNameLimit = kMinimumOutputNameLimit;
-                captureNameLimit = kMinimumCaptureNameLimit;
-            }
-        }
+        osdText = BuildRuntimeOsdText(
+            static_cast<int>(outputWidth), static_cast<int>(outputHeight));
+        hr = dwriteFactory->CreateTextLayout(
+            osdText.c_str(), static_cast<UINT32>(osdText.size()),
+            osdTextFormat, kOsdTextWidth, kOsdTextHeight, &osdTextLayout);
+        if (FAILED(hr)) return hr;
 
         const TransientHudContent hudContent =
             g_transientHudContent.load(std::memory_order_acquire);
@@ -5428,10 +5846,12 @@ constexpr int IDC_SETTINGS_ADVANCED_TOGGLE = 2031;
 constexpr int IDC_SETTINGS_AUDIO_ONLY = 2032;
 constexpr int IDC_SETTINGS_FORCE_HDR10 = 2033;
 constexpr int IDC_SETTINGS_FORCE_HDR10_HELP = 2034;
+constexpr int IDC_SETTINGS_UPDATE_CHECK = 2035;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
 constexpr UINT WM_CAPTURE_AUDIO_PROBE_COMPLETE = WM_APP + 76;
+constexpr UINT WM_UPDATE_CHECK_COMPLETE = WM_APP + 77;
 
 struct SettingsDialogState {
     HWND languageLabel = nullptr;
@@ -5483,6 +5903,7 @@ struct SettingsDialogState {
     HWND showConsoleCheck = nullptr;
     HWND skipStartupCheck = nullptr;
     HWND skipStartupHint = nullptr;
+    HWND checkForUpdatesCheck = nullptr;
     HWND versionWatermark = nullptr;
     HWND advancedToggle = nullptr;
     HWND startButton = nullptr;
@@ -5500,12 +5921,14 @@ struct SettingsDialogState {
     std::vector<CaptureDeviceInfo> captureDevices;
     std::vector<CaptureDeviceInfo> captureAudioDevices;
     std::vector<AudioEndpointInfo> audioEndpoints;
+    std::vector<llcv::asio::DriverInfo> asioDrivers;
     std::vector<PixelFormatSupport> pixelFormats;
     VideoPreset initialVideoPreset = VideoPreset::R1920x1080;
     HMONITOR viewerMonitor = nullptr;
     UINT32 selectedSharedPeriodFrames = 0;
     int selectedBufferMs = kRecommendedWasapiBufferMs;
     bool bufferItemsAreSharedFrames = false;
+    bool asioAvailable = false;
     bool showAdvanced = false;
     bool accepted = false;
 };
@@ -5593,7 +6016,8 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
         PlaceSettingsControl(state->languageCombo, 195, 176, 280, 120, dpi);
         PlaceSettingsControl(state->skipStartupCheck, 24, 224, 451, 28, dpi);
         PlaceSettingsControl(state->skipStartupHint, 44, 252, 431, 42, dpi);
-        PlaceSettingsControl(state->advancedToggle, 24, 316, 190, 28, dpi);
+        PlaceSettingsControl(state->checkForUpdatesCheck, 24, 296, 451, 28, dpi);
+        PlaceSettingsControl(state->advancedToggle, 24, 336, 190, 28, dpi);
         PlaceSettingsControl(state->versionWatermark, 24, 466, 260, 20, dpi);
 
         PlaceSettingsControl(state->presentationLabel, 505, 24, 95, 24, dpi);
@@ -5647,8 +6071,9 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->languageCombo, 195, 408, 280, 120, dpi);
     PlaceSettingsControl(state->skipStartupCheck, 24, 456, 451, 28, dpi);
     PlaceSettingsControl(state->skipStartupHint, 44, 484, 431, 42, dpi);
-    PlaceSettingsControl(state->advancedToggle, 24, 540, 190, 28, dpi);
-    PlaceSettingsControl(state->versionWatermark, 24, 596, 260, 20, dpi);
+    PlaceSettingsControl(state->checkForUpdatesCheck, 24, 530, 451, 28, dpi);
+    PlaceSettingsControl(state->advancedToggle, 24, 566, 190, 28, dpi);
+    PlaceSettingsControl(state->versionWatermark, 24, 640, 260, 20, dpi);
 
     const bool pixelPerfect = state->pixelCheck &&
         SendMessageW(state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -5687,8 +6112,8 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->windowSnapCheck, 505, snapY, 420, 28, dpi);
     PlaceSettingsControl(state->saveLogCheck, 505, 550, 420, 28, dpi);
     PlaceSettingsControl(state->showConsoleCheck, 505, 584, 420, 28, dpi);
-    PlaceSettingsControl(state->startButton, 745, 624, 80, 30, dpi);
-    PlaceSettingsControl(state->cancelButton, 835, 624, 80, 30, dpi);
+    PlaceSettingsControl(state->startButton, 745, 650, 80, 30, dpi);
+    PlaceSettingsControl(state->cancelButton, 835, 650, 80, 30, dpi);
 }
 
 static void SetSettingsControlVisible(HWND control, bool visible) {
@@ -5804,12 +6229,14 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
         switch (topic) {
         case SettingsHelpTopic::Drift:
             return L"Preventing audio tearing · deciding whether correction is needed\n\n"
-                   L"The capture and output device clocks can run at slightly different rates. "
-                   L"Automatic correction follows that difference with resampling to reduce "
-                   L"dropouts or crackling during long sessions. Check the Tab OSD for 10–30 minutes.\n\n"
+                    L"The capture and output device clocks can run at slightly different rates. "
+                    L"Auto mode watches the application PCM queue first and enables resampling only "
+                    L"when a sustained imbalance is detected. It stays enabled for the rest of the "
+                    L"session once triggered, avoiding repeated on/off clicks. Check the Tab OSD for "
+                    L"10–30 minutes.\n\n"
                    L"'Stable · correction unnecessary' or 'Rare errors · Off can be kept' means "
                    L"you can leave it Off when the audio is clean. If 'Repeated imbalance · "
-                   L"correction recommended' continues, enable automatic resampling. Do not judge "
+                    L"correction recommended' continues, choose Auto. Do not judge "
                    L"from errors immediately after startup.\n\n"
                    L"The resampler and PCM safety buffer are independent. 'Resampler correction "
                    L"limit approaching' indicates clock difference; 'Possible PCM buffer shortage' "
@@ -5817,8 +6244,9 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
                    L"indicates a late input callback. If the resampler is healthy but underruns "
                    L"continue, raise the PCM buffer target first.\n\n"
                    L"The imbalance ppm shown in the OSD is an estimate from accumulated underrun/"
-                   L"overrun frames, not a direct hardware-clock measurement. Automatic correction "
-                   L"adds a small amount of audio buffering and changes PCM samples.";
+                    L"overrun frames, not a direct hardware-clock measurement. When Auto activates, "
+                    L"the resampler adds a small amount of audio buffering and changes PCM samples. "
+                    L"Off always preserves the original PCM path; On always uses the resampler.";
         case SettingsHelpTopic::PcmQueue:
             return L"PCM buffer target\n\n"
                    L"The amount of captured audio kept inside the application before playback.\n"
@@ -5850,19 +6278,20 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
     }
     switch (topic) {
     case SettingsHelpTopic::Drift:
-        return L"소리 찢어짐 방지 · 보정 필요 확인\n\n"
-               L"캡처 장치와 출력 장치의 클록 차이를 자동 리샘플링으로 보정합니다. "
-               L"Tab OSD를 10~30분 확인하세요.\n\n"
+         return L"소리 찢어짐 방지 · 보정 필요 확인\n\n"
+                L"자동은 프로그램 내부 PCM 대기량을 관찰하다가 클록 불균형이 일정 시간 지속될 때만 "
+                L"리샘플링을 켭니다. 한 번 켜지면 세션 중 반복해서 켰다 끄지 않아 소리 변화와 클릭을 "
+                L"줄입니다. Tab OSD를 10~30분 확인하세요.\n\n"
                L"'안정 · 보정 불필요' 또는 '드문 오류 · 끔 유지 가능'이면 소리에 문제가 "
-               L"없는 한 끔을 유지해도 됩니다. '반복 불균형 · 보정 권장'이 계속 보이면 "
-               L"자동 리샘플링을 권장합니다. 시작 직후 오류만으로 판단하지 마세요.\n\n"
+                L"없는 한 끔을 유지해도 됩니다. '반복 불균형 · 보정 권장'이 계속 보이면 자동을 "
+                L"선택하세요. 시작 직후 오류만으로 판단하지 마세요.\n\n"
                L"리샘플러와 PCM 안전 대기량은 서로 독립입니다. '리샘플러 보정 한계 접근'은 "
                L"클록 차이, 'PCM 버퍼 부족 가능'은 순간 버퍼 여유 부족, '캡처 패킷 지연 감지'는 "
                L"입력 콜백 지연을 뜻합니다. 리샘플러가 정상인데 underrun이 나면 PCM 버퍼 "
                L"목표를 먼저 높이세요.\n\n"
-               L"OSD의 불균형 ppm은 누적 underrun/overrun으로 계산한 참고값이며 실제 하드웨어 "
-               L"클록을 직접 측정한 값은 아닙니다. 자동 보정은 작은 오디오 대기량을 추가하고 "
-               L"PCM 샘플을 변경합니다.";
+                L"OSD의 불균형 ppm은 누적 underrun/overrun으로 계산한 참고값이며 실제 하드웨어 "
+                L"클록을 직접 측정한 값은 아닙니다. 자동이 작동하면 작은 오디오 대기량을 추가하고 "
+                L"PCM 샘플을 변경합니다. 끔은 원본 PCM을 유지하고, 켬은 항상 리샘플러를 사용합니다.";
     case SettingsHelpTopic::PcmQueue:
         return L"PCM 버퍼 목표 안내\n\n"
                L"캡처 오디오를 재생 전에 확보하는 프로그램 내부 대기량입니다.\n"
@@ -5895,6 +6324,58 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
 
 static bool SettingsUsesSharedMode(const SettingsDialogState* state) {
     return state && SendMessageW(state->audioCombo, CB_GETCURSEL, 0, 0) == 0;
+}
+
+static bool SettingsUsesAsioMode(const SettingsDialogState* state) {
+    return state && state->asioAvailable &&
+           SendMessageW(state->audioCombo, CB_GETCURSEL, 0, 0) == 1;
+}
+
+static void UpdateAsioControlVisibility(SettingsDialogState* state) {
+    if (!state) return;
+    // ASIO owns the output clock, but the same optional app-side resampler is
+    // available for long-run capture/output drift. Keep the control visible
+    // and enabled in every output mode.
+    if (state->driftCombo) EnableWindow(state->driftCombo, TRUE);
+    if (state->driftHelp) EnableWindow(state->driftHelp, TRUE);
+}
+
+static void PopulateAudioOutputCombo(SettingsDialogState* state) {
+    if (!state || !state->audioOutputCombo) return;
+    SendMessageW(state->audioOutputCombo, CB_RESETCONTENT, 0, 0);
+    if (SettingsUsesAsioMode(state)) {
+        SetWindowTextW(state->audioOutputLabel, UI_TEXT(L"ASIO 출력 드라이버"));
+        LRESULT selected = 0;
+        for (size_t i = 0; i < state->asioDrivers.size(); ++i) {
+            const std::wstring name = AsioDriverNameWide(
+                state->asioDrivers[i].name);
+            const LRESULT index = SendMessageW(
+                state->audioOutputCombo, CB_ADDSTRING, 0,
+                reinterpret_cast<LPARAM>(name.c_str()));
+            if (name == g_settings.asioDriverName) selected = index;
+        }
+        SendMessageW(state->audioOutputCombo, CB_SETCURSEL, selected, 0);
+        return;
+    }
+
+    SetWindowTextW(state->audioOutputLabel, UI_TEXT(L"오디오 출력 장치"));
+    SendMessageW(state->audioOutputCombo, CB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(UI_TEXT(
+                     L"Windows 기본 출력 장치 따라가기 (권장)")));
+    LRESULT selected = 0;
+    for (size_t i = 0; i < state->audioEndpoints.size(); ++i) {
+        std::wstring label = state->audioEndpoints[i].name;
+        if (state->audioEndpoints[i].isDefault) {
+            label += UI_TEXT(L" (현재 기본)");
+        }
+        const LRESULT index = SendMessageW(
+            state->audioOutputCombo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(label.c_str()));
+        if (state->audioEndpoints[i].id == g_settings.audioOutputDeviceId) {
+            selected = index;
+        }
+    }
+    SendMessageW(state->audioOutputCombo, CB_SETCURSEL, selected, 0);
 }
 
 static void RememberCurrentBufferChoice(SettingsDialogState* state) {
@@ -5932,6 +6413,17 @@ static std::vector<UINT32> BuildSharedPeriodChoices(
 static void PopulateSettingsBufferCombo(SettingsDialogState* state) {
     if (!state || !state->bufferCombo) return;
     SendMessageW(state->bufferCombo, CB_RESETCONTENT, 0, 0);
+
+    if (SettingsUsesAsioMode(state)) {
+        state->bufferItemsAreSharedFrames = false;
+        SendMessageW(state->bufferCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(UI_TEXT(
+                         L"ASIO 드라이버 선호 버퍼 (드라이버 설정 사용)")));
+        SendMessageW(state->bufferCombo, CB_SETCURSEL, 0, 0);
+        EnableWindow(state->bufferCombo, FALSE);
+        return;
+    }
+    EnableWindow(state->bufferCombo, TRUE);
 
     const bool useSharedFrames = SettingsUsesSharedMode(state) &&
                                  state->probeReady.load(std::memory_order_acquire) &&
@@ -6000,6 +6492,11 @@ static void PopulateSettingsBufferCombo(SettingsDialogState* state) {
 
 static void UpdateAudioClient3Status(SettingsDialogState* state) {
     if (!state || !state->audioStatus) return;
+    if (SettingsUsesAsioMode(state)) {
+        SetWindowTextW(state->audioStatus, UI_TEXT(
+            L"ASIO 출력 · 드라이버 기본 버퍼 사용 · 앱 클록 보정 가능"));
+        return;
+    }
     if (!state->probeReady.load(std::memory_order_acquire)) {
         SetWindowTextW(state->audioStatus, UI_TEXT(L"Shared 저지연 지원 확인 중…"));
         return;
@@ -6022,12 +6519,24 @@ static void UpdateAudioClient3Status(SettingsDialogState* state) {
 
 static std::wstring SelectedAudioEndpointId(
     const SettingsDialogState* state) {
+    if (SettingsUsesAsioMode(state)) return {};
     if (!state || !state->audioOutputCombo) return {};
     const LRESULT index = SendMessageW(
         state->audioOutputCombo, CB_GETCURSEL, 0, 0);
     if (index <= 0 || static_cast<size_t>(index - 1) >=
                           state->audioEndpoints.size()) return {};
     return state->audioEndpoints[static_cast<size_t>(index - 1)].id;
+}
+
+static std::wstring SelectedAsioDriverName(const SettingsDialogState* state) {
+    if (!SettingsUsesAsioMode(state) || !state->audioOutputCombo) return {};
+    const LRESULT index = SendMessageW(state->audioOutputCombo, CB_GETCURSEL,
+                                       0, 0);
+    if (index < 0 || static_cast<size_t>(index) >= state->asioDrivers.size()) {
+        return {};
+    }
+    const auto& name = state->asioDrivers[static_cast<size_t>(index)].name;
+    return AsioDriverNameWide(name);
 }
 
 static std::wstring SelectedCaptureDeviceId(
@@ -6340,10 +6849,19 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
         if (languageIndex >= 0 && languageIndex <= 2) {
             g_settings.uiLanguage = static_cast<UiLanguage>(languageIndex);
         }
-        if (audioIndex == 1) {
-            g_settings.audioMode = AudioMode::WasapiExclusive;
+        if (audioIndex == 1 && state->asioAvailable) {
+            g_settings.audioMode = AudioMode::Asio;
         } else {
             g_settings.audioMode = AudioMode::WasapiShared;
+        }
+        if (g_settings.audioMode == AudioMode::Asio) {
+            g_settings.asioDriverName = SelectedAsioDriverName(state);
+            g_settings.audioOutputDeviceId.clear();
+            if (g_settings.asioDriverName.empty()) {
+                g_settings.audioMode = AudioMode::WasapiShared;
+            }
+        } else {
+            g_settings.asioDriverName.clear();
         }
         if (videoIndex >= 0 && videoIndex < static_cast<LRESULT>(ARRAYSIZE(kVideoPresets))) {
             g_settings.videoPreset = kVideoPresets[videoIndex].preset;
@@ -6358,9 +6876,13 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             g_settings.volumeHudPosition =
                 static_cast<VolumeHudPosition>(volumeHudIndex);
         }
-        g_settings.driftCorrection = driftIndex == 1
-                                         ? DriftCorrectionMode::Resample
-                                         : DriftCorrectionMode::Off;
+        if (driftIndex == 1) {
+            g_settings.driftCorrection = DriftCorrectionMode::Auto;
+        } else if (driftIndex == 2) {
+            g_settings.driftCorrection = DriftCorrectionMode::Resample;
+        } else {
+            g_settings.driftCorrection = DriftCorrectionMode::Off;
+        }
         if (pcmQueueIndex >= 0) {
             const LRESULT queueMs = SendMessageW(
                 state->pcmQueueCombo, CB_GETITEMDATA,
@@ -6398,6 +6920,8 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->showConsoleCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.skipStartupSettings = SendMessageW(
             state->skipStartupCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_settings.checkForUpdates = SendMessageW(
+            state->checkForUpdatesCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.muteWhenBackground = SendMessageW(
             state->muteBackgroundCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.audioOnly = SendMessageW(
@@ -6485,13 +7009,19 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         SendMessageW(state->audioCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(
                          UI_TEXT(L"WASAPI Shared (호환성 우선 · 권장)")));
-        SendMessageW(state->audioCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(
-                         UI_TEXT(L"WASAPI Exclusive (지연 최소화 · 장치 독점)")));
+        if (state->asioAvailable) {
+            SendMessageW(state->audioCombo, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(UI_TEXT(
+                             L"ASIO (지연 최소화 · 드라이버 필요 · 실험적)")));
+        }
+        const LRESULT audioSelection =
+            g_settings.audioMode == AudioMode::Asio && state->asioAvailable
+                  ? 1
+                  : 0;
         SendMessageW(state->audioCombo, CB_SETCURSEL,
-                     g_settings.audioMode == AudioMode::WasapiExclusive ? 1 : 0, 0);
+                      audioSelection, 0);
 
-        state->audioOutputLabel = makeLabel(UI_TEXT(L"WASAPI 출력 장치"), 24, 68);
+        state->audioOutputLabel = makeLabel(UI_TEXT(L"오디오 출력 장치"), 24, 68);
         state->audioOutputCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -6499,28 +7029,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(IDC_SETTINGS_AUDIO_OUTPUT)),
             instance, nullptr);
-        SendMessageW(state->audioOutputCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(
-                         UI_TEXT(L"Windows 기본 출력 장치 따라가기 (권장)")));
-        LRESULT selectedAudioEndpoint = 0;
-        for (size_t i = 0; i < state->audioEndpoints.size(); ++i) {
-            std::wstring label = state->audioEndpoints[i].name;
-            if (state->audioEndpoints[i].isDefault) label += UI_TEXT(L" (현재 기본)");
-            SendMessageW(state->audioOutputCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(label.c_str()));
-            if (state->audioEndpoints[i].id ==
-                g_settings.audioOutputDeviceId) {
-                selectedAudioEndpoint = static_cast<LRESULT>(i + 1);
-            }
-        }
-        SendMessageW(state->audioOutputCombo, CB_SETCURSEL,
-                     selectedAudioEndpoint, 0);
+        PopulateAudioOutputCombo(state);
 
         state->selectedBufferMs = g_settings.wasapiBufferMs;
         state->selectedSharedPeriodFrames =
             g_settings.wasapiSharedPeriodFrames;
 
-        state->bufferLabel = makeLabel(UI_TEXT(L"WASAPI 출력 버퍼"), 24, 68);
+        state->bufferLabel = makeLabel(UI_TEXT(L"오디오 출력 버퍼"), 24, 68);
         state->bufferCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
@@ -6598,11 +7113,17 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                          UI_TEXT(L"끔 (원본 PCM · 음질 우선)")));
         SendMessageW(state->driftCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(
-                         UI_TEXT(L"자동 리샘플링 (장시간 안정성 권장)")));
+                         UI_TEXT(L"자동 (권장 · 필요 시 보정)")));
+        SendMessageW(state->driftCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(
+                         UI_TEXT(L"켬 (항상 리샘플링)")));
         SendMessageW(
             state->driftCombo, CB_SETCURSEL,
             g_settings.driftCorrection == DriftCorrectionMode::Resample
-                ? 1 : 0,
+                ? 2
+                : g_settings.driftCorrection == DriftCorrectionMode::Auto
+                      ? 1
+                      : 0,
             0);
 
         state->pcmQueueLabel = makeLabel(UI_TEXT(L"PCM 버퍼 목표"), 24, 274);
@@ -6696,6 +7217,16 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 L"저장된 설정으로 바로 실행 · Shift 실행 또는 F2로 설정 열기"),
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
             44, 424, 431, 42, hwnd, nullptr, instance, nullptr);
+        state->checkForUpdatesCheck = CreateWindowExW(
+            0, L"BUTTON", UI_TEXT(L"업데이트 자동 확인 (시작 후 백그라운드)"),
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+            24, 466, 451, 28, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_UPDATE_CHECK)),
+            instance, nullptr);
+        SendMessageW(state->checkForUpdatesCheck, BM_SETCHECK,
+                     g_settings.checkForUpdates
+                         ? BST_CHECKED : BST_UNCHECKED, 0);
         state->advancedToggle = CreateWindowExW(
             0, L"BUTTON", UI_TEXT(L"▸ 고급 설정"),
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
@@ -6950,6 +7481,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         ApplySettingsFont(state, hwnd, initialDpi);
         LayoutSettingsControls(state, initialDpi);
         UpdateAdvancedControlVisibility(state);
+        UpdateAsioControlVisibility(state);
         RedrawWindow(hwnd, nullptr, nullptr,
                      RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN |
                          RDW_UPDATENOW);
@@ -7050,7 +7582,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         if (LOWORD(wParam) == IDC_SETTINGS_AUDIO &&
             HIWORD(wParam) == CBN_SELCHANGE) {
             RememberCurrentBufferChoice(state);
+            PopulateAudioOutputCombo(state);
             PopulateSettingsBufferCombo(state);
+            UpdateAsioControlVisibility(state);
+            UpdateAudioClient3Status(state);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_AUDIO_OUTPUT &&
@@ -7205,6 +7740,8 @@ static bool ShowSettingsDialog(HINSTANCE hInst,
     state.captureDevices = EnumerateCaptureDevices();
     state.captureAudioDevices = EnumerateCaptureAudioDevices();
     state.audioEndpoints = EnumerateAudioEndpoints();
+    state.asioDrivers = llcv::asio::EnumerateDrivers();
+    state.asioAvailable = !state.asioDrivers.empty();
     POINT cursor{};
     GetCursorPos(&cursor);
     const HMONITOR savedViewerMonitor = SavedViewerMonitor();
@@ -8002,6 +8539,208 @@ static constexpr UINT WM_TOGGLE_RUNTIME_OSD = WM_APP + 91;
 static constexpr UINT WM_OPEN_SETTINGS = WM_APP + 92;
 static constexpr UINT WM_RESTORE_ONE_TO_ONE = WM_APP + 93;
 
+struct UpdateCheckResult {
+    bool newer = false;
+    std::wstring latestTag;
+    std::wstring installerUrl;
+};
+
+static std::wstring Utf8ToWide(const std::string& value) {
+    if (value.empty()) return {};
+    const int length = MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+        static_cast<int>(value.size()), nullptr, 0);
+    if (length <= 0) return {};
+    std::wstring result(static_cast<size_t>(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+                        static_cast<int>(value.size()), result.data(), length);
+    return result;
+}
+
+static bool ExtractJsonString(const std::string& json, const char* key,
+                              size_t searchFrom, std::string& value,
+                              size_t* nextPosition = nullptr) {
+    if (!key) return false;
+    const std::string marker = std::string("\"") + key + "\"";
+    const size_t markerPos = json.find(marker, searchFrom);
+    if (markerPos == std::string::npos) return false;
+    size_t cursor = json.find(':', markerPos + marker.size());
+    if (cursor == std::string::npos) return false;
+    ++cursor;
+    while (cursor < json.size() &&
+           (json[cursor] == ' ' || json[cursor] == '\t' ||
+            json[cursor] == '\r' || json[cursor] == '\n')) {
+        ++cursor;
+    }
+    if (cursor >= json.size() || json[cursor] != '"') return false;
+    ++cursor;
+    value.clear();
+    bool escaped = false;
+    for (; cursor < json.size(); ++cursor) {
+        const char ch = json[cursor];
+        if (escaped) {
+            // Release tags and GitHub asset URLs do not contain escaped
+            // unicode, but preserve the common JSON escapes safely.
+            switch (ch) {
+            case '"': value.push_back('"'); break;
+            case '\\': value.push_back('\\'); break;
+            case '/': value.push_back('/'); break;
+            case 'n': value.push_back('\n'); break;
+            case 'r': value.push_back('\r'); break;
+            case 't': value.push_back('\t'); break;
+            default: value.push_back(ch); break;
+            }
+            escaped = false;
+        } else if (ch == '\\') {
+            escaped = true;
+        } else if (ch == '"') {
+            if (nextPosition) *nextPosition = cursor + 1;
+            return true;
+        } else {
+            value.push_back(ch);
+        }
+    }
+    return false;
+}
+
+static bool IsNewerReleaseTag(const std::wstring& latestTag) {
+    auto parse = [](const std::wstring& input) {
+        std::vector<int> parts;
+        size_t index = 0;
+        while (index < input.size() &&
+               (input[index] == L'v' || input[index] == L'V' ||
+                input[index] == L' ')) {
+            ++index;
+        }
+        while (index < input.size()) {
+            while (index < input.size() && !iswdigit(input[index])) ++index;
+            if (index >= input.size()) break;
+            int value = 0;
+            while (index < input.size() && iswdigit(input[index])) {
+                value = (std::min)(value * 10 + (input[index] - L'0'), 1000000);
+                ++index;
+            }
+            parts.push_back(value);
+        }
+        return parts;
+    };
+    const auto latest = parse(latestTag);
+    const auto current = parse(kAppVersionLabel);
+    const size_t count = (std::max)(latest.size(), current.size());
+    for (size_t i = 0; i < count; ++i) {
+        const int lhs = i < latest.size() ? latest[i] : 0;
+        const int rhs = i < current.size() ? current[i] : 0;
+        if (lhs != rhs) return lhs > rhs;
+    }
+    return false;
+}
+
+static bool FetchLatestRelease(UpdateCheckResult& result) {
+    HINTERNET session = WinHttpOpen(
+        L"LowLatencyCaptureViewer/1.1.7",
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return false;
+    WinHttpSetTimeouts(session, 2500, 2500, 2500, 2500);
+    HINTERNET connection = WinHttpConnect(
+        session, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!connection) {
+        WinHttpCloseHandle(session);
+        return false;
+    }
+    HINTERNET request = WinHttpOpenRequest(
+        connection, L"GET", L"/repos/seria-aa/LowLatencyCaptureViewer/releases/latest",
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        WINHTTP_FLAG_SECURE);
+    if (!request) {
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+    WinHttpAddRequestHeaders(
+        request, L"Accept: application/vnd.github+json\r\n",
+        static_cast<DWORD>(-1L), WINHTTP_ADDREQ_FLAG_ADD);
+    const bool sent = WinHttpSendRequest(
+        request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA,
+        0, 0, 0) && WinHttpReceiveResponse(request, nullptr);
+    if (!sent) {
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    std::string json;
+    for (;;) {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(request, &available) || available == 0) {
+            break;
+        }
+        std::string chunk(static_cast<size_t>(available), '\0');
+        DWORD read = 0;
+        if (!WinHttpReadData(request, chunk.data(), available, &read) ||
+            read == 0) {
+            break;
+        }
+        chunk.resize(read);
+        json += chunk;
+        if (json.size() > 2 * 1024 * 1024) break;
+    }
+    WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+
+    std::string tag;
+    if (!ExtractJsonString(json, "tag_name", 0, tag)) return false;
+    result.latestTag = Utf8ToWide(tag);
+    if (result.latestTag.empty() || !IsNewerReleaseTag(result.latestTag)) {
+        return true;
+    }
+
+    size_t cursor = 0;
+    std::string assetUrl;
+    while (ExtractJsonString(json, "browser_download_url", cursor,
+                             assetUrl, &cursor)) {
+        if (assetUrl.find("_Setup.exe") != std::string::npos) break;
+        assetUrl.clear();
+    }
+    const std::wstring installerUrl = Utf8ToWide(assetUrl);
+    constexpr wchar_t kOfficialAssetPrefix[] =
+        L"https://github.com/seria-aa/LowLatencyCaptureViewer/releases/download/";
+    if (installerUrl.empty() || installerUrl.rfind(kOfficialAssetPrefix, 0) != 0) {
+        return true;
+    }
+    result.installerUrl = installerUrl;
+    result.newer = true;
+    return true;
+}
+
+static void StartBackgroundUpdateCheck(HWND hwnd) {
+    if (!hwnd || !g_settings.checkForUpdates || g_updateCheckThread.joinable()) {
+        return;
+    }
+    g_updateCheckStop.store(false, std::memory_order_release);
+    g_updateCheckThread = std::thread([hwnd]() {
+        Sleep(2000);
+        if (g_updateCheckStop.load(std::memory_order_acquire) ||
+            !g_running.load(std::memory_order_acquire) || !IsWindow(hwnd)) {
+            return;
+        }
+        UpdateCheckResult result;
+        if (!FetchLatestRelease(result) || !result.newer ||
+            result.installerUrl.empty() ||
+            g_updateCheckStop.load(std::memory_order_acquire) ||
+            !g_running.load(std::memory_order_acquire) || !IsWindow(hwnd)) {
+            return;
+        }
+        auto* message = new UpdateCheckResult(std::move(result));
+        if (!PostMessageW(hwnd, WM_UPDATE_CHECK_COMPLETE, 0,
+                          reinterpret_cast<LPARAM>(message))) {
+            delete message;
+        }
+    });
+}
+
 static void FormatAudioErrorAge(uint64_t lastErrorMs, uint64_t nowMs,
                                 wchar_t* output, size_t outputCount) {
     if (!output || outputCount == 0) return;
@@ -8072,29 +8811,10 @@ static AudioPatternStats GetAudioPatternStats(uint64_t nowMs,
     return stats;
 }
 
-static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
-                                        size_t outputNameLimit,
-                                        size_t captureNameLimit) {
+static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     const auto& preset = CurrentVideoPreset();
-    auto compactName = [](const std::wstring& value, size_t maximum) {
-        if (value.size() <= maximum) return value;
-        return value.substr(0, maximum > 1 ? maximum - 1 : 0) + L"…";
-    };
-    auto compactEndpointName = [](const std::wstring& value, size_t maximum) {
-        if (value.size() <= maximum) return value;
-        if (maximum == 0) return std::wstring{};
-        if (maximum <= 2) return value.substr(0, maximum - 1) + L"…";
-        // Keep both the device prefix and the endpoint/status suffix visible.
-        const size_t available = maximum - 1; // one slot for the ellipsis
-        const size_t prefix = (available + 1) / 2;
-        const size_t suffix = available - prefix;
-        return value.substr(0, prefix) + L"…" +
-               value.substr(value.size() - suffix);
-    };
-    const std::wstring captureName = compactName(g_activeCaptureDeviceName,
-                                                 captureNameLimit);
-    const std::wstring outputName = compactEndpointName(
-        ActiveAudioOutputName(), outputNameLimit);
+    const std::wstring& captureName = g_activeCaptureDeviceName;
+    const std::wstring outputName = ActiveAudioOutputName();
     const VideoPixelFormat activeFormat = static_cast<VideoPixelFormat>(
         g_activePixelFormat.load(std::memory_order_acquire));
     const bool compressedVideo = IsCompressedVideoFormat(activeFormat);
@@ -8218,8 +8938,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
     const wchar_t* clockDiagnosis = trackingActive
         ? UI_TEXT(L"측정 중") : UI_TEXT(L"워밍업 · 시작 5초 제외");
     if (monitorStartMs) {
-        if (g_settings.driftCorrection ==
-            DriftCorrectionMode::Resample) {
+        if (AudioResamplerActive()) {
             if (resamplerUnderruns > 0 &&
                 lastErrorAgeMs <= 10 * 60 * 1000) {
                 clockDiagnosis = UI_TEXT(L"리샘플러 출력 부족 감지");
@@ -8231,6 +8950,10 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
             } else {
                 clockDiagnosis = UI_TEXT(L"보정 작동 · 오류 원인 아래 확인");
             }
+        } else if (g_settings.driftCorrection == DriftCorrectionMode::Auto) {
+            clockDiagnosis = trackingActive
+                ? UI_TEXT(L"자동 관찰 중 · 원본 PCM")
+                : UI_TEXT(L"측정 중");
         } else if (totalErrorEvents == 0) {
             clockDiagnosis = elapsedMs >= 2 * 60 * 1000
                 ? UI_TEXT(L"안정 · 보정 불필요") : UI_TEXT(L"관찰 중");
@@ -8278,6 +9001,20 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
               : logicalVolume == 0 ? UI_TEXT(L"음소거")
               : logicalVolume > 100 ? UI_TEXT(L"PCM 증폭 적용")
               : UI_TEXT(L"PCM 감쇠 적용");
+    const uint64_t clipEvents =
+        g_audioClipCount.load(std::memory_order_acquire);
+    const bool clippingActive = nowMs <
+        g_audioClipUntilMs.load(std::memory_order_acquire);
+    wchar_t clippingText[96]{};
+    if (clipEvents == 0) {
+        wcscpy_s(clippingText, UI_TEXT(L"클리핑 없음"));
+    } else if (clippingActive) {
+        swprintf_s(clippingText, UI_TEXT(L"클리핑 감지 중 (%llu회)"),
+                   static_cast<unsigned long long>(clipEvents));
+    } else {
+        swprintf_s(clippingText, UI_TEXT(L"클리핑 기록 (%llu회)"),
+                   static_cast<unsigned long long>(clipEvents));
+    }
 
     const wchar_t* scaleText =
         g_settings.pixelPerfect && g_settings.relativeWindowSize
@@ -8286,6 +9023,14 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
                   ? UI_TEXT(L"Pixel-perfect (고정 크기)")
                   : g_settings.relativeWindowSize
                         ? L"Scaled · Monitor-relative" : UI_TEXT(L"Scaled (비율 고정)");
+    const wchar_t* correctionModeText =
+        g_settings.driftCorrection == DriftCorrectionMode::Resample
+            ? UI_TEXT(L"켬 · 리샘플러 사용")
+            : g_settings.driftCorrection == DriftCorrectionMode::Auto
+                  ? (AudioResamplerActive()
+                         ? UI_TEXT(L"자동 · 보정 작동")
+                         : UI_TEXT(L"자동 · 관찰 중"))
+                  : UI_TEXT(L"끔 · 원본 PCM");
     const wchar_t* osdFormat = IsEnglishUi()
         ? L"Capture diagnostics                              [Tab close]\n"
           L"Path          %s · %s\n"
@@ -8295,12 +9040,13 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
           L"Actual FPS    Input %.1f · Present %.1f\n"
           L"App latency   %s  (not total HDMI latency)\n"
           L"Frames        Input %llu · Output %llu · Replaced %llu\n"
-          L"Audio output  WASAPI %s · %s\n"
+           L"Audio output  %s\n"
+          L"Output device %s\n"
           L"Device buffer %.2f ms · queued %.2f ms · input packet %.2f ms · period %.2f ms\n"
           L"Clock drift   %s · applied %+d ppm · %s\n"
           L"App PCM queue current %.2f ms · target %.2f ms · observed min %.2f ms\n"
           L"Buffer diagnosis %s\n"
-          L"Volume        %d%% · %s\n"
+          L"Volume        %d%% · %s · %s\n"
           L"Audio errors  underrun %llu · missing audio %.2f ms · overrun %llu\n"
           L"Error causes  input late %llu · buffer shortage %llu · resampler %llu\n"
           L"Error pattern %s · last %s · max burst %llu\n"
@@ -8313,12 +9059,13 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
           L"실제 FPS      입력 %.1f · Present %.1f\n"
           L"앱 처리 지연  %s  (총 HDMI 지연 아님)\n"
           L"프레임        입력 %llu · 출력 %llu · 최신화 건너뜀 %llu\n"
-          L"오디오 출력   WASAPI %s · %s\n"
+           L"오디오 출력   %s\n"
+          L"출력 장치     %s\n"
           L"출력 버퍼(장치) %.2f ms · 현재 대기 %.2f ms · 입력 패킷 %.2f ms · 주기 %.2f ms\n"
           L"클록 보정     %s · 적용 %+d ppm · %s\n"
           L"앱 PCM 버퍼(대기) 현재 %.2f ms · 목표 %.2f ms · 관측 최저 %.2f ms\n"
           L"버퍼 진단     %s\n"
-          L"음량          %d%% · %s\n"
+          L"음량          %d%% · %s · %s\n"
           L"오디오 오류   underrun %llu회 · 누락 오디오 %.2f ms · overrun %llu회\n"
           L"오류 원인     입력 늦음 %llu회 · 버퍼 부족 %llu회 · 리샘플러 %llu회\n"
           L"오류 패턴     %s · 최근 %s · 최대 연속 %llu회\n"
@@ -8340,21 +9087,22 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight,
             g_videoPresentedFrames.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(
             g_videoReplacedFrames.load(std::memory_order_relaxed)),
-        g_settings.audioMode == AudioMode::WasapiExclusive
-            ? L"Exclusive" : L"Shared",
+         g_settings.audioMode == AudioMode::WasapiExclusive
+             ? L"WASAPI Exclusive"
+             : g_settings.audioMode == AudioMode::Asio ? L"ASIO"
+                                                        : L"WASAPI Shared",
         outputName.c_str(),
         1000.0 * audioFrames / kSampleRate,
         1000.0 * paddingFrames / kSampleRate,
         1000.0 * capturePacketFrames / kSampleRate,
         captureIntervalUs / 1000.0,
-        g_settings.driftCorrection == DriftCorrectionMode::Resample
-            ? UI_TEXT(L"자동 리샘플링") : UI_TEXT(L"끔 (원본 PCM)"),
+         correctionModeText,
         activeCorrectionPpm, clockDiagnosis,
         1000.0 * queuedFrames / kSampleRate,
         1000.0 * queueTargetFrames / kSampleRate,
         1000.0 * minimumPreRenderFrames / kSampleRate,
         queueDiagnosis,
-        logicalVolume, volumeProcessing,
+        logicalVolume, volumeProcessing, clippingText,
         static_cast<unsigned long long>(underrunEvents),
         1000.0 * underrunFrames / kSampleRate,
         static_cast<unsigned long long>(overrunEvents),
@@ -8843,6 +9591,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         RestoreOneToOneWindow(hwnd);
         return 0;
 
+    case WM_UPDATE_CHECK_COMPLETE: {
+        std::unique_ptr<UpdateCheckResult> result(
+            reinterpret_cast<UpdateCheckResult*>(lParam));
+        if (!result || result->latestTag.empty() ||
+            result->installerUrl.empty()) {
+            return 0;
+        }
+        std::wstring message = UI_TEXT(
+            L"새 버전이 있습니다. 공식 설치 파일을 다운로드하시겠습니까?");
+        message += L"\n\n";
+        message += result->latestTag;
+        const int choice = MessageBoxW(
+            hwnd, message.c_str(), UI_TEXT(L"업데이트 확인"),
+            MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON1);
+        if (choice == IDYES) {
+            ShellExecuteW(hwnd, L"open", result->installerUrl.c_str(),
+                          nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        return 0;
+    }
+
     case WM_CLOSE:
         PersistWindowPosition(hwnd);
         g_windowPositionPersisted = true;
@@ -9209,6 +9978,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
             if (g_running.load()) PostMessageW(hwnd, WM_CLOSE, 0, 0);
         });
     }
+    if (!smokeTest) StartBackgroundUpdateCheck(hwnd);
 
     MSG m{};
     while (g_running.load() && GetMessageW(&m, nullptr, 0, 0) > 0) {
@@ -9241,10 +10011,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     }
 
     g_running.store(false);
+    g_updateCheckStop.store(true, std::memory_order_release);
 
     if (renderThread.joinable()) renderThread.join();
     if (unifiedCaptureThread.joinable()) unifiedCaptureThread.join();
     if (smokeTestStopper.joinable()) smokeTestStopper.join();
+    if (g_updateCheckThread.joinable()) g_updateCheckThread.join();
     if (smokeTest) {
         fwprintf(stderr,
                  L"[smoke] captured=%llu presented=%llu replaced=%llu "
