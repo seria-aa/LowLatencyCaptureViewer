@@ -108,7 +108,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.2.0";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.1";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -10397,7 +10397,7 @@ static bool IsNewerReleaseTag(const std::wstring& latestTag) {
 
 static bool FetchLatestRelease(UpdateCheckResult& result) {
     HINTERNET session = WinHttpOpen(
-        L"LowLatencyCaptureViewer/1.2.0",
+        L"LowLatencyCaptureViewer/1.2.1",
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return false;
