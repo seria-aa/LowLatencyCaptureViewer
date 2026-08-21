@@ -18,6 +18,7 @@
 
 #include <windows.h>
 #include <windowsx.h>
+#include <dbt.h>
 #include <shellapi.h>
 #include <winhttp.h>
 #include <dshow.h>
@@ -107,7 +108,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.1.7";
+constexpr wchar_t kAppVersionLabel[] = L"v1.1.7.1";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -655,6 +656,59 @@ static std::wstring HrText(HRESULT hr) {
 static void LogHr(const wchar_t* where, HRESULT hr) {
     fwprintf(stderr, L"%s failed: 0x%08X %s\n",
              where, static_cast<unsigned>(hr), HrText(hr).c_str());
+}
+
+static void LogD3DFailureEvent(HRESULT failureHr, HRESULT removedReason) {
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    fwprintf(
+        stderr,
+        L"[video-event] d3d-failure local=%04u-%02u-%02u "
+        L"%02u:%02u:%02u.%03u uptime=%llu ms failure=0x%08X (%s) "
+        L"device-removal=0x%08X (%s)\n",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+        now.wSecond, now.wMilliseconds,
+        static_cast<unsigned long long>(GetTickCount64()),
+        static_cast<unsigned>(failureHr), HrText(failureHr).c_str(),
+        static_cast<unsigned>(removedReason), HrText(removedReason).c_str());
+}
+
+static void LogDisplayChangeEvent(WPARAM wParam, LPARAM lParam) {
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    fwprintf(
+        stderr,
+        L"[display-event] display-change local=%04u-%02u-%02u "
+        L"%02u:%02u:%02u.%03u uptime=%llu ms bpp=%llu mode=%ux%u\n",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+        now.wSecond, now.wMilliseconds,
+        static_cast<unsigned long long>(GetTickCount64()),
+        static_cast<unsigned long long>(wParam), LOWORD(lParam),
+        HIWORD(lParam));
+}
+
+static const wchar_t* DeviceChangeEventName(WPARAM event) {
+    switch (event) {
+    case DBT_DEVICEARRIVAL: return L"arrival";
+    case DBT_DEVICEREMOVECOMPLETE: return L"remove-complete";
+    case DBT_DEVICEREMOVEPENDING: return L"remove-pending";
+    case DBT_DEVNODES_CHANGED: return L"devnodes-changed";
+    default: return L"other";
+    }
+}
+
+static void LogDeviceChangeEvent(WPARAM event) {
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    fwprintf(
+        stderr,
+        L"[display-event] device-change local=%04u-%02u-%02u "
+        L"%02u:%02u:%02u.%03u uptime=%llu ms event=%llu (%s)\n",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+        now.wSecond, now.wMilliseconds,
+        static_cast<unsigned long long>(GetTickCount64()),
+        static_cast<unsigned long long>(event),
+        DeviceChangeEventName(event));
 }
 
 static WAVEFORMATEX PcmOutputFormat() {
@@ -4151,6 +4205,7 @@ struct DirectD3D11Renderer {
     bool sharpScalingActive = false;
     bool discardUpdateAvailable = false;
     bool occluded = false;
+    bool occlusionLogged = false;
     uint64_t nextOcclusionTestMs = 0;
     DXGI_FORMAT inputFormat = DXGI_FORMAT_NV12;
     bool hdrOutput = false;
@@ -4223,6 +4278,7 @@ struct DirectD3D11Renderer {
         sharpScalingActive = false;
         discardUpdateAvailable = false;
         occluded = false;
+        occlusionLogged = false;
         nextOcclusionTestMs = 0;
         inputFormat = DXGI_FORMAT_NV12;
         hdrOutput = false;
@@ -5076,6 +5132,13 @@ struct DirectD3D11Renderer {
             }
             if (FAILED(test)) return test;
             occluded = false;
+            if (occlusionLogged) {
+                fwprintf(stderr,
+                         L"[display-event] swapchain visible again after "
+                         L"occlusion; uptime=%llu ms\n",
+                         static_cast<unsigned long long>(nowMs));
+                occlusionLogged = false;
+            }
             nextOcclusionTestMs = 0;
         }
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
@@ -5098,6 +5161,15 @@ struct DirectD3D11Renderer {
         hr = swapChain->Present(syncInterval, flags);
         if (hr == DXGI_STATUS_OCCLUDED) {
             occluded = true;
+            if (!occlusionLogged) {
+                fwprintf(stderr,
+                         L"[display-event] swapchain occluded; uptime=%llu ms "
+                         L"present-mode=%s\n",
+                         static_cast<unsigned long long>(GetTickCount64()),
+                         vsync ? L"VSync" :
+                             (allowTearing ? L"Tearing" : L"Immediate"));
+                occlusionLogged = true;
+            }
             nextOcclusionTestMs = GetTickCount64() + 50;
         }
         return hr;
@@ -5628,6 +5700,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                                    HRESULT failure) {
             LogHr(failedStage, failure);
             const HRESULT removedReason = renderer.deviceRemovedReason();
+            LogD3DFailureEvent(failure, removedReason);
             if (FAILED(removedReason)) {
                 LogHr(L"ID3D11Device::GetDeviceRemovedReason",
                       removedReason);
@@ -8637,7 +8710,7 @@ static bool IsNewerReleaseTag(const std::wstring& latestTag) {
 
 static bool FetchLatestRelease(UpdateCheckResult& result) {
     HINTERNET session = WinHttpOpen(
-        L"LowLatencyCaptureViewer/1.1.7",
+        L"LowLatencyCaptureViewer/1.1.7.1",
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return false;
@@ -9439,6 +9512,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_ACTIVATEAPP:
         UpdateBackgroundAudioMute(wParam != FALSE);
         return 0;
+
+    case WM_DISPLAYCHANGE:
+        LogDisplayChangeEvent(wParam, lParam);
+        break;
+
+    case WM_DEVICECHANGE:
+        if (wParam == DBT_DEVICEARRIVAL ||
+            wParam == DBT_DEVICEREMOVECOMPLETE ||
+            wParam == DBT_DEVICEREMOVEPENDING ||
+            wParam == DBT_DEVNODES_CHANGED) {
+            LogDeviceChangeEvent(wParam);
+        }
+        break;
 
     case WM_GETDPISCALEDSIZE:
         if ((g_settings.pixelPerfect || g_settings.relativeWindowSize) &&

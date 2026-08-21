@@ -101,6 +101,12 @@ The log records selected devices and modes, actual allocator sizes, WASAPI
 initialization, fallback paths, capture-graph stages, and filter pin/media-type
 details after an initialization failure.
 
+For display interruptions, check `display-event` records for timestamped display
+or device changes and swapchain occlusion/recovery. If D3D11 transfer, Present, or
+output recreation fails, a `video-event` record includes the HRESULT and
+`GetDeviceRemovedReason` result. Normal frames are not logged, so this adds no
+per-frame logging overhead during normal operation.
+
 Saved logs are automatically bounded: each part is limited to 2 MB, and the
 newest five managed log files are retained up to a combined 10 MB. Managed logs
 older than seven days are removed when a new logging session starts. A long
