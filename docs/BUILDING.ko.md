@@ -7,7 +7,7 @@
 - Windows 10/11 x64
 - **C++를 사용한 데스크톱 개발**이 설치된 Visual Studio 2022
 - Windows SDK와 Windows용 CMake 도구
-- 설치 프로그램을 만들 때만 Inno Setup 6 이상
+- 설치 프로그램을 만들 때만 Inno Setup 7
 
 Win32, DirectShow, D3D11, DXGI, 실험적 MJPEG 디코딩용 Media Foundation과
 WASAPI 등 Windows 시스템 API를 사용합니다. FFmpeg나 서드파티 코덱 팩은
@@ -39,7 +39,7 @@ Inno Setup 스크립트는 다음 위치에 있습니다.
 installer\LowLatencyCaptureViewer.iss
 ```
 
-Release 실행 파일을 만든 뒤 Inno Setup 6 이상으로 빌드합니다. 설치판과
+Release 실행 파일을 만든 뒤 Inno Setup 7로 빌드합니다. 설치판과
 포터블판에는 컴퓨터별 `settings.ini`나 진단 로그를 포함하지 않아야 합니다.
 
 실행 중 설정과 로그는 사용자별 다음 폴더에 저장됩니다.

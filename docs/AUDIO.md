@@ -85,7 +85,7 @@ These controls affect different parts of the path:
 
 New installations start with a 20 ms PCM target. Once a system is stable, try
 15 ms or 10 ms only when lower latency matters more than scheduling headroom;
-raise a too-small target back to 15, 20, or 30 ms when underruns repeat. A
+raise a too-small target back to 15, 20, 25, or 30 ms when underruns repeat. A
 larger target improves scheduling tolerance but adds the same amount of audio
 queueing. A single occasional underrun is not necessarily audible or a reason
 to raise the target.

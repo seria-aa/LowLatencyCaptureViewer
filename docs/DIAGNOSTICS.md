@@ -9,8 +9,6 @@ dBFS peak values, channel/master volume, and clipping state. Audio-only mode
 starts with this OSD visible; `F3` can hide it when you want an unobstructed
 meter window.
 
-![English Tab diagnostics overlay](images/tab-diagnostics-en.png)
-
 ## Video fields
 
 - **Path:** selected capture device and DirectShow-to-D3D11 path
@@ -26,7 +24,7 @@ the previous one is presented. A rising count does not automatically mean the
 viewer is accumulating latency; the old sample is being discarded specifically
 to prevent that queue.
 
-Video statistics exclude the first two seconds after startup.
+Video statistics exclude the first five seconds after startup.
 
 ## Audio fields
 
@@ -74,7 +72,7 @@ Use these rules:
 
 1. **Zero underruns + normal buffer diagnosis:** keep the current setting.
 2. Repeated **`buffer shortage`** or **`resampler output shortage`**: raise the PCM
-   target one step at a time, `10 → 15 → 20 ms`. Both can indicate that the app's
+   target one step at a time, `10 → 15 → 20 → 25 → 30 ms`. Both can indicate that the app's
    PCM safety margin is too small, so adjust the PCM target first.
 3. Repeated **`input late`** alone points to capture-callback or system-scheduling
    delays; increasing the PCM target may not fix it.
@@ -88,11 +86,13 @@ the ASIO driver's control panel as well.
 
 New installations start with `20 ms (stable target)`. After verifying stable
 operation, use `15 ms (low-latency target)` or `10 ms (minimum latency)` only
-when the lower queueing delay is worth the reduced scheduling margin.
+when the lower queueing delay is worth the reduced scheduling margin. For
+repeated errors, try `25 ms (extra stability)`, then `30 ms (stability first)`.
 
 ## Log files
 
-Enable **Save diagnostic log file** in advanced settings. Logs are written to:
+Enable **Save diagnostic log file** in the **Help & diagnostics** tab. Logs are
+written to:
 
 ```text
 %LOCALAPPDATA%\LowLatencyCaptureViewer\logs

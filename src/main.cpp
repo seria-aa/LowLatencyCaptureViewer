@@ -120,7 +120,7 @@ static constexpr int kWasapiBufferOptionsMs[] = {5, 10, 15, 20, 30, 40};
 static constexpr int kExclusiveBufferOptionsMs[] = {5, 10, 15, 20, 30, 40};
 constexpr size_t kMaximumExclusiveEndpointCacheEntries = 32;
 constexpr int kRecommendedWasapiBufferMs = 20;
-static constexpr int kPcmQueueOptionsMs[] = {10, 15, 20, 30};
+static constexpr int kPcmQueueOptionsMs[] = {10, 15, 20, 25, 30};
 constexpr int kLowestPcmQueueMs = 10;
 constexpr int kRecommendedPcmQueueMs = 20;
 // Auto correction deliberately uses a wide hysteresis window and latches on
@@ -393,6 +393,7 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"10 ms (최저 지연)", L"10 ms (minimum latency)"},
         {L"15 ms (저지연 목표)", L"15 ms (low-latency target)"},
         {L"20 ms (안정 권장)", L"20 ms (stable recommendation)"},
+        {L"25 ms (안정 여유)", L"25 ms (extra stability)"},
         {L"30 ms (안정성 우선)", L"30 ms (stability first)"},
         {L"백그라운드에서 자동 음소거", L"Mute automatically in background"},
         {L"화면 표시 방식", L"Presentation mode"},
@@ -7316,7 +7317,7 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
             return L"PCM buffer target\n\n"
                    L"The amount of captured audio kept inside the application before playback.\n"
                    L"10 ms is minimum latency, 15 ms is the low-latency target, 20 ms is the stable "
-                   L"recommendation, and 30 ms prioritizes stability.\n\n"
+                   L"recommendation, 25 ms adds stability margin, and 30 ms prioritizes stability.\n\n"
                    L"Higher values absorb more scheduling jitter but add the same amount of audio "
                    L"latency. This is independent of the WASAPI output buffer and clock-drift correction.";
         case SettingsHelpTopic::Presentation:
@@ -7360,8 +7361,8 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
     case SettingsHelpTopic::PcmQueue:
         return L"PCM 버퍼 목표 안내\n\n"
                L"캡처 오디오를 재생 전에 확보하는 프로그램 내부 대기량입니다.\n"
-               L"10ms는 최저 지연, 15ms는 저지연 목표, 20ms는 안정 권장, 30ms는 안정성 우선 "
-               L"설정입니다.\n\n"
+               L"10ms는 최저 지연, 15ms는 저지연 목표, 20ms는 안정 권장, 25ms는 안정 여유, "
+               L"30ms는 안정성 우선 설정입니다.\n\n"
                L"값을 높이면 순간적인 입력 지연을 흡수할 여유가 커지지만, 그만큼 오디오 지연이 "
                L"늘어납니다. WASAPI 출력 버퍼와 클록 드리프트 보정과는 독립적으로 조정됩니다.";
     case SettingsHelpTopic::Presentation:
@@ -8585,6 +8586,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             UI_TEXT(L"10 ms (최저 지연)"),
             UI_TEXT(L"15 ms (저지연 목표)"),
             UI_TEXT(L"20 ms (안정 권장)"),
+            UI_TEXT(L"25 ms (안정 여유)"),
             UI_TEXT(L"30 ms (안정성 우선)" )};
         size_t selectedQueue = 0;
         for (size_t i = 0; i < ARRAYSIZE(kPcmQueueOptionsMs); ++i) {
