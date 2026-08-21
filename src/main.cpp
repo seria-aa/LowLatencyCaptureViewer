@@ -108,7 +108,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.1.7.2";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.0";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -122,6 +122,7 @@ constexpr size_t kMaximumExclusiveEndpointCacheEntries = 32;
 constexpr int kRecommendedWasapiBufferMs = 20;
 static constexpr int kPcmQueueOptionsMs[] = {10, 15, 20, 30};
 constexpr int kLowestPcmQueueMs = 10;
+constexpr int kRecommendedPcmQueueMs = 20;
 // Auto correction deliberately uses a wide hysteresis window and latches on
 // for the rest of the session once sustained drift is observed. This avoids
 // repeatedly inserting/removing the resampler while still leaving the normal
@@ -162,6 +163,14 @@ enum class PresentationMode {
 enum class ScalingMode {
     Smooth,
     Sharp,
+};
+
+// Fullscreen is often used as a clean display surface, but this viewer also
+// exposes mouse-wheel volume control.  Keep the pointer available on motion
+// while allowing it to disappear when it is no longer needed.
+enum class FullscreenCursorMode {
+    AutoHide,
+    AlwaysVisible,
 };
 
 enum class VideoPixelFormat {
@@ -220,8 +229,8 @@ struct AppSettings {
     AudioMode audioMode = AudioMode::WasapiShared;
     int wasapiBufferMs = kRecommendedWasapiBufferMs;
     UINT32 wasapiSharedPeriodFrames = 0;
-    DriftCorrectionMode driftCorrection = DriftCorrectionMode::Off;
-    int pcmQueueTargetMs = kLowestPcmQueueMs;
+    DriftCorrectionMode driftCorrection = DriftCorrectionMode::Auto;
+    int pcmQueueTargetMs = kRecommendedPcmQueueMs;
     int volumePercent = 100;
     int leftVolumePercent = 100;
     int rightVolumePercent = 100;
@@ -230,6 +239,8 @@ struct AppSettings {
     bool muteWhenBackground = false;
     PresentationMode presentationMode = PresentationMode::AllowTearing;
     ScalingMode scalingMode = ScalingMode::Smooth;
+    FullscreenCursorMode fullscreenCursorMode =
+        FullscreenCursorMode::AutoHide;
     VideoPreset videoPreset = VideoPreset::R1920x1080;
     VideoPixelFormat pixelFormat = VideoPixelFormat::Auto;
     int videoFrameRate = 0;
@@ -247,7 +258,7 @@ struct AppSettings {
     bool saveLog = false;
     bool showDiagnosticConsole = false;
     bool skipStartupSettings = false;
-    bool checkForUpdates = false;
+    bool checkForUpdates = true;
     bool audioOnly = false;
     bool forceHdr10 = false;
     bool pixelPerfect = true;
@@ -335,6 +346,35 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"ASIO 출력 · 드라이버 기본 버퍼 사용 · 앱 클록 보정 가능", L"ASIO output · driver buffer · app clock correction available"},
         {L"볼륨 HUD 위치", L"Volume HUD position"},
         {L"100% 이상 볼륨 증폭 허용 (최대 200%)", L"Allow volume boost above 100% (up to 200%)"},
+        {L"출력", L"Output"},
+        {L"재생 · 편의", L"Playback & convenience"},
+        {L"동기화 · 안정성", L"Sync & stability"},
+        {L"캡처", L"Capture"},
+        {L"영상", L"Video"},
+        {L"창", L"Window"},
+        {L"오디오", L"Audio"},
+        {L"영상 · 창", L"Video & window"},
+        {L"안내 · 진단", L"Guide & diagnostics"},
+        {L"단축키", L"Shortcuts"},
+        {L"진단 · 문제 해결", L"Diagnostics & troubleshooting"},
+        {L"로그 폴더 열기", L"Open logs folder"},
+        {L"로그 폴더를 열지 못했습니다.", L"Could not open the logs folder."},
+        {L"진단 로그", L"Diagnostic logs"},
+        {L"시작을 누르면 현재 설정으로 뷰어를 엽니다.\r\n\r\nF2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료", L"Select Start to open the viewer with the current settings.\r\n\r\nF2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit"},
+        {L"F2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료", L"F2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit"},
+        {L"문제가 생길 때만 로그 저장을 켜고 같은 문제를 재현하세요.\r\n로그는 사용자 폴더의 logs에 저장됩니다.", L"Enable log saving only when a problem occurs, then reproduce it.\r\nLogs are saved in the user-data logs folder."},
+        {L"업데이트", L"Updates"},
+        {L"빠른 안내", L"Quick guide"},
+        {L"이 창에서 설정을 저장한 뒤 시작할 수 있습니다.\r\n\r\nF2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료\r\n\r\n문제가 있으면 진단 로그를 켠 뒤 재현하고, 사용자 폴더의 logs 파일을 첨부해 주세요.", L"Save settings here, then start the viewer.\r\n\r\nF2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit\r\n\r\nFor a problem report, enable diagnostic logging, reproduce the issue, and attach the log from the user-data logs folder."},
+        {L"업데이트 확인", L"Update checks"},
+        {L"자동 확인은 시작 후 백그라운드에서 최신 릴리스를 확인합니다. 새 버전이 있으면 공식 설치 파일 다운로드를 안내합니다.", L"Automatic checks run in the background after startup. When a new version is available, the app offers the official installer download."},
+        {L"현재 버전", L"Current version"},
+        {L"최신 버전 확인", L"Check for updates now"},
+        {L"최신 버전 확인 중…", L"Checking for updates…"},
+        {L"최신 버전입니다.", L"You are up to date."},
+        {L"최신 버전: %s", L"Latest version: %s"},
+        {L"새 버전 %s을(를) 찾았습니다. 공식 설치 파일을 다운로드하시겠습니까?", L"Version %s is available. Download the official installer?"},
+        {L"업데이트를 확인하지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도하세요.", L"Could not check for updates. Check your internet connection and try again."},
         {L"▸ 고급 설정", L"▸ Advanced settings"},
         {L"⌄ 고급 설정 숨기기", L"⌄ Hide advanced settings"},
         {L"내부 오디오 확인 중…", L"Checking built-in audio…"},
@@ -377,6 +417,9 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"※ Pixel-perfect와 함께 켜면 모니터 이동 시 1:1이 깨질 수 있습니다.", L"※ With Pixel-perfect, moving monitors may break 1:1 scaling."},
         {L"제목 표시줄 숨기기 (borderless 창)", L"Hide title bar (borderless window)"},
         {L"창을 모니터 가장자리에 스냅 (권장)", L"Snap window to monitor edges (recommended)"},
+        {L"전체화면 커서", L"Fullscreen cursor"},
+        {L"자동 숨김 (권장)", L"Auto-hide (recommended)"},
+        {L"항상 표시", L"Always show"},
         {L"진단 로그 파일 저장 (사용자 폴더)", L"Save diagnostic log (user folder)"},
         {L"진단 콘솔 창 표시", L"Show diagnostic console window"},
         {L"다음 실행부터 바로 시작", L"Start directly next time"},
@@ -1530,6 +1573,7 @@ static void LoadSettings() {
     wchar_t relativeWindowScale[16]{};
     wchar_t relativeWindowScaleVersion[16]{};
     wchar_t borderlessWindow[8]{};
+    wchar_t fullscreenCursorMode[32]{};
     wchar_t windowSnap[8]{};
     wchar_t windowX[32]{};
     wchar_t windowY[32]{};
@@ -1546,7 +1590,7 @@ static void LoadSettings() {
     GetPrivateProfileStringW(L"General", L"SkipStartupSettings", L"0",
                              skipStartupSettings,
                              ARRAYSIZE(skipStartupSettings), path.c_str());
-    GetPrivateProfileStringW(L"General", L"CheckForUpdates", L"0",
+    GetPrivateProfileStringW(L"General", L"CheckForUpdates", L"1",
                              checkForUpdates,
                              ARRAYSIZE(checkForUpdates), path.c_str());
     GetPrivateProfileStringW(L"General", L"AudioOnly", L"0", audioOnly,
@@ -1561,10 +1605,10 @@ static void LoadSettings() {
     GetPrivateProfileStringW(L"Audio", L"SharedPeriodFrames", L"0",
                              sharedPeriodFrames, ARRAYSIZE(sharedPeriodFrames),
                              path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"DriftCorrection", L"Off",
+    GetPrivateProfileStringW(L"Audio", L"DriftCorrection", L"Auto",
                              driftCorrection, ARRAYSIZE(driftCorrection),
                              path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"PcmQueueTargetMs", L"",
+    GetPrivateProfileStringW(L"Audio", L"PcmQueueTargetMs", L"20",
                              pcmQueueTargetMs, ARRAYSIZE(pcmQueueTargetMs),
                              path.c_str());
     GetPrivateProfileStringW(L"Audio", L"Volume", L"100", volume,
@@ -1624,6 +1668,9 @@ static void LoadSettings() {
                              path.c_str());
     GetPrivateProfileStringW(L"Video", L"BorderlessWindow", L"0", borderlessWindow,
                              ARRAYSIZE(borderlessWindow), path.c_str());
+    GetPrivateProfileStringW(L"Video", L"FullscreenCursor", L"AutoHide",
+                             fullscreenCursorMode,
+                             ARRAYSIZE(fullscreenCursorMode), path.c_str());
     GetPrivateProfileStringW(L"Window", L"Snap", L"1", windowSnap,
                              ARRAYSIZE(windowSnap), path.c_str());
     GetPrivateProfileStringW(L"Window", L"X", L"", windowX,
@@ -1730,12 +1777,9 @@ static void LoadSettings() {
     } else {
         g_settings.driftCorrection = DriftCorrectionMode::Off;
     }
-    // v0.13 and older implicitly used 20 ms with resampling and the first
-    // available 10 ms packet without it. Preserve that behavior when the new
-    // independent key is absent.
-    g_settings.pcmQueueTargetMs =
-        g_settings.driftCorrection == DriftCorrectionMode::Resample
-            ? 20 : kLowestPcmQueueMs;
+    // New installs favor a stable 20 ms app queue. An explicit saved value
+    // below always wins, so existing users keep their chosen latency target.
+    g_settings.pcmQueueTargetMs = kRecommendedPcmQueueMs;
     if (pcmQueueTargetMs[0]) {
         const int requestedQueueMs = static_cast<int>(
             wcstol(pcmQueueTargetMs, nullptr, 10));
@@ -1823,6 +1867,10 @@ static void LoadSettings() {
         static_cast<int>(wcstol(relativeWindowScale, nullptr, 10)),
         0, kRelativeScaleUnit);
     g_settings.borderlessWindow = (wcstol(borderlessWindow, nullptr, 10) != 0);
+    g_settings.fullscreenCursorMode =
+        _wcsicmp(fullscreenCursorMode, L"AlwaysVisible") == 0
+            ? FullscreenCursorMode::AlwaysVisible
+            : FullscreenCursorMode::AutoHide;
     g_settings.windowSnap = (wcstol(windowSnap, nullptr, 10) != 0);
     if (windowX[0] && windowY[0]) {
         g_settings.hasWindowPosition = true;
@@ -2011,6 +2059,11 @@ static void SaveSettings() {
                                relativeScaleVersion, path.c_str());
     WritePrivateProfileStringW(L"Video", L"BorderlessWindow",
                                g_settings.borderlessWindow ? L"1" : L"0", path.c_str());
+    WritePrivateProfileStringW(
+        L"Video", L"FullscreenCursor",
+        g_settings.fullscreenCursorMode == FullscreenCursorMode::AlwaysVisible
+            ? L"AlwaysVisible" : L"AutoHide",
+        path.c_str());
     WritePrivateProfileStringW(L"Window", L"Snap",
                                g_settings.windowSnap ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"Diagnostics", L"SaveLog",
@@ -6664,21 +6717,57 @@ constexpr int IDC_SETTINGS_SCALING = 2027;
 constexpr int IDC_SETTINGS_SKIP_STARTUP = 2028;
 constexpr int IDC_SETTINGS_VOLUME_BOOST = 2029;
 constexpr int IDC_SETTINGS_VOLUME_BOOST_HELP = 2030;
-constexpr int IDC_SETTINGS_ADVANCED_TOGGLE = 2031;
 constexpr int IDC_SETTINGS_AUDIO_ONLY = 2032;
 constexpr int IDC_SETTINGS_FORCE_HDR10 = 2033;
 constexpr int IDC_SETTINGS_FORCE_HDR10_HELP = 2034;
 constexpr int IDC_SETTINGS_UPDATE_CHECK = 2035;
 constexpr int IDC_SETTINGS_EXCLUSIVE_TEST = 2036;
+constexpr int IDC_SETTINGS_TAB = 2037;
+constexpr int IDC_SETTINGS_UPDATE_NOW = 2038;
+constexpr int IDC_SETTINGS_OPEN_LOG_FOLDER = 2039;
+constexpr int IDC_SETTINGS_FULLSCREEN_CURSOR = 2040;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
 constexpr UINT WM_CAPTURE_AUDIO_PROBE_COMPLETE = WM_APP + 76;
 constexpr UINT WM_UPDATE_CHECK_COMPLETE = WM_APP + 77;
+constexpr UINT WM_SETTINGS_UPDATE_CHECK_COMPLETE = WM_APP + 78;
 constexpr UINT WM_EXCLUSIVE_ENDPOINT_PROBE_COMPLETE = WM_APP + 79;
 constexpr UINT WM_EXCLUSIVE_SCAN_COMPLETE = WM_APP + 80;
 
+enum class SettingsTab : int {
+    Audio = 0,
+    VideoWindow = 1,
+    GuideDiagnostics = 2,
+    Updates = 3,
+};
+
+struct UpdateCheckResult {
+    bool success = false;
+    bool newer = false;
+    std::wstring latestTag;
+    std::wstring installerUrl;
+};
+
+static bool FetchLatestRelease(UpdateCheckResult& result);
+
 struct SettingsDialogState {
+    HWND tabControl = nullptr;
+    HWND guideText = nullptr;
+    HWND guideShortcutsTitle = nullptr;
+    HWND guideDiagnosticsTitle = nullptr;
+    HWND guideDiagnosticsText = nullptr;
+    HWND guideLogFolderButton = nullptr;
+    HWND updateTitle = nullptr;
+    HWND updateText = nullptr;
+    HWND updateNowButton = nullptr;
+    HWND updateStatus = nullptr;
+    HWND audioOutputSection = nullptr;
+    HWND audioPlaybackSection = nullptr;
+    HWND audioStabilitySection = nullptr;
+    HWND videoCaptureSection = nullptr;
+    HWND videoDisplaySection = nullptr;
+    HWND videoWindowSection = nullptr;
     HWND languageLabel = nullptr;
     HWND languageCombo = nullptr;
     HWND audioLabel = nullptr;
@@ -6693,6 +6782,7 @@ struct SettingsDialogState {
     HWND pcmQueueHelp = nullptr;
     HWND presentationLabel = nullptr;
     HWND presentationHelp = nullptr;
+    HWND fullscreenCursorLabel = nullptr;
     HWND scalingLabel = nullptr;
     HWND videoLabel = nullptr;
     HWND captureDeviceLabel = nullptr;
@@ -6714,6 +6804,7 @@ struct SettingsDialogState {
     HWND audioStatus = nullptr;
     HWND exclusiveTestButton = nullptr;
     HWND presentationCombo = nullptr;
+    HWND fullscreenCursorCombo = nullptr;
     HWND scalingCombo = nullptr;
     HWND videoCombo = nullptr;
     HWND captureDeviceCombo = nullptr;
@@ -6731,16 +6822,18 @@ struct SettingsDialogState {
     HWND skipStartupHint = nullptr;
     HWND checkForUpdatesCheck = nullptr;
     HWND versionWatermark = nullptr;
-    HWND advancedToggle = nullptr;
     HWND startButton = nullptr;
     HWND cancelButton = nullptr;
     HWND tooltipWindow = nullptr;
     HWND activeTooltipTarget = nullptr;
     std::vector<HFONT> uiFonts;
     std::thread probeThread;
+    std::thread updateCheckThread;
     std::thread exclusiveProbeThread;
     std::thread captureAudioProbeThread;
     std::atomic<bool> probeReady{false};
+    std::atomic<bool> updateCheckStop{false};
+    std::atomic<bool> updateCheckRunning{false};
     std::atomic<bool> exclusiveProbeStop{false};
     std::atomic<bool> exclusiveScanRunning{false};
     std::atomic<bool> captureAudioProbeReady{false};
@@ -6762,7 +6855,7 @@ struct SettingsDialogState {
     int exclusiveVerifiedBufferMs = 0;
     bool bufferItemsAreSharedFrames = false;
     bool asioAvailable = false;
-    bool showAdvanced = false;
+    SettingsTab activeTab = SettingsTab::Audio;
     bool accepted = false;
 };
 
@@ -6772,12 +6865,11 @@ static int SettingsPixels(int dips, UINT dpi) {
 }
 
 static constexpr int kSettingsClientWidthDip = 950;
-static constexpr int kSettingsBasicClientHeightDip = 510;
-static constexpr int kSettingsAdvancedClientHeightDip = 690;
+static constexpr int kSettingsTabbedClientHeightDip = 630;
 
 static int SettingsClientHeightDip(const SettingsDialogState* state) {
-    return state && state->showAdvanced
-        ? kSettingsAdvancedClientHeightDip : kSettingsBasicClientHeightDip;
+    (void)state;
+    return kSettingsTabbedClientHeightDip;
 }
 
 static SIZE SettingsDialogOuterSize(HWND hwnd, UINT dpi,
@@ -6820,134 +6912,178 @@ static void ApplySettingsFont(SettingsDialogState* state, HWND hwnd,
     state->uiFonts.push_back(font);
     EnumChildWindows(hwnd, SetSettingsChildFont,
                      reinterpret_cast<LPARAM>(font));
+
+    // Section labels are deliberately subtle, but bold enough to make the
+    // vertically grouped audio controls scannable at a glance.
+    HFONT sectionFont = CreateFontW(
+        -MulDiv(9, dpi ? dpi : USER_DEFAULT_SCREEN_DPI, 72),
+        0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    if (!sectionFont) return;
+    state->uiFonts.push_back(sectionFont);
+    for (HWND control : {state->audioOutputSection,
+                         state->audioPlaybackSection,
+                         state->audioStabilitySection,
+                         state->videoCaptureSection,
+                         state->videoDisplaySection,
+                         state->videoWindowSection,
+                         state->guideShortcutsTitle,
+                         state->guideDiagnosticsTitle}) {
+        if (control) {
+            SendMessageW(control, WM_SETFONT,
+                         reinterpret_cast<WPARAM>(sectionFont), FALSE);
+        }
+    }
+
+}
+
+// Checkbox captions vary substantially between Korean and English.  Measure
+// the actual current UI font so a neighbouring help button stays attached to
+// its option at every DPI instead of relying on a fragile hard-coded x value.
+static int SettingsCheckboxWidthDip(HWND checkbox, UINT dpi) {
+    if (!checkbox) return 250;
+    wchar_t text[512]{};
+    GetWindowTextW(checkbox, text, ARRAYSIZE(text));
+    HDC hdc = GetDC(checkbox);
+    if (!hdc) return 250;
+    const HFONT font = reinterpret_cast<HFONT>(
+        SendMessageW(checkbox, WM_GETFONT, 0, 0));
+    const HGDIOBJ oldFont = font ? SelectObject(hdc, font) : nullptr;
+    SIZE size{};
+    GetTextExtentPoint32W(hdc, text, static_cast<int>(wcslen(text)), &size);
+    if (oldFont) SelectObject(hdc, oldFont);
+    ReleaseDC(checkbox, hdc);
+    const int textWidthDip = MulDiv(
+        size.cx, USER_DEFAULT_SCREEN_DPI,
+        dpi ? dpi : USER_DEFAULT_SCREEN_DPI);
+    // Checkbox glyph plus caption.  Keeping the HWND no wider than this is
+    // important: a wide checkbox would overlap a nearby help button and
+    // steal its clicks even when the button looks visually separate.
+    return std::min(18 + textWidthDip, 430);
 }
 
 static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     if (!state) return;
-    if (!state->showAdvanced) {
-        const bool pixelPerfect = state->pixelCheck &&
-            SendMessageW(state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        const bool relativeSize = state->relativeSizeCheck &&
-            SendMessageW(state->relativeSizeCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        const int relativeY = pixelPerfect ? 346 : 382;
-        const bool showRelativeWarning = pixelPerfect && relativeSize;
-        const int borderlessY = showRelativeWarning
-            ? relativeY + 64 : relativeY + 34;
+    // The dialog is deliberately tabbed rather than expanded vertically. This
+    // keeps the startup view small while leaving every setting reachable.
+    PlaceSettingsControl(state->tabControl, 24, 16, 901, 31, dpi);
 
-        PlaceSettingsControl(state->audioLabel, 24, 24, 160, 24, dpi);
-        PlaceSettingsControl(state->audioCombo, 195, 20, 280, 120, dpi);
-        PlaceSettingsControl(state->audioOutputLabel, 24, 68, 160, 24, dpi);
-        PlaceSettingsControl(state->audioOutputCombo, 195, 64, 280, 220, dpi);
-        // Keep background mute beside the audio choices. Starting immediately
-        // on the next launch is an application-behavior preference, so it
-        // stays in the lower settings section with its explanatory text.
-        PlaceSettingsControl(state->muteBackgroundCheck, 24, 112, 451, 28, dpi);
-        PlaceSettingsControl(state->audioOnlyCheck, 24, 146, 451, 28, dpi);
-        // Leave a deliberate gap before application behavior preferences so
-        // language and quick start read as a separate category from audio.
-        PlaceSettingsControl(state->languageLabel, 24, 180, 160, 24, dpi);
-        PlaceSettingsControl(state->languageCombo, 195, 176, 280, 120, dpi);
-        PlaceSettingsControl(state->skipStartupCheck, 24, 224, 451, 28, dpi);
-        PlaceSettingsControl(state->skipStartupHint, 44, 252, 431, 42, dpi);
-        PlaceSettingsControl(state->checkForUpdatesCheck, 24, 296, 451, 28, dpi);
-        PlaceSettingsControl(state->advancedToggle, 24, 336, 190, 28, dpi);
-        PlaceSettingsControl(state->versionWatermark, 24, 466, 260, 20, dpi);
+    // Global preferences remain fixed below every tab, especially direct-start.
+    // Leave a clear visual break after the PCM-buffer group. Language and
+    // quick-start are application preferences, not audio-tuning controls.
+    PlaceSettingsControl(state->languageLabel, 24, 500, 160, 24, dpi);
+    PlaceSettingsControl(state->languageCombo, 195, 496, 280, 120, dpi);
+    PlaceSettingsControl(state->skipStartupCheck, 24, 540, 451, 28, dpi);
+    PlaceSettingsControl(state->skipStartupHint, 44, 568, 500, 22, dpi);
+    PlaceSettingsControl(state->versionWatermark, 24, 602, 260, 20, dpi);
+    PlaceSettingsControl(state->startButton, 745, 568, 80, 30, dpi);
+    PlaceSettingsControl(state->cancelButton, 835, 568, 80, 30, dpi);
 
-        PlaceSettingsControl(state->presentationLabel, 505, 24, 95, 24, dpi);
-        PlaceSettingsControl(state->presentationHelp, 604, 20, 24, 24, dpi);
-        PlaceSettingsControl(state->presentationCombo, 630, 20, 295, 120, dpi);
-        PlaceSettingsControl(state->captureDeviceLabel, 505, 68, 120, 24, dpi);
-        PlaceSettingsControl(state->captureDeviceCombo, 630, 64, 295, 220, dpi);
-        PlaceSettingsControl(state->captureAudioDeviceLabel, 505, 112, 120, 24, dpi);
-        PlaceSettingsControl(state->captureAudioDeviceCombo, 630, 108, 295, 220, dpi);
-        PlaceSettingsControl(state->captureAudioStatus, 630, 112, 295, 24, dpi);
-        PlaceSettingsControl(state->videoLabel, 505, 156, 120, 24, dpi);
-        PlaceSettingsControl(state->videoCombo, 630, 152, 295, 120, dpi);
-        PlaceSettingsControl(state->pixelFormatLabel, 505, 200, 120, 24, dpi);
-        PlaceSettingsControl(state->pixelFormatCombo, 630, 196, 295, 160, dpi);
-        PlaceSettingsControl(state->frameRateLabel, 505, 244, 120, 24, dpi);
-        PlaceSettingsControl(state->frameRateCombo, 630, 240, 295, 200, dpi);
-        PlaceSettingsControl(state->videoCapabilityStatus, 505, 278, 420, 24, dpi);
-        PlaceSettingsControl(state->pixelCheck, 505, 312, 420, 28, dpi);
-        PlaceSettingsControl(state->scalingLabel, 505, 346, 120, 24, dpi);
-        PlaceSettingsControl(state->scalingCombo, 630, 342, 295, 120, dpi);
-        PlaceSettingsControl(state->relativeSizeCheck, 505, relativeY, 420, 28, dpi);
-        PlaceSettingsControl(state->relativeSizeWarning, 525, relativeY + 28,
-                             400, 28, dpi);
-        PlaceSettingsControl(state->borderlessCheck, 505, borderlessY, 420, 28, dpi);
-        PlaceSettingsControl(state->startButton, 745, 454, 80, 30, dpi);
-        PlaceSettingsControl(state->cancelButton, 835, 454, 80, 30, dpi);
-        return;
-    }
+    // Audio tab: output choice first, then everyday playback controls, then
+    // the latency/stability controls that usually only need adjustment after
+    // diagnostics report a problem.
+    PlaceSettingsControl(state->audioOutputSection, 34, 58, 200, 20, dpi);
+    PlaceSettingsControl(state->audioLabel, 34, 80, 160, 24, dpi);
+    PlaceSettingsControl(state->audioCombo, 205, 76, 360, 120, dpi);
+    // Exclusive endpoint verification configures the selected output mode,
+    // so keep its explicit recheck action beside that mode instead of making
+    // it look like a generic status-row operation.
+    // Match the visible combobox field (rather than its dropdown height) so
+    // the recheck action reads as part of the output-mode row.
+    PlaceSettingsControl(state->exclusiveTestButton, 575, 76, 185, 22, dpi);
+    PlaceSettingsControl(state->audioOutputLabel, 34, 116, 160, 24, dpi);
+    PlaceSettingsControl(state->audioOutputCombo, 205, 112, 680, 220, dpi);
+    PlaceSettingsControl(state->bufferLabel, 34, 152, 160, 24, dpi);
+    PlaceSettingsControl(state->bufferCombo, 205, 148, 280, 180, dpi);
+    PlaceSettingsControl(state->audioStatus, 34, 188, 580, 24, dpi);
+    PlaceSettingsControl(state->audioPlaybackSection, 34, 222, 250, 20, dpi);
+    PlaceSettingsControl(state->volumeHudLabel, 34, 246, 160, 24, dpi);
+    PlaceSettingsControl(state->volumeHudCombo, 205, 242, 280, 160, dpi);
+    const int volumeBoostWidth = SettingsCheckboxWidthDip(
+        state->volumeBoostCheck, dpi);
+    PlaceSettingsControl(state->volumeBoostCheck, 34, 282, volumeBoostWidth,
+                         28, dpi);
+    PlaceSettingsControl(state->volumeBoostHelp,
+                         34 + volumeBoostWidth + 10,
+                         284, 24, 24, dpi);
+    PlaceSettingsControl(state->muteBackgroundCheck, 34, 318, 500, 28, dpi);
+    PlaceSettingsControl(state->audioOnlyCheck, 34, 354, 500, 28, dpi);
+    PlaceSettingsControl(state->audioStabilitySection, 34, 392, 250, 20, dpi);
+    PlaceSettingsControl(state->driftLabel, 34, 416, 160, 24, dpi);
+    PlaceSettingsControl(state->driftHelp, 170, 412, 24, 24, dpi);
+    PlaceSettingsControl(state->driftCombo, 205, 412, 360, 120, dpi);
+    PlaceSettingsControl(state->pcmQueueLabel, 34, 452, 160, 24, dpi);
+    PlaceSettingsControl(state->pcmQueueHelp, 170, 448, 24, 24, dpi);
+    PlaceSettingsControl(state->pcmQueueCombo, 205, 448, 280, 140, dpi);
 
-    PlaceSettingsControl(state->audioLabel, 24, 24, 160, 24, dpi);
-    PlaceSettingsControl(state->audioCombo, 195, 20, 280, 120, dpi);
-    PlaceSettingsControl(state->audioOutputLabel, 24, 68, 160, 24, dpi);
-    PlaceSettingsControl(state->audioOutputCombo, 195, 64, 280, 220, dpi);
-    PlaceSettingsControl(state->bufferLabel, 24, 112, 160, 24, dpi);
-    PlaceSettingsControl(state->bufferCombo, 195, 108, 280, 180, dpi);
-    PlaceSettingsControl(state->audioStatus, 24, 148, 300, 28, dpi);
-    PlaceSettingsControl(state->exclusiveTestButton, 332, 144, 143, 28, dpi);
-    PlaceSettingsControl(state->volumeHudLabel, 24, 190, 160, 24, dpi);
-    PlaceSettingsControl(state->volumeHudCombo, 195, 186, 280, 160, dpi);
-    PlaceSettingsControl(state->volumeBoostCheck, 24, 230, 400, 28, dpi);
-    PlaceSettingsControl(state->volumeBoostHelp, 438, 226, 24, 24, dpi);
-    PlaceSettingsControl(state->muteBackgroundCheck, 24, 274, 230, 28, dpi);
-    PlaceSettingsControl(state->audioOnlyCheck, 260, 274, 215, 28, dpi);
-    PlaceSettingsControl(state->driftLabel, 24, 318, 140, 24, dpi);
-    PlaceSettingsControl(state->driftHelp, 168, 314, 24, 24, dpi);
-    PlaceSettingsControl(state->driftCombo, 195, 314, 280, 120, dpi);
-    PlaceSettingsControl(state->pcmQueueLabel, 24, 362, 160, 24, dpi);
-    PlaceSettingsControl(state->pcmQueueHelp, 168, 358, 24, 24, dpi);
-    PlaceSettingsControl(state->pcmQueueCombo, 195, 358, 280, 140, dpi);
-    // Keep application behavior visually separate from the audio controls.
-    PlaceSettingsControl(state->languageLabel, 24, 412, 160, 24, dpi);
-    PlaceSettingsControl(state->languageCombo, 195, 408, 280, 120, dpi);
-    PlaceSettingsControl(state->skipStartupCheck, 24, 456, 451, 28, dpi);
-    PlaceSettingsControl(state->skipStartupHint, 44, 484, 431, 42, dpi);
-    PlaceSettingsControl(state->checkForUpdatesCheck, 24, 530, 451, 28, dpi);
-    PlaceSettingsControl(state->advancedToggle, 24, 566, 190, 28, dpi);
-    PlaceSettingsControl(state->versionWatermark, 24, 640, 260, 20, dpi);
-
+    // Video & window tab: capture format on the left; how it is shown and
+    // how the viewer window behaves on the right. HDR stays last because it
+    // is an experimental override rather than a normal display choice.
+    // Leave a real breathing gap below each section heading.  The previous
+    // first-row placement was inherited from the no-heading layout and made
+    // headings read like part of the option label.
+    PlaceSettingsControl(state->captureDeviceLabel, 34, 84, 140, 24, dpi);
+    PlaceSettingsControl(state->videoCaptureSection, 34, 58, 140, 20, dpi);
+    PlaceSettingsControl(state->captureDeviceCombo, 190, 80, 270, 220, dpi);
+    PlaceSettingsControl(state->captureAudioDeviceLabel, 34, 124, 140, 24, dpi);
+    PlaceSettingsControl(state->captureAudioDeviceCombo, 190, 120, 270, 220, dpi);
+    PlaceSettingsControl(state->captureAudioStatus, 190, 124, 300, 24, dpi);
+    PlaceSettingsControl(state->videoLabel, 34, 164, 140, 24, dpi);
+    PlaceSettingsControl(state->videoCombo, 190, 160, 270, 120, dpi);
+    PlaceSettingsControl(state->pixelFormatLabel, 34, 204, 140, 24, dpi);
+    PlaceSettingsControl(state->pixelFormatCombo, 190, 200, 270, 160, dpi);
+    PlaceSettingsControl(state->frameRateLabel, 34, 244, 140, 24, dpi);
+    PlaceSettingsControl(state->frameRateCombo, 190, 240, 270, 200, dpi);
+    PlaceSettingsControl(state->videoCapabilityStatus, 34, 278, 430, 90, dpi);
+    PlaceSettingsControl(state->presentationLabel, 505, 84, 95, 24, dpi);
+    PlaceSettingsControl(state->videoDisplaySection, 505, 58, 140, 20, dpi);
+    PlaceSettingsControl(state->presentationHelp, 604, 80, 24, 24, dpi);
+    PlaceSettingsControl(state->presentationCombo, 630, 80, 255, 120, dpi);
+    PlaceSettingsControl(state->pixelCheck, 505, 120, 380, 28, dpi);
+    PlaceSettingsControl(state->scalingLabel, 505, 160, 120, 24, dpi);
+    PlaceSettingsControl(state->scalingCombo, 630, 156, 255, 120, dpi);
+    // The controls from here onward affect the viewer window itself rather
+    // than captured video format or rendering policy.  When Pixel-perfect is
+    // enabled the scaling row is hidden, so pull this section up by one grid
+    // row instead of leaving an arbitrary empty gap.
     const bool pixelPerfect = state->pixelCheck &&
         SendMessageW(state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    const bool relativeSize = state->relativeSizeCheck &&
-        SendMessageW(state->relativeSizeCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    const bool showRelativeWarning = pixelPerfect && relativeSize;
-    const int borderlessY = showRelativeWarning ? 482 : 446;
-    const int snapY = borderlessY + 34;
+    const int windowSectionY = pixelPerfect ? 168 : 204;
+    const int windowOptionY = windowSectionY + 24;
+    PlaceSettingsControl(state->videoWindowSection, 505, windowSectionY,
+                         140, 20, dpi);
+    PlaceSettingsControl(state->relativeSizeCheck, 505, windowOptionY,
+                         400, 28, dpi);
+    PlaceSettingsControl(state->relativeSizeWarning, 525, windowOptionY + 28,
+                         370, 28, dpi);
+    PlaceSettingsControl(state->borderlessCheck, 505, windowOptionY + 68,
+                         400, 28, dpi);
+    PlaceSettingsControl(state->windowSnapCheck, 505, windowOptionY + 104,
+                         400, 28, dpi);
+    PlaceSettingsControl(state->fullscreenCursorLabel, 505,
+                         windowOptionY + 144, 120, 24, dpi);
+    PlaceSettingsControl(state->fullscreenCursorCombo, 630,
+                         windowOptionY + 140, 255, 120, dpi);
+    // P010 is an input-format override, so keep its optional HDR fallback
+    // immediately below the detected-format list instead of mixing it with
+    // presentation and window behavior.
+    PlaceSettingsControl(state->forceHdr10Check, 34, 374, 360, 28, dpi);
+    PlaceSettingsControl(state->forceHdr10Help, 402, 370, 24, 24, dpi);
 
-    PlaceSettingsControl(state->presentationLabel, 505, 24, 95, 24, dpi);
-    PlaceSettingsControl(state->presentationHelp, 604, 20, 24, 24, dpi);
-    PlaceSettingsControl(state->presentationCombo, 630, 20, 295, 120, dpi);
-    PlaceSettingsControl(state->captureDeviceLabel, 505, 68, 120, 24, dpi);
-    PlaceSettingsControl(state->captureDeviceCombo, 630, 64, 295, 220, dpi);
-    PlaceSettingsControl(state->captureAudioDeviceLabel, 505, 112, 120, 24, dpi);
-    PlaceSettingsControl(state->captureAudioDeviceCombo, 630, 108, 295, 220, dpi);
-    PlaceSettingsControl(state->captureAudioStatus, 630, 112, 295, 24, dpi);
-    PlaceSettingsControl(state->videoLabel, 505, 156, 120, 24, dpi);
-    PlaceSettingsControl(state->videoCombo, 630, 152, 295, 120, dpi);
-    PlaceSettingsControl(state->pixelFormatLabel, 505, 200, 120, 24, dpi);
-    PlaceSettingsControl(state->pixelFormatCombo, 630, 196, 295, 160, dpi);
-    PlaceSettingsControl(state->frameRateLabel, 505, 244, 120, 24, dpi);
-    PlaceSettingsControl(state->frameRateCombo, 630, 240, 295, 200, dpi);
-    PlaceSettingsControl(state->videoCapabilityStatus, 505, 278, 420, 24, dpi);
-    // Match the compact layout: choose pixel-perfect first, then its
-    // applicable scaling method immediately underneath.
-    PlaceSettingsControl(state->pixelCheck, 505, 310, 420, 28, dpi);
-    PlaceSettingsControl(state->forceHdr10Check, 505, 378, 390, 28, dpi);
-    PlaceSettingsControl(state->forceHdr10Help, 900, 374, 24, 24, dpi);
-    PlaceSettingsControl(state->scalingLabel, 505, 344, 120, 24, dpi);
-    PlaceSettingsControl(state->scalingCombo, 630, 340, 295, 120, dpi);
-    PlaceSettingsControl(state->relativeSizeCheck, 505, 412, 420, 28, dpi);
-    PlaceSettingsControl(state->relativeSizeWarning, 525, 440, 400, 36, dpi);
-    // Window behavior stays together; diagnostics are a separate group below.
-    PlaceSettingsControl(state->borderlessCheck, 505, borderlessY, 420, 28, dpi);
-    PlaceSettingsControl(state->windowSnapCheck, 505, snapY, 420, 28, dpi);
-    PlaceSettingsControl(state->saveLogCheck, 505, 550, 420, 28, dpi);
-    PlaceSettingsControl(state->showConsoleCheck, 505, 584, 420, 28, dpi);
-    PlaceSettingsControl(state->startButton, 745, 650, 80, 30, dpi);
-    PlaceSettingsControl(state->cancelButton, 835, 650, 80, 30, dpi);
+    // Guide and update tabs.
+    PlaceSettingsControl(state->guideShortcutsTitle, 34, 58, 280, 20, dpi);
+    PlaceSettingsControl(state->guideText, 34, 84, 400, 220, dpi);
+    PlaceSettingsControl(state->guideDiagnosticsTitle, 505, 58, 320, 20, dpi);
+    PlaceSettingsControl(state->guideDiagnosticsText, 505, 84, 360, 70, dpi);
+    PlaceSettingsControl(state->saveLogCheck, 505, 170, 360, 28, dpi);
+    PlaceSettingsControl(state->showConsoleCheck, 505, 206, 360, 28, dpi);
+    PlaceSettingsControl(state->guideLogFolderButton, 505, 248, 165, 26, dpi);
+    PlaceSettingsControl(state->updateTitle, 34, 76, 400, 24, dpi);
+    PlaceSettingsControl(state->updateText, 34, 110, 760, 64, dpi);
+    PlaceSettingsControl(state->checkForUpdatesCheck, 34, 190, 500, 28, dpi);
+    PlaceSettingsControl(state->updateNowButton, 34, 230, 185, 30, dpi);
+    PlaceSettingsControl(state->updateStatus, 235, 234, 650, 24, dpi);
 }
 
 static void SetSettingsControlVisible(HWND control, bool visible) {
@@ -6956,11 +7092,17 @@ static void SetSettingsControlVisible(HWND control, bool visible) {
     EnableWindow(control, visible ? TRUE : FALSE);
 }
 
+static VideoPixelFormat SelectedPixelFormat(
+    const SettingsDialogState* state);
+static bool SettingsUsesExclusiveMode(
+    const SettingsDialogState* state);
+
 static void UpdateScalingControlVisibility(SettingsDialogState* state) {
     if (!state) return;
     const bool pixelPerfect = state->pixelCheck &&
         SendMessageW(state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    const bool visible = state->showAdvanced || !pixelPerfect;
+    const bool visible = state->activeTab == SettingsTab::VideoWindow &&
+                         !pixelPerfect;
     SetSettingsControlVisible(state->scalingLabel, visible);
     SetSettingsControlVisible(state->scalingCombo, visible);
 }
@@ -6974,32 +7116,120 @@ static void UpdateWindowBehaviorVisibility(SettingsDialogState* state) {
 
     // These are everyday window-behavior preferences, not advanced tuning.
     // Only show the caveat when the currently selected combination needs it.
-    SetSettingsControlVisible(state->relativeSizeCheck, true);
-    SetSettingsControlVisible(state->borderlessCheck, true);
+    const bool visible = state->activeTab == SettingsTab::VideoWindow;
+    SetSettingsControlVisible(state->relativeSizeCheck, visible);
+    SetSettingsControlVisible(state->borderlessCheck, visible);
+    SetSettingsControlVisible(state->fullscreenCursorLabel, visible);
+    SetSettingsControlVisible(state->fullscreenCursorCombo, visible);
     SetSettingsControlVisible(state->relativeSizeWarning,
-                              pixelPerfect && relativeSize);
+                              visible && pixelPerfect && relativeSize);
 }
 
 static void UpdateAdvancedControlVisibility(SettingsDialogState* state) {
     if (!state) return;
-    const bool visible = state->showAdvanced;
-    for (HWND control : {
-             state->bufferLabel, state->bufferCombo, state->audioStatus,
-             state->exclusiveTestButton,
-             state->volumeHudLabel, state->volumeHudCombo,
-             state->volumeBoostCheck, state->volumeBoostHelp,
-             state->driftLabel, state->driftHelp, state->driftCombo,
-             state->pcmQueueLabel, state->pcmQueueHelp, state->pcmQueueCombo,
-             state->forceHdr10Check, state->forceHdr10Help,
-             state->windowSnapCheck, state->saveLogCheck,
-             state->showConsoleCheck}) {
-        SetSettingsControlVisible(control, visible);
+    const bool audio = state->activeTab == SettingsTab::Audio;
+    const bool video = state->activeTab == SettingsTab::VideoWindow;
+    const bool guide = state->activeTab == SettingsTab::GuideDiagnostics;
+    const bool updates = state->activeTab == SettingsTab::Updates;
+    for (HWND control : {state->tabControl, state->languageLabel,
+                         state->languageCombo, state->skipStartupCheck,
+                         state->skipStartupHint, state->versionWatermark,
+                         state->startButton, state->cancelButton}) {
+        SetSettingsControlVisible(control, true);
     }
+    for (HWND control : {state->audioOutputSection,
+                         state->audioPlaybackSection,
+                         state->audioStabilitySection,
+                         state->audioLabel, state->audioCombo,
+                         state->audioOutputLabel, state->audioOutputCombo,
+                         state->bufferLabel, state->bufferCombo,
+                         state->audioStatus,
+                         state->volumeHudLabel, state->volumeHudCombo,
+                         state->volumeBoostCheck, state->volumeBoostHelp,
+                         state->muteBackgroundCheck, state->audioOnlyCheck,
+                         state->driftLabel, state->driftHelp, state->driftCombo,
+                         state->pcmQueueLabel, state->pcmQueueHelp,
+                         state->pcmQueueCombo}) {
+        SetSettingsControlVisible(control, audio);
+    }
+    // The endpoint recheck belongs only to WASAPI Exclusive.  In Shared and
+    // ASIO modes it is both irrelevant and misleading, even on the Audio tab.
+    SetSettingsControlVisible(state->exclusiveTestButton,
+                              audio && SettingsUsesExclusiveMode(state));
+    for (HWND control : {state->videoCaptureSection,
+                         state->videoDisplaySection,
+                         state->videoWindowSection,
+                         state->presentationLabel, state->presentationHelp,
+                         state->presentationCombo, state->captureDeviceLabel,
+                         state->captureDeviceCombo,
+                         state->captureAudioDeviceLabel, state->videoLabel,
+                         state->videoCombo, state->pixelFormatLabel,
+                         state->pixelFormatCombo, state->frameRateLabel,
+                         state->frameRateCombo, state->videoCapabilityStatus,
+                         state->pixelCheck, state->windowSnapCheck,
+                         state->fullscreenCursorLabel,
+                         state->fullscreenCursorCombo}) {
+        SetSettingsControlVisible(control, video);
+    }
+    // This row has two mutually exclusive controls: the device picker for a
+    // separate capture endpoint, or the short "built-in audio" status. Keep
+    // its existing video-tab choice intact; hide both together off-tab.
+    if (!video) {
+        SetSettingsControlVisible(state->captureAudioDeviceCombo, false);
+        SetSettingsControlVisible(state->captureAudioStatus, false);
+    }
+    const bool p010Selected = SelectedPixelFormat(state) ==
+        VideoPixelFormat::P010;
+    SetSettingsControlVisible(state->forceHdr10Check, video && p010Selected);
+    SetSettingsControlVisible(state->forceHdr10Help, video && p010Selected);
+    SetSettingsControlVisible(state->guideShortcutsTitle, guide);
+    SetSettingsControlVisible(state->guideText, guide);
+    SetSettingsControlVisible(state->guideDiagnosticsTitle, guide);
+    SetSettingsControlVisible(state->guideDiagnosticsText, guide);
+    SetSettingsControlVisible(state->guideLogFolderButton, guide);
+    SetSettingsControlVisible(state->saveLogCheck, guide);
+    SetSettingsControlVisible(state->showConsoleCheck, guide);
+    SetSettingsControlVisible(state->updateTitle, updates);
+    SetSettingsControlVisible(state->updateText, updates);
+    SetSettingsControlVisible(state->checkForUpdatesCheck, updates);
+    SetSettingsControlVisible(state->updateNowButton, updates);
+    SetSettingsControlVisible(state->updateStatus, updates);
     UpdateScalingControlVisibility(state);
     UpdateWindowBehaviorVisibility(state);
-    SetWindowTextW(state->advancedToggle,
-                   UI_TEXT(visible ? L"⌄ 고급 설정 숨기기"
-                                   : L"▸ 고급 설정"));
+}
+
+static void SetSettingsUpdateStatus(SettingsDialogState* state,
+                                    const std::wstring& text) {
+    if (!state || !state->updateStatus) return;
+    SetWindowTextW(state->updateStatus, text.c_str());
+}
+
+static void StartSettingsUpdateCheck(SettingsDialogState* state, HWND hwnd) {
+    if (!state || !hwnd ||
+        state->updateCheckRunning.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    // A completed worker remains joinable until its result message has been
+    // handled. Join it here before starting the next manual request.
+    if (state->updateCheckThread.joinable()) {
+        state->updateCheckThread.join();
+    }
+    state->updateCheckStop.store(false, std::memory_order_release);
+    SetSettingsUpdateStatus(state, UI_TEXT(L"최신 버전 확인 중…"));
+    EnableWindow(state->updateNowButton, FALSE);
+    state->updateCheckThread = std::thread([state, hwnd]() {
+        UpdateCheckResult result;
+        FetchLatestRelease(result);
+        if (state->updateCheckStop.load(std::memory_order_acquire) ||
+            !IsWindow(hwnd)) {
+            return;
+        }
+        auto* message = new UpdateCheckResult(std::move(result));
+        if (!PostMessageW(hwnd, WM_SETTINGS_UPDATE_CHECK_COMPLETE, 0,
+                          reinterpret_cast<LPARAM>(message))) {
+            delete message;
+        }
+    });
 }
 
 static void TrackSettingsTooltip(HWND target, HWND tooltip, bool active) {
@@ -7414,6 +7644,13 @@ static void UpdateExclusiveProbeControl(SettingsDialogState* state) {
     const bool running = state->exclusiveScanRunning.load(
         std::memory_order_acquire);
     const bool supportedMode = SettingsUsesExclusiveMode(state);
+    const bool visible = state->activeTab == SettingsTab::Audio &&
+                         supportedMode;
+    // Handle mode changes directly as well as tab changes.  Otherwise a
+    // button hidden while Shared was selected can remain hidden after the
+    // user switches to Exclusive without leaving the tab.
+    SetSettingsControlVisible(state->exclusiveTestButton, visible);
+    if (!visible) return;
     EnableWindow(state->exclusiveTestButton,
                  supportedMode && !running ? TRUE : FALSE);
     SetWindowTextW(state->exclusiveTestButton,
@@ -7680,6 +7917,8 @@ static void UpdateCaptureAudioSelectionUi(SettingsDialogState* state) {
         return;
     }
     const bool explicitSeparateDevice = !SelectedCaptureAudioDeviceId(state).empty();
+    const bool onVideoTab =
+        state->activeTab == SettingsTab::VideoWindow;
     const InternalCaptureAudioState probeState =
         state->captureAudioProbeReady.load(std::memory_order_acquire)
             ? state->captureAudioProbe.state
@@ -7690,13 +7929,13 @@ static void UpdateCaptureAudioSelectionUi(SettingsDialogState* state) {
     if (explicitSeparateDevice ||
         probeState == InternalCaptureAudioState::SeparateDeviceNeeded ||
         probeState == InternalCaptureAudioState::Unknown) {
-        SetSettingsControlVisible(state->captureAudioDeviceCombo, true);
+        SetSettingsControlVisible(state->captureAudioDeviceCombo, onVideoTab);
         SetSettingsControlVisible(state->captureAudioStatus, false);
         return;
     }
 
     SetSettingsControlVisible(state->captureAudioDeviceCombo, false);
-    SetSettingsControlVisible(state->captureAudioStatus, true);
+    SetSettingsControlVisible(state->captureAudioStatus, onVideoTab);
     if (probeState == InternalCaptureAudioState::Available) {
         SetWindowTextW(state->captureAudioStatus,
                        UI_TEXT(L"영상 장치 내부 오디오 감지됨 · 자동 사용"));
@@ -7773,7 +8012,7 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
     } else if (!supported) {
         message = UI_TEXT(L"지원 모드 없음: 다른 장치 또는 해상도를 선택하세요.");
     } else {
-        message = UI_TEXT(L"자동 인식: ");
+        message = IsEnglishUi() ? L"Detected:\r\n" : L"자동 인식:\r\n";
         // Do not hide MJPEG merely because a device advertises an unusably
         // slow raw mode. A raw mode must reach at least 30 fps before it takes
         // exclusive priority in the normal selector.
@@ -7797,9 +8036,9 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
             std::sort(frameRates.begin(), frameRates.end(), std::greater<int>());
             frameRates.erase(std::unique(frameRates.begin(), frameRates.end()),
                              frameRates.end());
-            if (!firstFormat) message += L"  ·  ";
+            if (!firstFormat) message += L"\r\n";
             message += PixelFormatName(format);
-            message += L" ";
+            message += L"  ";
             for (size_t i = 0; i < frameRates.size(); ++i) {
                 if (i != 0) message += L"/";
                 message += std::to_wstring(frameRates[i]);
@@ -7949,6 +8188,8 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->presentationCombo, CB_GETCURSEL, 0, 0);
         const LRESULT scalingIndex = SendMessageW(
             state->scalingCombo, CB_GETCURSEL, 0, 0);
+        const LRESULT fullscreenCursorIndex = SendMessageW(
+            state->fullscreenCursorCombo, CB_GETCURSEL, 0, 0);
         const LRESULT volumeHudIndex = SendMessageW(
             state->volumeHudCombo, CB_GETCURSEL, 0, 0);
         const LRESULT driftIndex = SendMessageW(
@@ -7992,6 +8233,9 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
                                           : PresentationMode::AllowTearing;
         g_settings.scalingMode = scalingIndex == 1
             ? ScalingMode::Sharp : ScalingMode::Smooth;
+        g_settings.fullscreenCursorMode = fullscreenCursorIndex == 1
+            ? FullscreenCursorMode::AlwaysVisible
+            : FullscreenCursorMode::AutoHide;
         g_settings.wasapiBufferMs = state->selectedBufferMs;
         if (volumeHudIndex >= 0 && volumeHudIndex <= 3) {
             g_settings.volumeHudPosition =
@@ -8061,8 +8305,12 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->muteBackgroundCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.audioOnly = SendMessageW(
             state->audioOnlyCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        g_settings.forceHdr10 = SendMessageW(
-            state->forceHdr10Check, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        // The override only has meaning on an explicit P010 selection. Clear
+        // any older saved value when switching back to a normal SDR format.
+        g_settings.forceHdr10 =
+            g_settings.pixelFormat == VideoPixelFormat::P010 &&
+            SendMessageW(state->forceHdr10Check, BM_GETCHECK, 0, 0) ==
+                BST_CHECKED;
         g_settings.allowVolumeBoost = SendMessageW(
             state->volumeBoostCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (!g_settings.allowVolumeBoost &&
@@ -8134,6 +8382,17 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
     }
 
     switch (msg) {
+    case WM_CTLCOLORSTATIC:
+        if (state && reinterpret_cast<HWND>(lParam) ==
+                         state->versionWatermark) {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            SetTextColor(hdc, RGB(145, 145, 145));
+            SetBkMode(hdc, TRANSPARENT);
+            return reinterpret_cast<LRESULT>(
+                GetSysColorBrush(COLOR_BTNFACE));
+        }
+        break;
+
     case WM_CREATE: {
         const HINSTANCE instance = reinterpret_cast<LPCREATESTRUCTW>(lParam)->hInstance;
         auto makeLabel = [&](const wchar_t* text, int x, int y) {
@@ -8142,6 +8401,32 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                                    x, y, 160, 24, hwnd, nullptr, instance, nullptr);
         };
 
+        state->tabControl = CreateWindowExW(
+            0, WC_TABCONTROLW, nullptr,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_FIXEDWIDTH,
+            24, 16, 901, 31, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_TAB)),
+            instance, nullptr);
+        if (state->tabControl) {
+            const wchar_t* labels[] = {
+                UI_TEXT(L"오디오"), UI_TEXT(L"영상 · 창"),
+                UI_TEXT(L"안내 · 진단"), UI_TEXT(L"업데이트")};
+            for (int i = 0; i < static_cast<int>(ARRAYSIZE(labels)); ++i) {
+                TCITEMW item{};
+                item.mask = TCIF_TEXT;
+                item.pszText = const_cast<LPWSTR>(labels[i]);
+                TabCtrl_InsertItem(state->tabControl, i, &item);
+            }
+            TabCtrl_SetCurSel(state->tabControl,
+                              static_cast<int>(state->activeTab));
+        }
+
+        state->audioOutputSection = makeLabel(UI_TEXT(L"출력"), 34, 62);
+        state->audioPlaybackSection = makeLabel(UI_TEXT(L"재생 · 편의"), 34, 226);
+        state->audioStabilitySection = makeLabel(UI_TEXT(L"동기화 · 안정성"), 34, 392);
+        state->videoCaptureSection = makeLabel(UI_TEXT(L"캡처"), 34, 62);
+        state->videoDisplaySection = makeLabel(UI_TEXT(L"영상"), 505, 62);
+        state->videoWindowSection = makeLabel(UI_TEXT(L"창"), 505, 184);
         state->audioLabel = makeLabel(UI_TEXT(L"오디오 출력 모드"), 24, 24);
         state->audioCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
@@ -8233,7 +8518,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                          ? BST_CHECKED : BST_UNCHECKED, 0);
         state->volumeBoostHelp = CreateWindowExW(
             0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                BS_PUSHBUTTON,
+                BS_PUSHBUTTON | BS_NOTIFY,
             438, 226, 24, 24, hwnd,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(IDC_SETTINGS_VOLUME_BOOST_HELP)),
@@ -8379,18 +8664,58 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         SendMessageW(state->checkForUpdatesCheck, BM_SETCHECK,
                      g_settings.checkForUpdates
                          ? BST_CHECKED : BST_UNCHECKED, 0);
-        state->advancedToggle = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"▸ 고급 설정"),
+
+        state->guideShortcutsTitle = makeLabel(
+            UI_TEXT(L"단축키"), 34, 62);
+        state->guideText = CreateWindowExW(
+            0, L"STATIC", UI_TEXT(
+                L"F2  설정 다시 열기\r\nF3  오디오 OSD\r\n"
+                L"F5  Pixel-perfect 크기로 맞추기\r\n"
+                L"Tab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료"),
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            34, 84, 400, 220, hwnd, nullptr, instance, nullptr);
+        state->guideDiagnosticsTitle = makeLabel(
+            UI_TEXT(L"진단 · 문제 해결"), 505, 62);
+        state->guideDiagnosticsText = CreateWindowExW(
+            0, L"STATIC", UI_TEXT(
+                L"문제가 생길 때만 로그 저장을 켜고 같은 문제를 재현하세요.\r\n"
+                L"로그는 사용자 폴더의 logs에 저장됩니다."),
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            505, 84, 360, 70, hwnd, nullptr, instance, nullptr);
+        state->guideLogFolderButton = CreateWindowExW(
+            0, L"BUTTON", UI_TEXT(L"로그 폴더 열기"),
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-            24, 520, 190, 28, hwnd,
+            505, 248, 165, 26, hwnd,
             reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_ADVANCED_TOGGLE)),
+                static_cast<INT_PTR>(IDC_SETTINGS_OPEN_LOG_FOLDER)),
             instance, nullptr);
+        std::wstring versionLabel = UI_TEXT(L"현재 버전");
+        versionLabel += L"  ";
+        versionLabel += kAppVersionLabel;
+        state->updateTitle = CreateWindowExW(
+            0, L"STATIC", versionLabel.c_str(),
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
+            34, 76, 400, 24, hwnd, nullptr, instance, nullptr);
+        state->updateText = CreateWindowExW(
+            0, L"STATIC", UI_TEXT(
+                L"자동 확인은 시작 후 백그라운드에서 최신 릴리스를 확인합니다. "
+                L"새 버전이 있으면 공식 설치 파일 다운로드를 안내합니다."),
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            34, 110, 760, 70, hwnd, nullptr, instance, nullptr);
+        state->updateNowButton = CreateWindowExW(
+            0, L"BUTTON", UI_TEXT(L"최신 버전 확인"),
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+            34, 230, 185, 30, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_UPDATE_NOW)),
+            instance, nullptr);
+        state->updateStatus = CreateWindowExW(
+            0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
+            235, 234, 650, 24, hwnd, nullptr, instance, nullptr);
         state->versionWatermark = CreateWindowExW(
             0, L"STATIC", kAppVersionLabel,
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
             24, 596, 260, 20, hwnd, nullptr, instance, nullptr);
-        EnableWindow(state->versionWatermark, FALSE);
 
         state->presentationLabel = makeLabel(UI_TEXT(L"화면 표시 방식"), 24, 274);
         state->presentationCombo = CreateWindowExW(
@@ -8515,8 +8840,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             instance, nullptr);
         state->videoCapabilityStatus = CreateWindowExW(
             0, L"STATIC", UI_TEXT(L"지원 모드 확인 중..."),
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
-            430, 234, 365, 24, hwnd, nullptr, instance, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            430, 234, 365, 90, hwnd, nullptr, instance, nullptr);
         PopulatePixelFormatCombo(state);
 
         state->scalingLabel = makeLabel(UI_TEXT(L"화면 확대 방식"), 430, 274);
@@ -8532,6 +8857,25 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                      reinterpret_cast<LPARAM>(UI_TEXT(L"선명하게")));
         SendMessageW(state->scalingCombo, CB_SETCURSEL,
                      g_settings.scalingMode == ScalingMode::Sharp ? 1 : 0, 0);
+
+        state->fullscreenCursorLabel = makeLabel(
+            UI_TEXT(L"전체화면 커서"), 505, 336);
+        state->fullscreenCursorCombo = CreateWindowExW(
+            0, L"COMBOBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
+            630, 332, 255, 120, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(
+                IDC_SETTINGS_FULLSCREEN_CURSOR)),
+            instance, nullptr);
+        SendMessageW(state->fullscreenCursorCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(UI_TEXT(L"자동 숨김 (권장)")));
+        SendMessageW(state->fullscreenCursorCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(UI_TEXT(L"항상 표시")));
+        SendMessageW(state->fullscreenCursorCombo, CB_SETCURSEL,
+                     g_settings.fullscreenCursorMode ==
+                             FullscreenCursorMode::AlwaysVisible
+                         ? 1 : 0,
+                     0);
 
         state->forceHdr10Check = CreateWindowExW(
             0, L"BUTTON", UI_TEXT(
@@ -8632,6 +8976,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         const UINT initialDpi = GetDpiForWindow(hwnd);
         ApplySettingsFont(state, hwnd, initialDpi);
         LayoutSettingsControls(state, initialDpi);
+        UpdateCaptureAudioSelectionUi(state);
         UpdateAdvancedControlVisibility(state);
         UpdateAsioControlVisibility(state);
         UpdateExclusiveProbeControl(state);
@@ -8765,6 +9110,49 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         }
         return 0;
 
+    case WM_SETTINGS_UPDATE_CHECK_COMPLETE: {
+        std::unique_ptr<UpdateCheckResult> result(
+            reinterpret_cast<UpdateCheckResult*>(lParam));
+        if (!state) return 0;
+        state->updateCheckRunning.store(false, std::memory_order_release);
+        if (state->updateCheckThread.joinable()) {
+            state->updateCheckThread.join();
+        }
+        EnableWindow(state->updateNowButton, TRUE);
+        if (!result || !result->success) {
+            SetSettingsUpdateStatus(
+                state, UI_TEXT(L"업데이트를 확인하지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도하세요."));
+            return 0;
+        }
+        if (!result->newer || result->installerUrl.empty()) {
+            std::wstring status = UI_TEXT(L"최신 버전입니다.");
+            if (!result->latestTag.empty()) {
+                wchar_t detail[160]{};
+                swprintf_s(detail, UI_TEXT(L"최신 버전: %s"),
+                           result->latestTag.c_str());
+                status += L"  ";
+                status += detail;
+            }
+            SetSettingsUpdateStatus(state, status);
+            return 0;
+        }
+
+        wchar_t status[200]{};
+        swprintf_s(status, UI_TEXT(L"최신 버전: %s"),
+                   result->latestTag.c_str());
+        SetSettingsUpdateStatus(state, status);
+        wchar_t message[360]{};
+        swprintf_s(message,
+                   UI_TEXT(L"새 버전 %s을(를) 찾았습니다. 공식 설치 파일을 다운로드하시겠습니까?"),
+                   result->latestTag.c_str());
+        if (MessageBoxW(hwnd, message, UI_TEXT(L"업데이트 확인"),
+                        MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON1) == IDYES) {
+            ShellExecuteW(hwnd, L"open", result->installerUrl.c_str(),
+                          nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        return 0;
+    }
+
     case WM_SETTINGS_TOOLTIP_SHOW: {
         const HWND target = reinterpret_cast<HWND>(wParam);
         const HWND tooltip = reinterpret_cast<HWND>(lParam);
@@ -8802,6 +9190,27 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         return 0;
     }
 
+    case WM_NOTIFY: {
+        const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+        if (state && header && header->idFrom == IDC_SETTINGS_TAB &&
+            header->code == TCN_SELCHANGE) {
+            const int index = TabCtrl_GetCurSel(state->tabControl);
+            if (index >= static_cast<int>(SettingsTab::Audio) &&
+                index <= static_cast<int>(SettingsTab::Updates)) {
+                state->activeTab = static_cast<SettingsTab>(index);
+                const UINT dpi = GetDpiForWindow(hwnd);
+                LayoutSettingsControls(state, dpi);
+                UpdateAdvancedControlVisibility(state);
+                UpdateCaptureAudioSelectionUi(state);
+                RedrawWindow(hwnd, nullptr, nullptr,
+                             RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN |
+                                 RDW_UPDATENOW);
+            }
+            return 0;
+        }
+        break;
+    }
+
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_SETTINGS_AUDIO &&
             HIWORD(wParam) == CBN_SELCHANGE) {
@@ -8809,6 +9218,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             PopulateAudioOutputCombo(state);
             PopulateSettingsBufferCombo(state);
             UpdateAsioControlVisibility(state);
+            UpdateAdvancedControlVisibility(state);
             UpdateAudioClient3Status(state);
             UpdateExclusiveProbeControl(state);
             UpdateExclusiveVerificationUi(state);
@@ -8849,15 +9259,40 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             StartExclusiveEndpointScan(state, hwnd, true);
             return 0;
         }
+        if (LOWORD(wParam) == IDC_SETTINGS_UPDATE_NOW &&
+            HIWORD(wParam) == BN_CLICKED && state) {
+            StartSettingsUpdateCheck(state, hwnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_OPEN_LOG_FOLDER &&
+            HIWORD(wParam) == BN_CLICKED) {
+            // Create it on demand so users can find the stable location even
+            // before their first diagnostic log has been written.
+            EnsureUserDataDirectory();
+            const std::wstring logDirectory = LogDirectory();
+            CreateDirectoryW(logDirectory.c_str(), nullptr);
+            const HINSTANCE result = ShellExecuteW(
+                hwnd, L"open", logDirectory.c_str(), nullptr, nullptr,
+                SW_SHOWNORMAL);
+            if (reinterpret_cast<INT_PTR>(result) <= 32) {
+                MessageBoxW(hwnd,
+                            UI_TEXT(L"로그 폴더를 열지 못했습니다."),
+                            UI_TEXT(L"진단 로그"),
+                            MB_OK | MB_ICONWARNING);
+            }
+            return 0;
+        }
         if (LOWORD(wParam) == IDC_SETTINGS_CAPTURE_DEVICE &&
             HIWORD(wParam) == CBN_SELCHANGE) {
             PopulatePixelFormatCombo(state);
+            UpdateAdvancedControlVisibility(state);
             StartCaptureAudioProbe(state, hwnd);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_VIDEO &&
             HIWORD(wParam) == CBN_SELCHANGE) {
             PopulatePixelFormatCombo(state);
+            UpdateAdvancedControlVisibility(state);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_CAPTURE_AUDIO_DEVICE &&
@@ -8889,24 +9324,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                              RDW_UPDATENOW);
             return 0;
         }
-        if (LOWORD(wParam) == IDC_SETTINGS_ADVANCED_TOGGLE &&
-            HIWORD(wParam) == BN_CLICKED) {
-            state->showAdvanced = !state->showAdvanced;
-            const UINT dpi = GetDpiForWindow(hwnd);
-            LayoutSettingsControls(state, dpi);
-            UpdateAdvancedControlVisibility(state);
-            const SIZE outer = SettingsDialogOuterSize(hwnd, dpi, state);
-            SetWindowPos(hwnd, nullptr, 0, 0, outer.cx, outer.cy,
-                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-            UpdateCaptureAudioSelectionUi(state);
-            RedrawWindow(hwnd, nullptr, nullptr,
-                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN |
-                             RDW_UPDATENOW);
-            return 0;
-        }
         if (LOWORD(wParam) == IDC_SETTINGS_PIXEL_FORMAT &&
             HIWORD(wParam) == CBN_SELCHANGE) {
             PopulateFrameRateCombo(state);
+            UpdateAdvancedControlVisibility(state);
+            RedrawWindow(hwnd, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN |
+                             RDW_UPDATENOW);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_PRESENTATION_HELP &&
@@ -9100,6 +9524,10 @@ static bool ShowSettingsDialog(HINSTANCE hInst,
         DispatchMessageW(&msg);
     }
     if (state.probeThread.joinable()) state.probeThread.join();
+    state.updateCheckStop.store(true, std::memory_order_release);
+    if (state.updateCheckThread.joinable()) {
+        state.updateCheckThread.join();
+    }
     state.exclusiveProbeStop.store(true, std::memory_order_release);
     if (state.exclusiveProbeThread.joinable()) {
         state.exclusiveProbeThread.join();
@@ -9668,9 +10096,66 @@ static LRESULT BorderlessHitTest(HWND hwnd, LPARAM lParam) {
     return HTCAPTION;
 }
 
+constexpr UINT_PTR kFullscreenCursorTimerId = 2;
+constexpr UINT kFullscreenCursorTimerPeriodMs = 250;
+constexpr uint64_t kFullscreenCursorHideDelayMs = 2000;
+static bool g_fullscreenCursorHidden = false;
+static uint64_t g_lastFullscreenCursorActivityMs = 0;
+
+static bool FullscreenCursorAutoHideActive() {
+    return g_fullscreen.load(std::memory_order_acquire) &&
+        g_settings.fullscreenCursorMode == FullscreenCursorMode::AutoHide;
+}
+
+static void SetFullscreenCursorVisible(bool visible) {
+    // Avoid ShowCursor here. Its process-wide display count can become
+    // unbalanced when a fullscreen window closes through an unusual path,
+    // leaving the cursor hidden after the viewer exits.
+    g_fullscreenCursorHidden = !visible;
+    SetCursor(visible ? LoadCursorW(nullptr, IDC_ARROW) : nullptr);
+}
+
+static void NoteFullscreenCursorActivity() {
+    if (!FullscreenCursorAutoHideActive()) return;
+    g_lastFullscreenCursorActivityMs = GetTickCount64();
+    if (g_fullscreenCursorHidden) SetFullscreenCursorVisible(true);
+}
+
+static void BeginFullscreenCursorTracking(HWND hwnd) {
+    g_lastFullscreenCursorActivityMs = GetTickCount64();
+    SetFullscreenCursorVisible(true);
+    if (g_settings.fullscreenCursorMode == FullscreenCursorMode::AutoHide) {
+        SetTimer(hwnd, kFullscreenCursorTimerId,
+                 kFullscreenCursorTimerPeriodMs, nullptr);
+    }
+}
+
+static void EndFullscreenCursorTracking(HWND hwnd) {
+    if (hwnd) KillTimer(hwnd, kFullscreenCursorTimerId);
+    g_lastFullscreenCursorActivityMs = 0;
+    if (g_fullscreenCursorHidden) SetFullscreenCursorVisible(true);
+}
+
+static void UpdateFullscreenCursorIdleState() {
+    if (!FullscreenCursorAutoHideActive() || g_fullscreenCursorHidden) return;
+    const uint64_t now = GetTickCount64();
+    if (now - g_lastFullscreenCursorActivityMs >=
+        kFullscreenCursorHideDelayMs) {
+        SetFullscreenCursorVisible(false);
+    }
+}
+
 static LRESULT CALLBACK VideoHostSubclassProc(
     HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
     UINT_PTR, DWORD_PTR) {
+    if (msg == WM_MOUSEMOVE || msg == WM_MOUSEWHEEL) {
+        NoteFullscreenCursorActivity();
+    }
+    if (msg == WM_SETCURSOR && FullscreenCursorAutoHideActive() &&
+        g_fullscreenCursorHidden) {
+        SetCursor(nullptr);
+        return TRUE;
+    }
     if (msg == WM_NCHITTEST) {
         const HWND parent = GetParent(hwnd);
         if (parent && g_settings.borderlessWindow && !g_fullscreen) {
@@ -9703,16 +10188,16 @@ static void ToggleFullscreen(HWND hwnd, bool automaticStartup = false,
                      mi.rcMonitor.right - mi.rcMonitor.left,
                      mi.rcMonitor.bottom - mi.rcMonitor.top,
                      SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
-        ShowCursor(FALSE);
+        BeginFullscreenCursorTracking(hwnd);
         g_autoFullscreen = automaticStartup;
     } else {
+        EndFullscreenCursorTracking(hwnd);
         g_fullscreen.store(false, std::memory_order_release);
         SetWindowLongPtrW(hwnd, GWL_STYLE, g_prevStyle);
         SetWindowPlacement(hwnd, &g_prevPlacement);
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                      SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
                      SWP_NOZORDER | SWP_NOOWNERZORDER);
-        ShowCursor(TRUE);
         g_autoFullscreen = false;
     }
     if (updateOutput) {
@@ -9818,12 +10303,6 @@ static constexpr UINT WM_TOGGLE_RUNTIME_OSD = WM_APP + 91;
 static constexpr UINT WM_OPEN_SETTINGS = WM_APP + 92;
 static constexpr UINT WM_RESTORE_ONE_TO_ONE = WM_APP + 93;
 
-struct UpdateCheckResult {
-    bool newer = false;
-    std::wstring latestTag;
-    std::wstring installerUrl;
-};
-
 static std::wstring Utf8ToWide(const std::string& value) {
     if (value.empty()) return {};
     const int length = MultiByteToWideChar(
@@ -9916,7 +10395,7 @@ static bool IsNewerReleaseTag(const std::wstring& latestTag) {
 
 static bool FetchLatestRelease(UpdateCheckResult& result) {
     HINTERNET session = WinHttpOpen(
-        L"LowLatencyCaptureViewer/1.1.7.2",
+        L"LowLatencyCaptureViewer/1.2.0",
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return false;
@@ -9972,6 +10451,7 @@ static bool FetchLatestRelease(UpdateCheckResult& result) {
     std::string tag;
     if (!ExtractJsonString(json, "tag_name", 0, tag)) return false;
     result.latestTag = Utf8ToWide(tag);
+    result.success = !result.latestTag.empty();
     if (result.latestTag.empty() || !IsNewerReleaseTag(result.latestTag)) {
         return true;
     }
@@ -10707,6 +11187,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         break;
 
     case WM_TIMER:
+        if (wParam == kFullscreenCursorTimerId) {
+            UpdateFullscreenCursorIdleState();
+            return 0;
+        }
         if (wParam == 1) {
             UpdateOsdRates();
             g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
@@ -10718,6 +11202,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_ACTIVATEAPP:
         UpdateBackgroundAudioMute(wParam != FALSE);
         return 0;
+
+    case WM_MOUSEMOVE:
+        NoteFullscreenCursorActivity();
+        break;
+
+    case WM_SETCURSOR:
+        if (FullscreenCursorAutoHideActive() && g_fullscreenCursorHidden) {
+            SetCursor(nullptr);
+            return TRUE;
+        }
+        break;
 
     case WM_DISPLAYCHANGE:
         LogDisplayChangeEvent(wParam, lParam);
@@ -10834,7 +11329,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_fullscreen && !g_autoFullscreen) {
                 ToggleFullscreen(hwnd);
             } else {
-                if (g_fullscreen) ShowCursor(TRUE);
+                if (g_fullscreen) EndFullscreenCursorTracking(hwnd);
                 PostMessageW(hwnd, WM_CLOSE, 0, 0);
             }
             return 0;
@@ -10842,6 +11337,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         break;
 
     case WM_MOUSEWHEEL:
+        NoteFullscreenCursorActivity();
         if (AdjustVolumeFromWheel(hwnd, wParam, lParam)) return 0;
         break;
 
@@ -10911,6 +11407,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
 
     case WM_DESTROY:
+        EndFullscreenCursorTracking(hwnd);
         KillTimer(hwnd, 1);
         if (!g_windowPositionPersisted) PersistWindowPosition(hwnd);
         g_settings.volumePercent =
@@ -11324,9 +11821,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
 
     MSG m{};
     while (g_running.load() && GetMessageW(&m, nullptr, 0, 0) > 0) {
-        if (m.message == WM_MOUSEWHEEL &&
-            AdjustVolumeFromWheel(hwnd, m.wParam, m.lParam)) {
-            continue;
+        if (m.message == WM_MOUSEWHEEL) {
+            // The message-loop fast path handles wheel volume before normal
+            // dispatch, so it must also count as cursor activity.
+            NoteFullscreenCursorActivity();
+            if (AdjustVolumeFromWheel(hwnd, m.wParam, m.lParam)) {
+                continue;
+            }
         }
         // Keyboard focus can belong to the video-host child. Key messages do
         // not bubble to its parent, so route viewer shortcuts at the thread

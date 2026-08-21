@@ -63,15 +63,17 @@ settings, `F3` shows or hides the audio meter OSD, and `Esc` exits.
 | Presentation | **Low latency**; use VSync when preventing tearing is more important |
 | Audio mode | **WASAPI Shared** for compatibility |
 | Output device | **Follow the Windows default output device** |
+| Capture resolution | **1920 × 1080**; change it for the source and display environment |
 | Capture format | **Auto / NV12 preferred** |
 | Capture FPS | Match the source's actual output rate |
-| PCM buffer target | **10 ms**; increase only if underruns repeat |
-| Clock-drift correction | **Off** by default; choose **Auto** when long-session drift is observed, or On to always resample |
+| PCM buffer target | **20 ms**; lower it only after stable operation is confirmed |
+| Clock-drift correction | **Auto** by default; correction engages only after sustained drift is observed |
 | Pixel-perfect | On for exact 1:1 output; off for a freely resizable window |
 
-WASAPI Exclusive is temporarily hidden from the settings UI while that backend is
-being investigated. Existing profiles saved with Exclusive are migrated to WASAPI
-Shared on the next run.
+WASAPI Exclusive is selectable only on output devices that pass a per-endpoint
+playback-event preflight. The output-device list reports `Available · n ms`,
+`Unavailable`, or `Checking`, and caches results by endpoint ID. Use WASAPI
+Shared or ASIO for devices that do not pass or behave poorly in Exclusive mode.
 
 ASIO appears in the settings only when an ASIO driver is detected. ASIO drivers
 are not bundled; the mode uses the buffer size chosen by the driver. The current
@@ -87,7 +89,7 @@ initialization fails, that run falls back to WASAPI Shared.
 session low recorded at a render-callback boundary, so the two numbers can differ.
 Keep the setting when underruns are zero and the diagnosis is normal. Only when
 `buffer shortage` or `resampler output shortage` repeats, raise the PCM target in
-the order `10 → 15 → 20 ms`; repeated `input late` points instead to capture
+the order `10 → 15 → 20 → 30 ms`; repeated `input late` points instead to capture
 callback or system-scheduling delays. Prefer the recent pattern and maximum
 consecutive count over one isolated event. ASIO's app PCM queue and driver output
 buffer are separate, so check the ASIO driver's buffer settings too when needed.
@@ -139,7 +141,11 @@ Enable **Start directly next time** to skip the settings window on later runs.
 Hold **Shift** while launching, or press **F2** in the viewer, to open settings
 again.
 
-**Check for updates automatically** is off by default. When enabled, the viewer
+In fullscreen, the cursor automatically hides after two seconds without pointer
+activity and immediately returns on mouse movement or wheel input. Select
+**Always show** in the Video & window tab if preferred.
+
+**Check for updates automatically** is on by default. The viewer
 checks the latest GitHub release in a background thread after startup and asks
 before opening the official installer download when a newer version exists. It
 never installs or launches an update silently, and the check is separate from

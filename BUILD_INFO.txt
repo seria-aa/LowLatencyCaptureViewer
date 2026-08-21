@@ -1,6 +1,6 @@
-Low Latency Capture Viewer v1.1.7.2 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.0 x64 (continued from the v0.14.2 rework)
 
-v1.1.7.2 Exclusive endpoint preflight prerelease
+v1.2.0 settings, defaults, fullscreen cursor, and Exclusive preflight release
 -------------------------------------------------
 - Added a per-output-device WASAPI Exclusive event-path preflight. Each active
   endpoint is tested at 5-40 ms before Exclusive is offered, because some

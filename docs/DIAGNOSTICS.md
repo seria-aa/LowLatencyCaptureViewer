@@ -86,8 +86,9 @@ With ASIO, the **app PCM queue and the ASIO driver output buffer are separate**.
 the app PCM diagnosis is normal but ASIO still breaks up, check the output buffer in
 the ASIO driver's control panel as well.
 
-Use `10 ms (minimum latency)` to start, `15 ms (low-latency target)` for recurring
-errors, and `20 ms (stability recommendation)` when stability matters more.
+New installations start with `20 ms (stable target)`. After verifying stable
+operation, use `15 ms (low-latency target)` or `10 ms (minimum latency)` only
+when the lower queueing delay is worth the reduced scheduling margin.
 
 ## Log files
 
