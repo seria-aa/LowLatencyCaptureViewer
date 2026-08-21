@@ -147,6 +147,7 @@ GitHub 최신 릴리스를 확인하고, 새 버전이 있을 때만 공식 설�
 - [실시간 정보창과 로그](docs/DIAGNOSTICS.ko.md)
 - [문제 해결](docs/TROUBLESHOOTING.ko.md)
 - [소스에서 빌드](docs/BUILDING.ko.md)
+- [릴리스 가이드](docs/RELEASING.ko.md)
 
 설정과 선택적 진단 로그는 `%LOCALAPPDATA%\LowLatencyCaptureViewer`에
 저장됩니다. 제거할 때 사용자 데이터도 함께 삭제할지 선택할 수 있습니다.

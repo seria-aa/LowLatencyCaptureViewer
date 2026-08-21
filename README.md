@@ -152,6 +152,7 @@ video/audio initialization.
 - [Diagnostics and logs](docs/DIAGNOSTICS.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Building from source](docs/BUILDING.md)
+- [Release guide](docs/RELEASING.md)
 
 Settings and optional logs are stored in
 `%LOCALAPPDATA%\LowLatencyCaptureViewer`. The uninstaller asks whether this
