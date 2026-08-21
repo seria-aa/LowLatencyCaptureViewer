@@ -1,4 +1,16 @@
-Low Latency Capture Viewer v1.1.3 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.1.7.2 x64 (continued from the v0.14.2 rework)
+
+v1.1.7.2 Exclusive endpoint preflight prerelease
+-------------------------------------------------
+- Added a per-output-device WASAPI Exclusive event-path preflight. Each active
+  endpoint is tested at 5-40 ms before Exclusive is offered, because some
+  drivers accept initialization but deliver unusable event timing in practice.
+- The settings dialog labels each endpoint as available with its first passing
+  buffer duration, unavailable, or checking. Cached outcomes are reused across
+  later settings openings and launches; the explicit button forces a rescan.
+- Shared remains the default and ASIO remains available. The capture, D3D11
+  latest-frame renderer, PCM queue, and normal WASAPI Shared paths are unchanged.
+
 
 v1.1.3 final release
 ----------------------------------------------------
