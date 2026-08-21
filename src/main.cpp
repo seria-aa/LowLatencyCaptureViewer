@@ -18,6 +18,7 @@
 
 #include <windows.h>
 #include <windowsx.h>
+#include <dbt.h>
 #include <shellapi.h>
 #include <winhttp.h>
 #include <dshow.h>
@@ -107,13 +108,17 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.1.7";
+constexpr wchar_t kAppVersionLabel[] = L"v1.1.7.2";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
 constexpr int kAudioOsdWidth = llcv::audio_osd::kWidth;
 constexpr int kAudioOsdHeight = llcv::audio_osd::kHeight;
 static constexpr int kWasapiBufferOptionsMs[] = {5, 10, 15, 20, 30, 40};
+// This viewer treats 40 ms as the upper edge of a useful low-latency
+// Exclusive configuration. Higher values are deliberately not offered.
+static constexpr int kExclusiveBufferOptionsMs[] = {5, 10, 15, 20, 30, 40};
+constexpr size_t kMaximumExclusiveEndpointCacheEntries = 32;
 constexpr int kRecommendedWasapiBufferMs = 20;
 static constexpr int kPcmQueueOptionsMs[] = {10, 15, 20, 30};
 constexpr int kLowestPcmQueueMs = 10;
@@ -201,6 +206,15 @@ struct InternalCaptureAudioProbe {
     HRESULT result = S_OK;
 };
 
+// A preflight verdict belongs to one stable Core Audio endpoint ID. Keep both
+// passes and failures so the settings dialog does not repeat an expensive
+// real-device event test every time it opens.
+struct ExclusiveEndpointCacheEntry {
+    std::wstring endpointId;
+    bool supported = false;
+    int recommendedBufferMs = 0;
+};
+
 struct AppSettings {
     UiLanguage uiLanguage = UiLanguage::Auto;
     AudioMode audioMode = AudioMode::WasapiShared;
@@ -224,6 +238,11 @@ struct AppSettings {
     // try a clearly matching DirectShow audio-capture filter.
     std::wstring captureAudioDeviceId;
     std::wstring audioOutputDeviceId;
+    // A successful low-latency Exclusive preflight is tied to the resolved
+    // endpoint, even when the user chose to follow the Windows default.
+    std::wstring exclusiveVerifiedEndpointId;
+    int exclusiveVerifiedBufferMs = 0;
+    std::vector<ExclusiveEndpointCacheEntry> exclusiveEndpointCache;
     std::wstring asioDriverName;
     bool saveLog = false;
     bool showDiagnosticConsole = false;
@@ -257,6 +276,8 @@ static constexpr VideoPresetInfo kVideoPresets[] = {
 };
 
 static AppSettings g_settings{};
+static bool g_exclusiveStartupFallback = false;
+static AudioMode g_exclusiveStartupRequestedMode = AudioMode::WasapiShared;
 static std::atomic<bool> g_fullscreen{false};
 static std::atomic<uint64_t> g_outputConfigurationGeneration{0};
 
@@ -289,8 +310,8 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"%.2f ms (최저)", L"%.2f ms (minimum)"},
         {L"%d ms (권장)", L"%d ms (recommended)"},
         {L"Shared 저지연 지원 확인 중…", L"Checking Shared low-latency support…"},
-        {L"IAudioClient3 지원됨 · Shared %.2f–%.2f ms · 검사 %.1f ms", L"IAudioClient3 available · Shared %.2f–%.2f ms · probe %.1f ms"},
-        {L"IAudioClient3 사용 불가 · 기본 Shared로 자동 전환 (0x%08X)", L"IAudioClient3 unavailable · using classic Shared (0x%08X)"},
+        {L"Shared 저지연 · %.2f~%.2f ms · 검사 %.1f ms", L"Shared low latency · %.2f~%.2f ms · probe %.1f ms"},
+        {L"Shared 기본 모드 · 저지연 API 미지원", L"Shared basic mode · low-latency API unavailable"},
         {L"지원 모드 없음: 다른 장치 또는 해상도를 선택하세요.", L"No supported mode: choose another device or resolution."},
         {L"자동 인식: ", L"Detected: "},
         {L"지원 프레임 없음", L"No supported frame rate"},
@@ -426,6 +447,43 @@ struct AudioClient3Support {
     UINT32 minimumFrames = 0;
     UINT32 maximumFrames = 0;
     double probeMilliseconds = 0.0;
+};
+
+// A successful IsFormatSupported/Initialize call is not enough to advertise
+// low-latency Exclusive mode: some endpoint drivers accept the stream but
+// signal its event late, or silently allocate a much larger buffer.  This
+// probe intentionally exercises the real event path before it is offered as
+// a supported configuration.
+struct ExclusiveCompatibilityProbe {
+    bool compatible = false;
+    HRESULT result = E_FAIL;
+    UINT32 requestedFrames = 0;
+    UINT32 actualBufferFrames = 0;
+    UINT32 events = 0;
+    uint64_t submittedFrames = 0;
+    uint64_t testDurationMs = 0;
+    double expectedPeriodMs = 0.0;
+    double averageEventMs = 0.0;
+    double maximumEventMs = 0.0;
+    std::wstring summary;
+};
+
+enum class ExclusiveEndpointState {
+    Unknown,
+    Testing,
+    Supported,
+    Unsupported,
+};
+
+struct ExclusiveEndpointVerification {
+    ExclusiveEndpointState state = ExclusiveEndpointState::Unknown;
+    int recommendedBufferMs = 0;
+    std::wstring summary;
+};
+
+struct ExclusiveEndpointProbeMessage {
+    size_t endpointIndex = 0;
+    ExclusiveCompatibilityProbe probe;
 };
 
 // 500 ms ring capacity. The program deliberately does NOT wait for this much
@@ -657,6 +715,59 @@ static void LogHr(const wchar_t* where, HRESULT hr) {
              where, static_cast<unsigned>(hr), HrText(hr).c_str());
 }
 
+static void LogD3DFailureEvent(HRESULT failureHr, HRESULT removedReason) {
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    fwprintf(
+        stderr,
+        L"[video-event] d3d-failure local=%04u-%02u-%02u "
+        L"%02u:%02u:%02u.%03u uptime=%llu ms failure=0x%08X (%s) "
+        L"device-removal=0x%08X (%s)\n",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+        now.wSecond, now.wMilliseconds,
+        static_cast<unsigned long long>(GetTickCount64()),
+        static_cast<unsigned>(failureHr), HrText(failureHr).c_str(),
+        static_cast<unsigned>(removedReason), HrText(removedReason).c_str());
+}
+
+static void LogDisplayChangeEvent(WPARAM wParam, LPARAM lParam) {
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    fwprintf(
+        stderr,
+        L"[display-event] display-change local=%04u-%02u-%02u "
+        L"%02u:%02u:%02u.%03u uptime=%llu ms bpp=%llu mode=%ux%u\n",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+        now.wSecond, now.wMilliseconds,
+        static_cast<unsigned long long>(GetTickCount64()),
+        static_cast<unsigned long long>(wParam), LOWORD(lParam),
+        HIWORD(lParam));
+}
+
+static const wchar_t* DeviceChangeEventName(WPARAM event) {
+    switch (event) {
+    case DBT_DEVICEARRIVAL: return L"arrival";
+    case DBT_DEVICEREMOVECOMPLETE: return L"remove-complete";
+    case DBT_DEVICEREMOVEPENDING: return L"remove-pending";
+    case DBT_DEVNODES_CHANGED: return L"devnodes-changed";
+    default: return L"other";
+    }
+}
+
+static void LogDeviceChangeEvent(WPARAM event) {
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    fwprintf(
+        stderr,
+        L"[display-event] device-change local=%04u-%02u-%02u "
+        L"%02u:%02u:%02u.%03u uptime=%llu ms event=%llu (%s)\n",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+        now.wSecond, now.wMilliseconds,
+        static_cast<unsigned long long>(GetTickCount64()),
+        static_cast<unsigned long long>(event),
+        DeviceChangeEventName(event));
+}
+
 static WAVEFORMATEX PcmOutputFormat() {
     WAVEFORMATEX wf{};
     wf.wFormatTag = WAVE_FORMAT_PCM;
@@ -764,6 +875,254 @@ static AudioClient3Support ProbeAudioClient3Support(
     SafeRelease(enumerator);
     if (uninitialize) CoUninitialize();
     return support;
+}
+
+static ExclusiveCompatibilityProbe ProbeExclusiveCompatibility(
+    const std::wstring& endpointId, int requestedMs,
+    const std::atomic<bool>* cancel) {
+    ExclusiveCompatibilityProbe probe{};
+    probe.requestedFrames = static_cast<UINT32>(
+        (std::max)(1, requestedMs) * kSampleRate / 1000);
+
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool uninitialize = SUCCEEDED(hr);
+    if (hr == RPC_E_CHANGED_MODE) hr = S_OK;
+    if (FAILED(hr)) {
+        probe.result = hr;
+        probe.summary = L"COM 초기화 실패";
+        return probe;
+    }
+
+    IMMDeviceEnumerator* enumerator = nullptr;
+    IMMDevice* device = nullptr;
+    IAudioClient* client = nullptr;
+    IAudioRenderClient* render = nullptr;
+    HANDLE eventHandle = nullptr;
+    WAVEFORMATEX* closest = nullptr;
+    bool started = false;
+    uint64_t runBeganMs = 0;
+    DWORD mmcssTaskIndex = 0;
+    HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio",
+                                                  &mmcssTaskIndex);
+    if (mmcss) {
+        AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_CRITICAL);
+    }
+
+    do {
+        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                              CLSCTX_INPROC_SERVER,
+                              IID_PPV_ARGS(&enumerator));
+        if (SUCCEEDED(hr)) {
+            hr = GetConfiguredAudioEndpoint(enumerator, endpointId, &device);
+        }
+        if (SUCCEEDED(hr)) {
+            hr = device->Activate(__uuidof(IAudioClient),
+                                  CLSCTX_INPROC_SERVER, nullptr,
+                                  reinterpret_cast<void**>(&client));
+        }
+        if (FAILED(hr)) break;
+
+        const WAVEFORMATEX format = PcmOutputFormat();
+        hr = client->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &format,
+                                       &closest);
+        if (closest) {
+            CoTaskMemFree(closest);
+            closest = nullptr;
+        }
+        if (hr != S_OK) {
+            if (SUCCEEDED(hr)) hr = AUDCLNT_E_UNSUPPORTED_FORMAT;
+            break;
+        }
+
+        REFERENCE_TIME defaultPeriod = 0;
+        REFERENCE_TIME minimumPeriod = 0;
+        hr = client->GetDevicePeriod(&defaultPeriod, &minimumPeriod);
+        if (FAILED(hr)) break;
+
+        const REFERENCE_TIME requestedDuration =
+            static_cast<REFERENCE_TIME>((std::max)(1, requestedMs)) * 10'000;
+        hr = client->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE,
+                                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                                requestedDuration, requestedDuration,
+                                &format, nullptr);
+        if (FAILED(hr)) break;
+
+        hr = client->GetBufferSize(&probe.actualBufferFrames);
+        if (FAILED(hr)) break;
+        probe.expectedPeriodMs = 1000.0 * probe.actualBufferFrames / kSampleRate;
+
+        eventHandle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!eventHandle) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            break;
+        }
+        hr = client->SetEventHandle(eventHandle);
+        if (FAILED(hr)) break;
+        hr = client->GetService(IID_PPV_ARGS(&render));
+        if (FAILED(hr)) break;
+
+        BYTE* bytes = nullptr;
+        hr = render->GetBuffer(probe.actualBufferFrames, &bytes);
+        if (SUCCEEDED(hr)) {
+            hr = render->ReleaseBuffer(probe.actualBufferFrames,
+                                       AUDCLNT_BUFFERFLAGS_SILENT);
+        }
+        if (FAILED(hr)) break;
+        hr = client->Start();
+        if (FAILED(hr)) break;
+        started = true;
+        runBeganMs = GetTickCount64();
+
+        constexpr uint64_t kProbeDurationMs = 5000;
+        uint64_t previousEventMs = 0;
+        double intervalTotalMs = 0.0;
+        UINT32 intervalCount = 0;
+        while (!cancel || !cancel->load(std::memory_order_acquire)) {
+            const uint64_t now = GetTickCount64();
+            if (now - runBeganMs >= kProbeDurationMs) break;
+            const DWORD wait = WaitForSingleObject(eventHandle, 250);
+            if (wait == WAIT_TIMEOUT) continue;
+            if (wait != WAIT_OBJECT_0) {
+                hr = HRESULT_FROM_WIN32(GetLastError());
+                break;
+            }
+
+            const uint64_t eventNow = GetTickCount64();
+            ++probe.events;
+            if (previousEventMs) {
+                const double interval = static_cast<double>(
+                    eventNow - previousEventMs);
+                intervalTotalMs += interval;
+                ++intervalCount;
+                probe.maximumEventMs = (std::max)(probe.maximumEventMs,
+                                                   interval);
+            }
+            previousEventMs = eventNow;
+
+            UINT32 padding = 0;
+            hr = client->GetCurrentPadding(&padding);
+            if (FAILED(hr)) break;
+            const UINT32 writable = probe.actualBufferFrames > padding
+                ? probe.actualBufferFrames - padding : 0;
+            if (writable) {
+                bytes = nullptr;
+                hr = render->GetBuffer(writable, &bytes);
+                if (SUCCEEDED(hr)) {
+                    hr = render->ReleaseBuffer(writable,
+                                               AUDCLNT_BUFFERFLAGS_SILENT);
+                    if (SUCCEEDED(hr)) probe.submittedFrames += writable;
+                }
+                if (FAILED(hr)) break;
+            }
+        }
+        if (runBeganMs) {
+            probe.testDurationMs = GetTickCount64() - runBeganMs;
+        }
+        if (cancel && cancel->load(std::memory_order_acquire)) {
+            hr = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+            break;
+        }
+        if (SUCCEEDED(hr) && intervalCount) {
+            probe.averageEventMs = intervalTotalMs / intervalCount;
+        }
+    } while (false);
+
+    if (started) client->Stop();
+    if (closest) CoTaskMemFree(closest);
+    if (eventHandle) CloseHandle(eventHandle);
+    SafeRelease(render);
+    SafeRelease(client);
+    SafeRelease(device);
+    SafeRelease(enumerator);
+    if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
+    if (uninitialize) CoUninitialize();
+
+    probe.result = hr;
+    if (FAILED(hr)) {
+        wchar_t message[128]{};
+        swprintf_s(message, L"Exclusive 초기화/실행 실패 (0x%08X)",
+                   static_cast<unsigned>(hr));
+        probe.summary = message;
+        return probe;
+    }
+
+    const double requestedPeriodMs = 1000.0 * probe.requestedFrames /
+                                     kSampleRate;
+    const double expectedEvents = 5000.0 / requestedPeriodMs;
+    const double maximumAllowedInterval = requestedPeriodMs * 1.25 + 1.0;
+    const bool bufferMatches = probe.actualBufferFrames <=
+        probe.requestedFrames + 1;
+    const bool eventsAreTimely =
+        probe.events >= static_cast<UINT32>(std::floor(expectedEvents * 0.90)) &&
+        probe.maximumEventMs <= maximumAllowedInterval;
+    const double expectedSubmittedFrames =
+        kSampleRate * (std::max)(1.0, probe.testDurationMs / 1000.0);
+    const bool outputSupplyMatchesClock =
+        probe.submittedFrames >= static_cast<uint64_t>(
+            std::floor(expectedSubmittedFrames * 0.98));
+    probe.compatible = bufferMatches && eventsAreTimely &&
+                       outputSupplyMatchesClock;
+
+    wchar_t message[256]{};
+    if (probe.compatible) {
+        swprintf_s(message,
+                   L"통과 · 실제 %.2f ms · 이벤트 평균/최대 %.2f/%.2f ms",
+                   probe.expectedPeriodMs, probe.averageEventMs,
+                   probe.maximumEventMs);
+    } else if (!bufferMatches) {
+        swprintf_s(message,
+                   L"미통과 · 요청 %.2f ms, 실제 버퍼 %.2f ms",
+                   requestedPeriodMs, probe.expectedPeriodMs);
+    } else if (!outputSupplyMatchesClock) {
+        const double suppliedPercent = expectedSubmittedFrames > 0.0
+            ? 100.0 * probe.submittedFrames / expectedSubmittedFrames : 0.0;
+        swprintf_s(message,
+                   L"미통과 · 출력 공급 %.1f%% (목표 98%% 이상)",
+                   suppliedPercent);
+    } else {
+        swprintf_s(message,
+                   L"미통과 · 이벤트 %u회, 평균/최대 %.2f/%.2f ms (목표 %.2f ms)",
+                   probe.events, probe.averageEventMs, probe.maximumEventMs,
+                   requestedPeriodMs);
+    }
+    probe.summary = message;
+    return probe;
+}
+
+// Finds the lowest selectable Exclusive buffer that survives the same real
+// event-path test. This is deliberately called a test recommendation, not a
+// guarantee: drivers and system scheduling can still change after the probe.
+static ExclusiveCompatibilityProbe ProbeExclusiveBufferRecommendation(
+    const std::wstring& endpointId, const std::atomic<bool>* cancel) {
+    ExclusiveCompatibilityProbe last{};
+    for (const int candidateMs : kExclusiveBufferOptionsMs) {
+        if (cancel && cancel->load(std::memory_order_acquire)) break;
+        auto result = ProbeExclusiveCompatibility(endpointId, candidateMs,
+                                                  cancel);
+        fwprintf(stderr,
+                 L"[audio][exclusive-probe] candidate=%d ms: %s | "
+                 L"events=%u avg/max=%.2f/%.2f ms\n",
+                 candidateMs, result.summary.c_str(), result.events,
+                 result.averageEventMs, result.maximumEventMs);
+        if (result.compatible) {
+            wchar_t summary[256]{};
+            swprintf_s(summary,
+                       L"테스트 권장 %d ms · 실제 %.2f ms · 이벤트 평균/최대 %.2f/%.2f ms",
+                       candidateMs, result.expectedPeriodMs,
+                       result.averageEventMs, result.maximumEventMs);
+            result.summary = summary;
+            return result;
+        }
+        last = std::move(result);
+    }
+    if (cancel && cancel->load(std::memory_order_acquire)) {
+        last.result = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+        last.summary = L"독점 버퍼 검사 취소됨";
+        return last;
+    }
+    if (last.summary.empty()) last.summary = L"검사할 Exclusive 버퍼가 없음";
+    else last.summary = L"Exclusive 저지연 미지원 (5–40 ms 모두 미통과)";
+    return last;
 }
 
 static std::wstring AppDirectory() {
@@ -960,6 +1319,55 @@ static std::vector<AudioEndpointInfo> EnumerateAudioEndpoints() {
     return endpoints;
 }
 
+static std::wstring ResolveAudioEndpointId(const std::wstring& configuredId) {
+    const auto endpoints = EnumerateAudioEndpoints();
+    if (!configuredId.empty()) {
+        for (const auto& endpoint : endpoints) {
+            if (endpoint.id == configuredId) return endpoint.id;
+        }
+        // A disconnected explicitly-selected device must not inherit an old
+        // Exclusive verification result. The immediate-start path will use
+        // Shared until the user selects and rechecks an active endpoint.
+        return {};
+    }
+    for (const auto& endpoint : endpoints) {
+        if (endpoint.isDefault) return endpoint.id;
+    }
+    return {};
+}
+
+static bool IsExclusiveLowLatencyBuffer(int bufferMs) {
+    return std::find(std::begin(kExclusiveBufferOptionsMs),
+                     std::end(kExclusiveBufferOptionsMs), bufferMs) !=
+           std::end(kExclusiveBufferOptionsMs);
+}
+
+static const ExclusiveEndpointCacheEntry* FindExclusiveEndpointCache(
+    const std::wstring& endpointId) {
+    const auto it = std::find_if(
+        g_settings.exclusiveEndpointCache.begin(),
+        g_settings.exclusiveEndpointCache.end(),
+        [&](const ExclusiveEndpointCacheEntry& entry) {
+            return entry.endpointId == endpointId;
+        });
+    return it != g_settings.exclusiveEndpointCache.end() ? &*it : nullptr;
+}
+
+static bool HasVerifiedExclusiveEndpoint(const std::wstring& endpointId,
+                                         int requestedBufferMs) {
+    if (endpointId.empty()) return false;
+    if (const auto* cached = FindExclusiveEndpointCache(endpointId)) {
+        return cached->supported &&
+               IsExclusiveLowLatencyBuffer(cached->recommendedBufferMs) &&
+               requestedBufferMs >= cached->recommendedBufferMs;
+    }
+    // Compatibility with the first Exclusive prototype's single-endpoint
+    // record. It is migrated into the full cache when settings are loaded.
+    return endpointId == g_settings.exclusiveVerifiedEndpointId &&
+           IsExclusiveLowLatencyBuffer(g_settings.exclusiveVerifiedBufferMs) &&
+           requestedBufferMs >= g_settings.exclusiveVerifiedBufferMs;
+}
+
 static std::wstring ConfiguredAudioEndpointName(
     const std::wstring& endpointId) {
     const auto endpoints = EnumerateAudioEndpoints();
@@ -973,6 +1381,51 @@ static std::wstring ConfiguredAudioEndpointName(
         if (endpoint.isDefault) return endpoint.name + UI_TEXT(L" (기본)");
     }
     return UI_TEXT(L"Windows 기본 장치");
+}
+
+static int RunExclusiveCompatibilityProbeCli(bool allEndpoints) {
+    const auto endpoints = EnumerateAudioEndpoints();
+    std::vector<AudioEndpointInfo> targets;
+    if (allEndpoints) {
+        targets = endpoints;
+    } else if (g_settings.audioOutputDeviceId.empty()) {
+        const auto it = std::find_if(endpoints.begin(), endpoints.end(),
+                                     [](const auto& endpoint) {
+                                         return endpoint.isDefault;
+                                     });
+        if (it != endpoints.end()) targets.push_back(*it);
+    } else {
+        const auto it = std::find_if(
+            endpoints.begin(), endpoints.end(), [](const auto& endpoint) {
+                return endpoint.id == g_settings.audioOutputDeviceId;
+            });
+        if (it != endpoints.end()) targets.push_back(*it);
+    }
+
+    if (targets.empty()) {
+        fwprintf(stderr, L"[audio][exclusive-probe] no active render endpoints found.\n");
+        return 2;
+    }
+
+    int passed = 0;
+    for (const auto& endpoint : targets) {
+        fwprintf(stderr, L"[audio][exclusive-probe] testing: %s%s\n",
+                 endpoint.name.c_str(), endpoint.isDefault ? L" (default)" : L"");
+        const auto probe = ProbeExclusiveBufferRecommendation(
+            endpoint.id, nullptr);
+        fwprintf(stderr,
+                 L"[audio][exclusive-probe] %s | requested=%u frames "
+                 L"actual=%u frames events=%u supplied=%llu frames "
+                 L"avg/max=%.2f/%.2f ms\n",
+                 probe.summary.c_str(), probe.requestedFrames,
+                 probe.actualBufferFrames, probe.events,
+                 static_cast<unsigned long long>(probe.submittedFrames),
+                 probe.averageEventMs, probe.maximumEventMs);
+        if (probe.compatible) ++passed;
+    }
+    fwprintf(stderr, L"[audio][exclusive-probe] result: %d/%zu compatible.\n",
+             passed, targets.size());
+    return passed == static_cast<int>(targets.size()) ? 0 : 3;
 }
 
 static const VideoPresetInfo& CurrentVideoPreset() {
@@ -1063,6 +1516,8 @@ static void LoadSettings() {
     wchar_t volumeHudPosition[32]{};
     wchar_t muteWhenBackground[8]{};
     wchar_t audioOutputDeviceId[1024]{};
+    wchar_t exclusiveVerifiedEndpointId[1024]{};
+    wchar_t exclusiveVerifiedBufferMs[16]{};
     wchar_t asioDriverName[128]{};
     wchar_t resolution[32]{};
     wchar_t captureDeviceId[1024]{};
@@ -1130,6 +1585,12 @@ static void LoadSettings() {
     GetPrivateProfileStringW(L"Audio", L"OutputDeviceId", L"",
                               audioOutputDeviceId,
                               ARRAYSIZE(audioOutputDeviceId), path.c_str());
+    GetPrivateProfileStringW(L"Audio", L"ExclusiveVerifiedEndpointId", L"",
+                             exclusiveVerifiedEndpointId,
+                             ARRAYSIZE(exclusiveVerifiedEndpointId), path.c_str());
+    GetPrivateProfileStringW(L"Audio", L"ExclusiveVerifiedBufferMs", L"0",
+                             exclusiveVerifiedBufferMs,
+                             ARRAYSIZE(exclusiveVerifiedBufferMs), path.c_str());
     GetPrivateProfileStringW(L"Audio", L"AsioDriver", L"", asioDriverName,
                               ARRAYSIZE(asioDriverName), path.c_str());
     GetPrivateProfileStringW(L"Video", L"Resolution", L"1920x1080", resolution,
@@ -1188,16 +1649,58 @@ static void LoadSettings() {
         wcstol(checkForUpdates, nullptr, 10) != 0;
 
     if (_wcsicmp(audio, L"Exclusive") == 0) {
-        // WASAPI Exclusive is temporarily hidden from the settings UI while
-        // its output path is being investigated. Migrate old profiles to the
-        // safe Shared path instead of silently starting the unstable mode.
-        g_settings.audioMode = AudioMode::WasapiShared;
+        g_settings.audioMode = AudioMode::WasapiExclusive;
     } else if (_wcsicmp(audio, L"ASIO") == 0) {
         g_settings.audioMode = AudioMode::Asio;
     } else {
         g_settings.audioMode = AudioMode::WasapiShared;
     }
     g_settings.asioDriverName = asioDriverName;
+    g_settings.exclusiveVerifiedEndpointId = exclusiveVerifiedEndpointId;
+    g_settings.exclusiveVerifiedBufferMs = static_cast<int>(
+        wcstol(exclusiveVerifiedBufferMs, nullptr, 10));
+    g_settings.exclusiveEndpointCache.clear();
+    const UINT cacheCount = (std::min)(
+        GetPrivateProfileIntW(L"ExclusiveEndpointCache", L"Count", 0,
+                              path.c_str()),
+        static_cast<UINT>(kMaximumExclusiveEndpointCacheEntries));
+    for (UINT i = 0; i < cacheCount; ++i) {
+        wchar_t idKey[32]{};
+        wchar_t stateKey[32]{};
+        wchar_t bufferKey[32]{};
+        wchar_t endpointId[1024]{};
+        wchar_t cacheState[16]{};
+        wchar_t cacheBuffer[16]{};
+        swprintf_s(idKey, L"Endpoint%uId", i);
+        swprintf_s(stateKey, L"Endpoint%uState", i);
+        swprintf_s(bufferKey, L"Endpoint%uBufferMs", i);
+        GetPrivateProfileStringW(L"ExclusiveEndpointCache", idKey, L"",
+                                 endpointId, ARRAYSIZE(endpointId),
+                                 path.c_str());
+        GetPrivateProfileStringW(L"ExclusiveEndpointCache", stateKey, L"",
+                                 cacheState, ARRAYSIZE(cacheState),
+                                 path.c_str());
+        GetPrivateProfileStringW(L"ExclusiveEndpointCache", bufferKey, L"0",
+                                 cacheBuffer, ARRAYSIZE(cacheBuffer),
+                                 path.c_str());
+        const bool supported = _wcsicmp(cacheState, L"Supported") == 0;
+        const bool unsupported = _wcsicmp(cacheState, L"Unsupported") == 0;
+        const int cachedBufferMs = static_cast<int>(
+            wcstol(cacheBuffer, nullptr, 10));
+        if (endpointId[0] && (unsupported ||
+            (supported && IsExclusiveLowLatencyBuffer(cachedBufferMs)))) {
+            g_settings.exclusiveEndpointCache.push_back({
+                endpointId, supported, supported ? cachedBufferMs : 0});
+        }
+    }
+    // Migrate a result written by the original one-endpoint prototype.
+    if (g_settings.exclusiveEndpointCache.empty() &&
+        !g_settings.exclusiveVerifiedEndpointId.empty() &&
+        IsExclusiveLowLatencyBuffer(g_settings.exclusiveVerifiedBufferMs)) {
+        g_settings.exclusiveEndpointCache.push_back({
+            g_settings.exclusiveVerifiedEndpointId, true,
+            g_settings.exclusiveVerifiedBufferMs});
+    }
     if (g_settings.audioMode == AudioMode::Asio) {
         const auto drivers = llcv::asio::EnumerateDrivers();
         const bool found = std::any_of(
@@ -1212,7 +1715,7 @@ static void LoadSettings() {
     }
     const int requestedBufferMs = static_cast<int>(wcstol(bufferMs, nullptr, 10));
     g_settings.wasapiBufferMs = kRecommendedWasapiBufferMs;
-    for (const int option : kWasapiBufferOptionsMs) {
+    for (const int option : kExclusiveBufferOptionsMs) {
         if (requestedBufferMs == option) {
             g_settings.wasapiBufferMs = option;
             break;
@@ -1429,6 +1932,44 @@ static void SaveSettings() {
     WritePrivateProfileStringW(L"Audio", L"OutputDeviceId",
                                g_settings.audioOutputDeviceId.c_str(),
                                path.c_str());
+    WritePrivateProfileStringW(L"Audio", L"ExclusiveVerifiedEndpointId",
+                               g_settings.exclusiveVerifiedEndpointId.c_str(),
+                               path.c_str());
+    wchar_t exclusiveVerifiedBufferMs[16]{};
+    swprintf_s(exclusiveVerifiedBufferMs, L"%d",
+               g_settings.exclusiveVerifiedBufferMs);
+    WritePrivateProfileStringW(L"Audio", L"ExclusiveVerifiedBufferMs",
+                               exclusiveVerifiedBufferMs, path.c_str());
+
+    // Rewrite this small cache as one section so removed/disconnected devices
+    // cannot leave stale numbered entries behind indefinitely.
+    WritePrivateProfileStringW(L"ExclusiveEndpointCache", nullptr, nullptr,
+                               path.c_str());
+    const size_t cacheCount = (std::min)(
+        g_settings.exclusiveEndpointCache.size(),
+        kMaximumExclusiveEndpointCacheEntries);
+    wchar_t cacheCountText[16]{};
+    swprintf_s(cacheCountText, L"%zu", cacheCount);
+    WritePrivateProfileStringW(L"ExclusiveEndpointCache", L"Count",
+                               cacheCountText, path.c_str());
+    for (size_t i = 0; i < cacheCount; ++i) {
+        const auto& entry = g_settings.exclusiveEndpointCache[i];
+        wchar_t idKey[32]{};
+        wchar_t stateKey[32]{};
+        wchar_t bufferKey[32]{};
+        wchar_t bufferText[16]{};
+        swprintf_s(idKey, L"Endpoint%zuId", i);
+        swprintf_s(stateKey, L"Endpoint%zuState", i);
+        swprintf_s(bufferKey, L"Endpoint%zuBufferMs", i);
+        swprintf_s(bufferText, L"%d", entry.recommendedBufferMs);
+        WritePrivateProfileStringW(L"ExclusiveEndpointCache", idKey,
+                                   entry.endpointId.c_str(), path.c_str());
+        WritePrivateProfileStringW(L"ExclusiveEndpointCache", stateKey,
+                                   entry.supported ? L"Supported" : L"Unsupported",
+                                   path.c_str());
+        WritePrivateProfileStringW(L"ExclusiveEndpointCache", bufferKey,
+                                   bufferText, path.c_str());
+    }
 
     const auto& video = CurrentVideoPreset();
     wchar_t resolution[32]{};
@@ -2527,6 +3068,7 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
     IAudioClient* client = nullptr;
     IAudioClient3* client3 = nullptr;
     IAudioRenderClient* render = nullptr;
+    IAudioClock* clock = nullptr;
     DefaultAudioEndpointNotification* endpointNotification = nullptr;
     bool notificationRegistered = false;
     bool restartForDefaultChange = false;
@@ -2534,6 +3076,21 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
 
     DWORD taskIndex = 0;
     HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
+    if (exclusive && mmcss) {
+        // The Exclusive event is a hard output deadline: a late wake leaves
+        // one complete endpoint buffer unfilled.  Raise only this diagnostic
+        // renderer relative to other Pro Audio MMCSS work; no buffer depth or
+        // rendering queue is changed.
+        if (AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_CRITICAL)) {
+            fwprintf(stderr,
+                     L"[audio][exclusive] MMCSS priority: Critical\n");
+        } else {
+            fwprintf(stderr,
+                     L"[audio][exclusive] MMCSS Critical priority request "
+                     L"failed (error %lu); using task default.\n",
+                     GetLastError());
+        }
+    }
 
     do {
         hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
@@ -2586,6 +3143,46 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
             if (hr != S_OK) {
                 LogHr(L"IAudioClient::IsFormatSupported(exclusive)", hr);
                 break;
+            }
+            fwprintf(stderr,
+                     L"[audio] exclusive exact format accepted: %u Hz / "
+                     L"%u-bit PCM / %u ch\n",
+                     wf.nSamplesPerSec, wf.wBitsPerSample, wf.nChannels);
+
+            // GetMixFormat describes the Shared engine's preferred format,
+            // not this Exclusive stream.  Log it explicitly so diagnostics
+            // cannot mistake a 32-bit Shared mix format for a conversion in
+            // the active 16-bit Exclusive path.
+            WAVEFORMATEX* sharedMix = nullptr;
+            const HRESULT mixHr = client->GetMixFormat(&sharedMix);
+            if (SUCCEEDED(mixHr) && sharedMix) {
+                const wchar_t* subtype = L"unknown";
+                WORD validBits = sharedMix->wBitsPerSample;
+                if (sharedMix->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+                    subtype = L"float";
+                } else if (sharedMix->wFormatTag == WAVE_FORMAT_PCM) {
+                    subtype = L"PCM";
+                } else if (sharedMix->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+                           sharedMix->cbSize >=
+                               sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+                    const auto* extensible = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(
+                        sharedMix);
+                    validBits = extensible->Samples.wValidBitsPerSample;
+                    if (extensible->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) {
+                        subtype = L"float";
+                    } else if (extensible->SubFormat == KSDATAFORMAT_SUBTYPE_PCM) {
+                        subtype = L"PCM";
+                    }
+                }
+                fwprintf(stderr,
+                         L"[audio] endpoint Shared mix format (not used by "
+                         L"Exclusive): %u Hz / %u-bit %s (%u valid) / %u ch\n",
+                         sharedMix->nSamplesPerSec, sharedMix->wBitsPerSample,
+                         subtype, validBits, sharedMix->nChannels);
+                CoTaskMemFree(sharedMix);
+            } else {
+                LogHr(L"IAudioClient::GetMixFormat(exclusive diagnostic)",
+                      mixHr);
             }
         } else if (FAILED(hr)) {
             // Shared mode can still accept the requested PCM format through
@@ -2671,12 +3268,34 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                          L"[audio] classic WASAPI Shared fallback active.\n");
             }
         } else {
+            // The diagnostic build intentionally retains the established
+            // event-driven Exclusive contract: its event period equals the
+            // requested client buffer duration.  Record the endpoint periods
+            // for comparison only; changing either parameter here would make
+            // this test a different output path.
+            REFERENCE_TIME defaultPeriod = 0;
+            REFERENCE_TIME minimumPeriod = 0;
+            const HRESULT periodHr = client->GetDevicePeriod(
+                &defaultPeriod, &minimumPeriod);
+            if (FAILED(periodHr)) {
+                LogHr(L"IAudioClient::GetDevicePeriod(exclusive)", periodHr);
+            } else {
+                fwprintf(stderr,
+                         L"[audio] exclusive endpoint period: default %.2f ms, "
+                         L"minimum %.2f ms\n",
+                         static_cast<double>(defaultPeriod) / 10'000.0,
+                         static_cast<double>(minimumPeriod) / 10'000.0);
+            }
             REFERENCE_TIME hns = static_cast<REFERENCE_TIME>(
                 g_settings.wasapiBufferMs) * 10'000;
+            fwprintf(stderr,
+                     L"[audio] exclusive request: buffer %.2f ms, event "
+                     L"period %.2f ms (same-duration event mode)\n",
+                     static_cast<double>(hns) / 10'000.0,
+                     static_cast<double>(hns) / 10'000.0);
             hr = client->Initialize(
                 AUDCLNT_SHAREMODE_EXCLUSIVE,
-                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                hns, hns, &wf, nullptr);
+                AUDCLNT_STREAMFLAGS_EVENTCALLBACK, hns, hns, &wf, nullptr);
             if (hr == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
                 // Many exclusive endpoints require a period aligned to the
                 // device's native packet size. Windows exposes the aligned
@@ -2694,8 +3313,8 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                              1000.0 * alignedFrames / kSampleRate);
                     hr = client->Initialize(
                         AUDCLNT_SHAREMODE_EXCLUSIVE,
-                        AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                        hns, hns, &wf, nullptr);
+                        AUDCLNT_STREAMFLAGS_EVENTCALLBACK, hns, hns, &wf,
+                        nullptr);
                 } else {
                     LogHr(L"WASAPI exclusive GetBufferSize(alignment)",
                           alignHr);
@@ -2709,7 +3328,7 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
 
         eventHandle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!eventHandle) {
-            fwprintf(stderr, L"CreateEvent failed.\n");
+            fwprintf(stderr, L"Create audio wake handle failed.\n");
             break;
         }
 
@@ -2718,6 +3337,29 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
 
         hr = client->GetService(IID_PPV_ARGS(&render));
         if (FAILED(hr)) { LogHr(L"GetService(IAudioRenderClient)", hr); break; }
+
+        UINT64 exclusiveClockFrequency = 0;
+        if (exclusive) {
+            const HRESULT clockHr = client->GetService(IID_PPV_ARGS(&clock));
+            if (SUCCEEDED(clockHr) && clock) {
+                const HRESULT frequencyHr = clock->GetFrequency(
+                    &exclusiveClockFrequency);
+                if (FAILED(frequencyHr)) {
+                    LogHr(L"IAudioClock::GetFrequency(exclusive)",
+                          frequencyHr);
+                    SafeRelease(clock);
+                    exclusiveClockFrequency = 0;
+                } else {
+                    fwprintf(stderr,
+                             L"[audio][exclusive] endpoint clock frequency: "
+                             L"%llu ticks/sec\n",
+                             static_cast<unsigned long long>(
+                                 exclusiveClockFrequency));
+                }
+            } else {
+                LogHr(L"GetService(IAudioClock exclusive)", clockHr);
+            }
+        }
 
         UINT32 bufferFrames = 0;
         hr = client->GetBufferSize(&bufferFrames);
@@ -2784,6 +3426,91 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
             g_settings.pcmQueueTargetMs * kSampleRate / 1000);
         g_audioQueueTargetFrames.store(queueTargetFrames,
                                        std::memory_order_release);
+
+        // This telemetry is exclusive-mode diagnostic only.  It has no
+        // bearing on the shared/ASIO hot paths and avoids per-callback text
+        // output; one compact summary is emitted per second instead.
+        uint64_t exclusiveWindowStartMs = GetTickCount64();
+        uint64_t exclusiveLastEventMs = 0;
+        uint64_t exclusiveLastClockPosition = 0;
+        uint64_t exclusiveEventCount = 0;
+        uint64_t exclusiveEventIntervalTotalMs = 0;
+        uint64_t exclusiveEventIntervalMaxMs = 0;
+        uint64_t exclusiveLateEventCount = 0;
+        uint64_t exclusiveWaitTimeoutCount = 0;
+        uint64_t exclusiveClockIntervalCount = 0;
+        uint64_t exclusiveClockIntervalTotalTicks = 0;
+        uint64_t exclusiveClockIntervalMaxTicks = 0;
+        uint64_t exclusiveLastLateLogMs = 0;
+        uint64_t exclusiveLastTimeoutLogMs = 0;
+        uint64_t exclusiveLastStarvationLogMs = 0;
+        uint64_t exclusiveRequestedFrames = 0;
+        uint64_t exclusiveWrittenFrames = 0;
+        uint64_t exclusiveMissingFrames = 0;
+        UINT32 exclusiveMinPadding = UINT32_MAX;
+        UINT32 exclusiveMaxPadding = 0;
+        const uint64_t exclusiveLateThresholdMs = static_cast<uint64_t>(
+            std::ceil(2000.0 * bufferFrames / kSampleRate)) + 2;
+
+        auto emitExclusiveDiagnostics = [&](uint64_t nowMs) {
+            if (!exclusive || nowMs < exclusiveWindowStartMs + 1000) return;
+            const double averageEventMs = exclusiveEventCount > 1
+                ? static_cast<double>(exclusiveEventIntervalTotalMs) /
+                      static_cast<double>(exclusiveEventCount - 1)
+                : 0.0;
+            const double averageClockMs = exclusiveClockIntervalCount &&
+                    exclusiveClockFrequency
+                ? 1000.0 * static_cast<double>(
+                      exclusiveClockIntervalTotalTicks) /
+                      static_cast<double>(exclusiveClockIntervalCount) /
+                      static_cast<double>(exclusiveClockFrequency)
+                : 0.0;
+            const double maximumClockMs = exclusiveClockFrequency
+                ? 1000.0 * static_cast<double>(exclusiveClockIntervalMaxTicks) /
+                      static_cast<double>(exclusiveClockFrequency)
+                : 0.0;
+            const UINT32 queueFrames = static_cast<UINT32>((std::min)(
+                g_audioRingFrames.load(std::memory_order_acquire) +
+                    driftResampler.bufferedFrames(),
+                static_cast<size_t>(UINT32_MAX)));
+            fwprintf(stderr,
+                     L"[audio][exclusive] 1s: %s=%llu, interval avg/max "
+                     L"%.2f/%llu ms, late=%llu (threshold %llu ms), "
+                     L"timeout=%llu, padding min/max=%u/%u frames, "
+                     L"write=%llu/%llu frames, missing=%llu, queue=%u frames "
+                     L"(target %u), device-clock avg/max=%.2f/%.2f ms, "
+                     L"resampler=%s %+d ppm\n",
+                     L"event",
+                     static_cast<unsigned long long>(exclusiveEventCount),
+                     averageEventMs,
+                     static_cast<unsigned long long>(exclusiveEventIntervalMaxMs),
+                     static_cast<unsigned long long>(exclusiveLateEventCount),
+                     static_cast<unsigned long long>(exclusiveLateThresholdMs),
+                     static_cast<unsigned long long>(exclusiveWaitTimeoutCount),
+                     exclusiveMinPadding == UINT32_MAX ? 0 : exclusiveMinPadding,
+                     exclusiveMaxPadding,
+                     static_cast<unsigned long long>(exclusiveWrittenFrames),
+                     static_cast<unsigned long long>(exclusiveRequestedFrames),
+                     static_cast<unsigned long long>(exclusiveMissingFrames),
+                     queueFrames, queueTargetFrames,
+                     averageClockMs, maximumClockMs,
+                     AudioResamplerActive() ? L"on" : L"off",
+                     g_audioResamplePpm.load(std::memory_order_acquire));
+            exclusiveWindowStartMs = nowMs;
+            exclusiveEventCount = 0;
+            exclusiveEventIntervalTotalMs = 0;
+            exclusiveEventIntervalMaxMs = 0;
+            exclusiveLateEventCount = 0;
+            exclusiveWaitTimeoutCount = 0;
+            exclusiveClockIntervalCount = 0;
+            exclusiveClockIntervalTotalTicks = 0;
+            exclusiveClockIntervalMaxTicks = 0;
+            exclusiveRequestedFrames = 0;
+            exclusiveWrittenFrames = 0;
+            exclusiveMissingFrames = 0;
+            exclusiveMinPadding = UINT32_MAX;
+            exclusiveMaxPadding = 0;
+        };
         while (g_running.load()) {
             if (followDefault && notificationRegistered &&
                 g_defaultAudioEndpointGeneration.load(
@@ -2796,10 +3523,67 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                 break;
             }
             const DWORD waitResult = WaitForSingleObject(eventHandle, 100);
-            if (waitResult != WAIT_OBJECT_0) continue;
+            const uint64_t eventNowMs = GetTickCount64();
+            if (waitResult != WAIT_OBJECT_0) {
+                if (exclusive && waitResult == WAIT_TIMEOUT) {
+                    ++exclusiveWaitTimeoutCount;
+                    if (!exclusiveLastTimeoutLogMs ||
+                        eventNowMs >= exclusiveLastTimeoutLogMs + 1000) {
+                    fwprintf(stderr,
+                             L"[audio][exclusive] event wait timed out "
+                             L"after 100 ms; renderer did not receive a "
+                             L"buffer-ready signal.\n");
+                        exclusiveLastTimeoutLogMs = eventNowMs;
+                    }
+                    emitExclusiveDiagnostics(eventNowMs);
+                }
+                continue;
+            }
+            if (exclusive) {
+                if (clock && exclusiveClockFrequency) {
+                    UINT64 clockPosition = 0;
+                    if (SUCCEEDED(clock->GetPosition(&clockPosition, nullptr))) {
+                        if (exclusiveLastClockPosition &&
+                            clockPosition >= exclusiveLastClockPosition) {
+                            const UINT64 clockDelta = clockPosition -
+                                exclusiveLastClockPosition;
+                            ++exclusiveClockIntervalCount;
+                            exclusiveClockIntervalTotalTicks += clockDelta;
+                            exclusiveClockIntervalMaxTicks = (std::max)(
+                                exclusiveClockIntervalMaxTicks, clockDelta);
+                        }
+                        exclusiveLastClockPosition = clockPosition;
+                    }
+                }
+                if (exclusiveLastEventMs) {
+                    const uint64_t intervalMs = eventNowMs - exclusiveLastEventMs;
+                    exclusiveEventIntervalTotalMs += intervalMs;
+                    exclusiveEventIntervalMaxMs = (std::max)(
+                        exclusiveEventIntervalMaxMs, intervalMs);
+                    if (intervalMs >= exclusiveLateThresholdMs) {
+                        ++exclusiveLateEventCount;
+                        if (!exclusiveLastLateLogMs ||
+                            eventNowMs >= exclusiveLastLateLogMs + 1000) {
+                            fwprintf(stderr,
+                                     L"[audio][exclusive] late event: %llu ms "
+                                     L"since previous signal (threshold %llu ms).\n",
+                                     static_cast<unsigned long long>(intervalMs),
+                                     static_cast<unsigned long long>(
+                                         exclusiveLateThresholdMs));
+                            exclusiveLastLateLogMs = eventNowMs;
+                        }
+                    }
+                }
+                exclusiveLastEventMs = eventNowMs;
+                ++exclusiveEventCount;
+            }
 
             UINT32 padding = 0;
             if (FAILED(client->GetCurrentPadding(&padding))) continue;
+            if (exclusive) {
+                exclusiveMinPadding = (std::min)(exclusiveMinPadding, padding);
+                exclusiveMaxPadding = (std::max)(exclusiveMaxPadding, padding);
+            }
             g_audioWasapiPaddingFrames.store(padding,
                                              std::memory_order_release);
 
@@ -2935,6 +3719,10 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                                          std::memory_order_release);
             }
             if (got) memcpy(out, temp.data(), got * wf.nBlockAlign);
+            if (exclusive) {
+                exclusiveRequestedFrames += writable;
+                exclusiveWrittenFrames += got;
+            }
             if (got < writable) {
                 memset(out + got * wf.nBlockAlign, 0,
                        (writable - static_cast<UINT32>(got)) * wf.nBlockAlign);
@@ -2942,6 +3730,19 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                     const uint64_t nowMs = GetTickCount64();
                     const UINT32 missingFrames =
                         writable - static_cast<UINT32>(got);
+                    if (exclusive) {
+                        exclusiveMissingFrames += missingFrames;
+                        if (!exclusiveLastStarvationLogMs ||
+                            nowMs >= exclusiveLastStarvationLogMs + 1000) {
+                            fwprintf(stderr,
+                                     L"[audio][exclusive] source starvation: "
+                                     L"needed=%u, received=%zu, missing=%u frames; "
+                                     L"queue-before=%zu frames.\n",
+                                     writable, got, missingFrames,
+                                     availableBeforeRender);
+                            exclusiveLastStarvationLogMs = nowMs;
+                        }
+                    }
                     AudioErrorCause cause = AudioErrorCause::PcmDepletion;
                     g_underruns++;
                     g_audioUnderrunFrames.fetch_add(
@@ -2980,12 +3781,14 @@ static bool AudioRenderThreadWasapi(AudioMode mode,
                 }
             }
             render->ReleaseBuffer(writable, 0);
+            emitExclusiveDiagnostics(eventNowMs);
         }
 
         client->Stop();
     } while (false);
 
     if (eventHandle) CloseHandle(eventHandle);
+    SafeRelease(clock);
     SafeRelease(render);
     SafeRelease(client3);
     SafeRelease(client);
@@ -4151,6 +4954,7 @@ struct DirectD3D11Renderer {
     bool sharpScalingActive = false;
     bool discardUpdateAvailable = false;
     bool occluded = false;
+    bool occlusionLogged = false;
     uint64_t nextOcclusionTestMs = 0;
     DXGI_FORMAT inputFormat = DXGI_FORMAT_NV12;
     bool hdrOutput = false;
@@ -4223,6 +5027,7 @@ struct DirectD3D11Renderer {
         sharpScalingActive = false;
         discardUpdateAvailable = false;
         occluded = false;
+        occlusionLogged = false;
         nextOcclusionTestMs = 0;
         inputFormat = DXGI_FORMAT_NV12;
         hdrOutput = false;
@@ -5076,6 +5881,13 @@ struct DirectD3D11Renderer {
             }
             if (FAILED(test)) return test;
             occluded = false;
+            if (occlusionLogged) {
+                fwprintf(stderr,
+                         L"[display-event] swapchain visible again after "
+                         L"occlusion; uptime=%llu ms\n",
+                         static_cast<unsigned long long>(nowMs));
+                occlusionLogged = false;
+            }
             nextOcclusionTestMs = 0;
         }
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
@@ -5098,6 +5910,15 @@ struct DirectD3D11Renderer {
         hr = swapChain->Present(syncInterval, flags);
         if (hr == DXGI_STATUS_OCCLUDED) {
             occluded = true;
+            if (!occlusionLogged) {
+                fwprintf(stderr,
+                         L"[display-event] swapchain occluded; uptime=%llu ms "
+                         L"present-mode=%s\n",
+                         static_cast<unsigned long long>(GetTickCount64()),
+                         vsync ? L"VSync" :
+                             (allowTearing ? L"Tearing" : L"Immediate"));
+                occlusionLogged = true;
+            }
             nextOcclusionTestMs = GetTickCount64() + 50;
         }
         return hr;
@@ -5628,6 +6449,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                                    HRESULT failure) {
             LogHr(failedStage, failure);
             const HRESULT removedReason = renderer.deviceRemovedReason();
+            LogD3DFailureEvent(failure, removedReason);
             if (FAILED(removedReason)) {
                 LogHr(L"ID3D11Device::GetDeviceRemovedReason",
                       removedReason);
@@ -5847,11 +6669,14 @@ constexpr int IDC_SETTINGS_AUDIO_ONLY = 2032;
 constexpr int IDC_SETTINGS_FORCE_HDR10 = 2033;
 constexpr int IDC_SETTINGS_FORCE_HDR10_HELP = 2034;
 constexpr int IDC_SETTINGS_UPDATE_CHECK = 2035;
+constexpr int IDC_SETTINGS_EXCLUSIVE_TEST = 2036;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
 constexpr UINT WM_CAPTURE_AUDIO_PROBE_COMPLETE = WM_APP + 76;
 constexpr UINT WM_UPDATE_CHECK_COMPLETE = WM_APP + 77;
+constexpr UINT WM_EXCLUSIVE_ENDPOINT_PROBE_COMPLETE = WM_APP + 79;
+constexpr UINT WM_EXCLUSIVE_SCAN_COMPLETE = WM_APP + 80;
 
 struct SettingsDialogState {
     HWND languageLabel = nullptr;
@@ -5887,6 +6712,7 @@ struct SettingsDialogState {
     HWND driftCombo = nullptr;
     HWND pcmQueueCombo = nullptr;
     HWND audioStatus = nullptr;
+    HWND exclusiveTestButton = nullptr;
     HWND presentationCombo = nullptr;
     HWND scalingCombo = nullptr;
     HWND videoCombo = nullptr;
@@ -5912,8 +6738,11 @@ struct SettingsDialogState {
     HWND activeTooltipTarget = nullptr;
     std::vector<HFONT> uiFonts;
     std::thread probeThread;
+    std::thread exclusiveProbeThread;
     std::thread captureAudioProbeThread;
     std::atomic<bool> probeReady{false};
+    std::atomic<bool> exclusiveProbeStop{false};
+    std::atomic<bool> exclusiveScanRunning{false};
     std::atomic<bool> captureAudioProbeReady{false};
     AudioClient3Support probe{};
     InternalCaptureAudioProbe captureAudioProbe{};
@@ -5921,12 +6750,16 @@ struct SettingsDialogState {
     std::vector<CaptureDeviceInfo> captureDevices;
     std::vector<CaptureDeviceInfo> captureAudioDevices;
     std::vector<AudioEndpointInfo> audioEndpoints;
+    std::vector<ExclusiveEndpointVerification> exclusiveEndpointResults;
     std::vector<llcv::asio::DriverInfo> asioDrivers;
     std::vector<PixelFormatSupport> pixelFormats;
     VideoPreset initialVideoPreset = VideoPreset::R1920x1080;
     HMONITOR viewerMonitor = nullptr;
     UINT32 selectedSharedPeriodFrames = 0;
     int selectedBufferMs = kRecommendedWasapiBufferMs;
+    std::wstring exclusiveVerifiedEndpointId;
+    size_t exclusiveScanCompleted = 0;
+    int exclusiveVerifiedBufferMs = 0;
     bool bufferItemsAreSharedFrames = false;
     bool asioAvailable = false;
     bool showAdvanced = false;
@@ -6053,7 +6886,8 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
     PlaceSettingsControl(state->audioOutputCombo, 195, 64, 280, 220, dpi);
     PlaceSettingsControl(state->bufferLabel, 24, 112, 160, 24, dpi);
     PlaceSettingsControl(state->bufferCombo, 195, 108, 280, 180, dpi);
-    PlaceSettingsControl(state->audioStatus, 24, 148, 451, 28, dpi);
+    PlaceSettingsControl(state->audioStatus, 24, 148, 300, 28, dpi);
+    PlaceSettingsControl(state->exclusiveTestButton, 332, 144, 143, 28, dpi);
     PlaceSettingsControl(state->volumeHudLabel, 24, 190, 160, 24, dpi);
     PlaceSettingsControl(state->volumeHudCombo, 195, 186, 280, 160, dpi);
     PlaceSettingsControl(state->volumeBoostCheck, 24, 230, 400, 28, dpi);
@@ -6151,6 +6985,7 @@ static void UpdateAdvancedControlVisibility(SettingsDialogState* state) {
     const bool visible = state->showAdvanced;
     for (HWND control : {
              state->bufferLabel, state->bufferCombo, state->audioStatus,
+             state->exclusiveTestButton,
              state->volumeHudLabel, state->volumeHudCombo,
              state->volumeBoostCheck, state->volumeBoostHelp,
              state->driftLabel, state->driftHelp, state->driftCombo,
@@ -6326,9 +7161,13 @@ static bool SettingsUsesSharedMode(const SettingsDialogState* state) {
     return state && SendMessageW(state->audioCombo, CB_GETCURSEL, 0, 0) == 0;
 }
 
+static bool SettingsUsesExclusiveMode(const SettingsDialogState* state) {
+    return state && SendMessageW(state->audioCombo, CB_GETCURSEL, 0, 0) == 1;
+}
+
 static bool SettingsUsesAsioMode(const SettingsDialogState* state) {
     return state && state->asioAvailable &&
-           SendMessageW(state->audioCombo, CB_GETCURSEL, 0, 0) == 1;
+           SendMessageW(state->audioCombo, CB_GETCURSEL, 0, 0) == 2;
 }
 
 static void UpdateAsioControlVisibility(SettingsDialogState* state) {
@@ -6342,6 +7181,8 @@ static void UpdateAsioControlVisibility(SettingsDialogState* state) {
 
 static void PopulateAudioOutputCombo(SettingsDialogState* state) {
     if (!state || !state->audioOutputCombo) return;
+    const LRESULT previousSelection = SendMessageW(
+        state->audioOutputCombo, CB_GETCURSEL, 0, 0);
     SendMessageW(state->audioOutputCombo, CB_RESETCONTENT, 0, 0);
     if (SettingsUsesAsioMode(state)) {
         SetWindowTextW(state->audioOutputLabel, UI_TEXT(L"ASIO 출력 드라이버"));
@@ -6359,14 +7200,51 @@ static void PopulateAudioOutputCombo(SettingsDialogState* state) {
     }
 
     SetWindowTextW(state->audioOutputLabel, UI_TEXT(L"오디오 출력 장치"));
+    std::wstring defaultLabel = UI_TEXT(L"Windows 기본 출력 장치 따라가기 (권장)");
+    if (SettingsUsesExclusiveMode(state)) {
+        const auto defaultIt = std::find_if(
+            state->audioEndpoints.begin(), state->audioEndpoints.end(),
+            [](const AudioEndpointInfo& endpoint) { return endpoint.isDefault; });
+        if (defaultIt != state->audioEndpoints.end()) {
+            const size_t index = static_cast<size_t>(
+                std::distance(state->audioEndpoints.begin(), defaultIt));
+            if (index < state->exclusiveEndpointResults.size()) {
+                const auto& result = state->exclusiveEndpointResults[index];
+                if (result.state == ExclusiveEndpointState::Supported) {
+                    wchar_t suffix[48]{};
+                    swprintf_s(suffix, UI_TEXT(L" · 사용 가능 · %d ms"),
+                               result.recommendedBufferMs);
+                    defaultLabel += suffix;
+                } else if (result.state == ExclusiveEndpointState::Testing) {
+                    defaultLabel += UI_TEXT(L" · 검사 중");
+                } else if (result.state == ExclusiveEndpointState::Unsupported) {
+                    defaultLabel += UI_TEXT(L" · 사용 불가");
+                }
+            }
+        }
+    }
     SendMessageW(state->audioOutputCombo, CB_ADDSTRING, 0,
-                 reinterpret_cast<LPARAM>(UI_TEXT(
-                     L"Windows 기본 출력 장치 따라가기 (권장)")));
+                 reinterpret_cast<LPARAM>(defaultLabel.c_str()));
     LRESULT selected = 0;
     for (size_t i = 0; i < state->audioEndpoints.size(); ++i) {
         std::wstring label = state->audioEndpoints[i].name;
         if (state->audioEndpoints[i].isDefault) {
             label += UI_TEXT(L" (현재 기본)");
+        }
+        if (SettingsUsesExclusiveMode(state) &&
+            i < state->exclusiveEndpointResults.size()) {
+            const auto& result = state->exclusiveEndpointResults[i];
+            if (result.state == ExclusiveEndpointState::Supported) {
+                wchar_t suffix[48]{};
+                swprintf_s(suffix, UI_TEXT(
+                    L" (사용 가능 · %d ms)"),
+                           result.recommendedBufferMs);
+                label += suffix;
+            } else if (result.state == ExclusiveEndpointState::Testing) {
+                label += UI_TEXT(L" (검사 중)");
+            } else if (result.state == ExclusiveEndpointState::Unsupported) {
+                label += UI_TEXT(L" (사용 불가)");
+            }
         }
         const LRESULT index = SendMessageW(
             state->audioOutputCombo, CB_ADDSTRING, 0,
@@ -6374,6 +7252,10 @@ static void PopulateAudioOutputCombo(SettingsDialogState* state) {
         if (state->audioEndpoints[i].id == g_settings.audioOutputDeviceId) {
             selected = index;
         }
+    }
+    if (previousSelection >= 0 &&
+        previousSelection <= static_cast<LRESULT>(state->audioEndpoints.size())) {
+        selected = previousSelection;
     }
     SendMessageW(state->audioOutputCombo, CB_SETCURSEL, selected, 0);
 }
@@ -6471,20 +7353,24 @@ static void PopulateSettingsBufferCombo(SettingsDialogState* state) {
         return;
     }
 
+    const bool exclusiveOptions = SettingsUsesExclusiveMode(state);
+    const size_t optionCount = exclusiveOptions
+        ? ARRAYSIZE(kExclusiveBufferOptionsMs)
+        : ARRAYSIZE(kWasapiBufferOptionsMs);
     size_t selected = 0;
-    for (size_t i = 0; i < ARRAYSIZE(kWasapiBufferOptionsMs); ++i) {
+    for (size_t i = 0; i < optionCount; ++i) {
+        const int optionMs = exclusiveOptions
+            ? kExclusiveBufferOptionsMs[i] : kWasapiBufferOptionsMs[i];
         wchar_t label[64]{};
-        if (kWasapiBufferOptionsMs[i] == kRecommendedWasapiBufferMs) {
-            swprintf_s(label, UI_TEXT(L"%d ms (권장)"), kWasapiBufferOptionsMs[i]);
-        } else {
-            swprintf_s(label, L"%d ms", kWasapiBufferOptionsMs[i]);
-        }
+        // The useful Exclusive buffer is device-specific and comes from its
+        // preflight verdict, so a global "20 ms recommended" label misleads.
+        swprintf_s(label, L"%d ms", optionMs);
         const LRESULT index = SendMessageW(
             state->bufferCombo, CB_ADDSTRING, 0,
             reinterpret_cast<LPARAM>(label));
         SendMessageW(state->bufferCombo, CB_SETITEMDATA,
-                     static_cast<WPARAM>(index), kWasapiBufferOptionsMs[i]);
-        if (kWasapiBufferOptionsMs[i] == state->selectedBufferMs) selected = i;
+                     static_cast<WPARAM>(index), optionMs);
+        if (optionMs == state->selectedBufferMs) selected = i;
     }
     SendMessageW(state->bufferCombo, CB_SETCURSEL,
                  static_cast<WPARAM>(selected), 0);
@@ -6497,6 +7383,11 @@ static void UpdateAudioClient3Status(SettingsDialogState* state) {
             L"ASIO 출력 · 드라이버 기본 버퍼 사용 · 앱 클록 보정 가능"));
         return;
     }
+    if (SettingsUsesExclusiveMode(state)) {
+        SetWindowTextW(state->audioStatus, UI_TEXT(
+            L"WASAPI Exclusive 이벤트 진단 · 장치 독점 · IAudioClient3 미사용"));
+        return;
+    }
     if (!state->probeReady.load(std::memory_order_acquire)) {
         SetWindowTextW(state->audioStatus, UI_TEXT(L"Shared 저지연 지원 확인 중…"));
         return;
@@ -6505,16 +7396,29 @@ static void UpdateAudioClient3Status(SettingsDialogState* state) {
     wchar_t status[200]{};
     if (state->probe.supported) {
         swprintf_s(status,
-                   UI_TEXT(L"IAudioClient3 지원됨 · Shared %.2f–%.2f ms · 검사 %.1f ms"),
+                   UI_TEXT(L"Shared 저지연 · %.2f~%.2f ms · 검사 %.1f ms"),
                    1000.0 * state->probe.minimumFrames / kSampleRate,
                    1000.0 * state->probe.maximumFrames / kSampleRate,
                    state->probe.probeMilliseconds);
     } else {
-        swprintf_s(status,
-                   UI_TEXT(L"IAudioClient3 사용 불가 · 기본 Shared로 자동 전환 (0x%08X)"),
-                   static_cast<unsigned>(state->probe.result));
+        // Keep the settings row actionable and short instead of exposing an
+        // implementation HRESULT that does not help with device selection.
+        swprintf_s(status, UI_TEXT(
+            L"Shared 기본 모드 · 저지연 API 미지원"));
     }
     SetWindowTextW(state->audioStatus, status);
+}
+
+static void UpdateExclusiveProbeControl(SettingsDialogState* state) {
+    if (!state || !state->exclusiveTestButton) return;
+    const bool running = state->exclusiveScanRunning.load(
+        std::memory_order_acquire);
+    const bool supportedMode = SettingsUsesExclusiveMode(state);
+    EnableWindow(state->exclusiveTestButton,
+                 supportedMode && !running ? TRUE : FALSE);
+    SetWindowTextW(state->exclusiveTestButton,
+                   UI_TEXT(running ? L"장치 검사 중…" :
+                                     L"전체 장치 다시 검사"));
 }
 
 static std::wstring SelectedAudioEndpointId(
@@ -6526,6 +7430,217 @@ static std::wstring SelectedAudioEndpointId(
     if (index <= 0 || static_cast<size_t>(index - 1) >=
                           state->audioEndpoints.size()) return {};
     return state->audioEndpoints[static_cast<size_t>(index - 1)].id;
+}
+
+static std::wstring EffectiveSelectedAudioEndpointId(
+    const SettingsDialogState* state) {
+    const std::wstring selected = SelectedAudioEndpointId(state);
+    if (!selected.empty()) return selected;
+    if (!state) return {};
+    for (const auto& endpoint : state->audioEndpoints) {
+        if (endpoint.isDefault) return endpoint.id;
+    }
+    return {};
+}
+
+static const ExclusiveEndpointVerification* FindExclusiveVerification(
+    const SettingsDialogState* state, const std::wstring& endpointId) {
+    if (!state || endpointId.empty()) return nullptr;
+    for (size_t i = 0; i < state->audioEndpoints.size() &&
+                       i < state->exclusiveEndpointResults.size(); ++i) {
+        if (state->audioEndpoints[i].id == endpointId) {
+            return &state->exclusiveEndpointResults[i];
+        }
+    }
+    return nullptr;
+}
+
+static int ExclusiveVerifiedBufferForSelection(const SettingsDialogState* state) {
+    const std::wstring endpointId = EffectiveSelectedAudioEndpointId(state);
+    const auto* result = FindExclusiveVerification(state, endpointId);
+    return result && result->state == ExclusiveEndpointState::Supported
+        ? result->recommendedBufferMs : 0;
+}
+
+static void PersistCompletedExclusiveEndpointResults(
+    const SettingsDialogState* state) {
+    if (!state) return;
+    bool changed = false;
+    for (size_t i = 0; i < state->audioEndpoints.size() &&
+                       i < state->exclusiveEndpointResults.size(); ++i) {
+        const auto& result = state->exclusiveEndpointResults[i];
+        if (result.state != ExclusiveEndpointState::Supported &&
+            result.state != ExclusiveEndpointState::Unsupported) {
+            continue;
+        }
+        const bool supported = result.state == ExclusiveEndpointState::Supported;
+        const int recommendedBufferMs = supported
+            ? result.recommendedBufferMs : 0;
+        auto it = std::find_if(
+            g_settings.exclusiveEndpointCache.begin(),
+            g_settings.exclusiveEndpointCache.end(),
+            [&](const ExclusiveEndpointCacheEntry& entry) {
+                return entry.endpointId == state->audioEndpoints[i].id;
+            });
+        if (it == g_settings.exclusiveEndpointCache.end()) {
+            if (g_settings.exclusiveEndpointCache.size() >=
+                kMaximumExclusiveEndpointCacheEntries) {
+                continue;
+            }
+            g_settings.exclusiveEndpointCache.push_back({
+                state->audioEndpoints[i].id, supported, recommendedBufferMs});
+            changed = true;
+        } else if (it->supported != supported ||
+                   it->recommendedBufferMs != recommendedBufferMs) {
+            it->supported = supported;
+            it->recommendedBufferMs = recommendedBufferMs;
+            changed = true;
+        }
+    }
+    // Probe output is a completed user-requested diagnostic, not an unaccepted
+    // settings edit. Persist it immediately so reopening the dialog reuses it.
+    if (changed) SaveSettings();
+}
+
+static bool HasExclusiveVerificationForSelection(
+    const SettingsDialogState* state) {
+    if (!state || !SettingsUsesExclusiveMode(state)) return true;
+    const int verifiedBufferMs = ExclusiveVerifiedBufferForSelection(state);
+    return IsExclusiveLowLatencyBuffer(verifiedBufferMs) &&
+           state->selectedBufferMs >= verifiedBufferMs;
+}
+
+static void UpdateExclusiveVerificationUi(SettingsDialogState* state) {
+    if (!state || !state->startButton) return;
+    const bool running = state->exclusiveScanRunning.load(
+        std::memory_order_acquire);
+    if (!SettingsUsesExclusiveMode(state)) {
+        // Shared/ASIO must not be blocked by a diagnostic scan that is only
+        // relevant to Exclusive. The scan is stopped when the mode changes.
+        EnableWindow(state->startButton, TRUE);
+        return;
+    }
+    const bool verified = HasExclusiveVerificationForSelection(state);
+    EnableWindow(state->startButton, verified ? TRUE : FALSE);
+    if (state->audioStatus) {
+        const auto* selectedResult = FindExclusiveVerification(
+            state, EffectiveSelectedAudioEndpointId(state));
+        // Show the active all-device scan first. A provisional failure for
+        // the selected endpoint must not look like the final UI state while
+        // other endpoints are still being checked.
+        if (running) {
+            wchar_t status[160]{};
+            swprintf_s(status, UI_TEXT(
+                L"Exclusive 출력 장치 검사 중… %zu/%zu 완료"),
+                state->exclusiveScanCompleted, state->audioEndpoints.size());
+            SetWindowTextW(state->audioStatus, status);
+        } else if (verified) {
+            wchar_t status[160]{};
+            swprintf_s(status, UI_TEXT(
+                L"Exclusive 사용 가능 · 현재 출력 장치 · %d ms 이상"),
+                ExclusiveVerifiedBufferForSelection(state));
+            SetWindowTextW(state->audioStatus, status);
+        } else if (selectedResult &&
+                   selectedResult->state == ExclusiveEndpointState::Supported) {
+            wchar_t status[160]{};
+            swprintf_s(status, UI_TEXT(
+                L"Exclusive 사용 가능 · %d ms 이상 선택 필요"),
+                selectedResult->recommendedBufferMs);
+            SetWindowTextW(state->audioStatus, status);
+        } else if (selectedResult &&
+                   selectedResult->state == ExclusiveEndpointState::Unsupported) {
+            // Other endpoints may still be running, but this selected one has
+            // a conclusive result already and should say so immediately.
+            SetWindowTextW(state->audioStatus, UI_TEXT(
+                L"Exclusive 사용 불가 · 현재 출력 장치"));
+        } else {
+            SetWindowTextW(state->audioStatus, UI_TEXT(
+                L"Exclusive 검사 필요 · 현재 출력 장치"));
+        }
+    }
+}
+
+static void StartExclusiveEndpointScan(SettingsDialogState* state, HWND hwnd,
+                                       bool forceRestart = false) {
+    if (!state || state->exclusiveScanRunning.load(std::memory_order_acquire)) {
+        return;
+    }
+    // Keep a completed scan for the lifetime of this settings dialog. Moving
+    // to Shared/ASIO and back must not make the user wait through it again.
+    if (!forceRestart && !state->audioEndpoints.empty() &&
+        state->exclusiveScanCompleted >= state->audioEndpoints.size()) {
+        return;
+    }
+    if (state->exclusiveProbeThread.joinable()) {
+        state->exclusiveProbeThread.join();
+    }
+
+    if (forceRestart) {
+        state->exclusiveEndpointResults.assign(
+            state->audioEndpoints.size(), ExclusiveEndpointVerification{});
+        state->exclusiveScanCompleted = 0;
+    }
+    // Reuse persisted results and only test endpoints with no verdict. An
+    // explicit retry deliberately changes every row back to Testing.
+    size_t completed = 0;
+    for (auto& result : state->exclusiveEndpointResults) {
+        if (result.state == ExclusiveEndpointState::Supported ||
+            result.state == ExclusiveEndpointState::Unsupported) {
+            ++completed;
+        } else {
+            result.state = ExclusiveEndpointState::Testing;
+        }
+    }
+    state->exclusiveScanCompleted = completed;
+    state->exclusiveProbeStop.store(false, std::memory_order_release);
+    state->exclusiveScanRunning.store(true, std::memory_order_release);
+    PopulateAudioOutputCombo(state);
+    const int initialRecommendedBufferMs =
+        ExclusiveVerifiedBufferForSelection(state);
+    if (IsExclusiveLowLatencyBuffer(initialRecommendedBufferMs)) {
+        state->selectedBufferMs = initialRecommendedBufferMs;
+        PopulateSettingsBufferCombo(state);
+    }
+    UpdateExclusiveProbeControl(state);
+    UpdateExclusiveVerificationUi(state);
+
+    const std::vector<AudioEndpointInfo> endpoints = state->audioEndpoints;
+    std::vector<size_t> scanOrder;
+    const std::wstring preferredId = EffectiveSelectedAudioEndpointId(state);
+    for (size_t i = 0; i < endpoints.size(); ++i) {
+        if (state->exclusiveEndpointResults[i].state ==
+                ExclusiveEndpointState::Testing &&
+            endpoints[i].id == preferredId) {
+            scanOrder.push_back(i);
+            break;
+        }
+    }
+    for (size_t i = 0; i < endpoints.size(); ++i) {
+        if (state->exclusiveEndpointResults[i].state !=
+            ExclusiveEndpointState::Testing) {
+            continue;
+        }
+        if (scanOrder.empty() || i != scanOrder.front()) scanOrder.push_back(i);
+    }
+    state->exclusiveProbeThread = std::thread(
+        [state, hwnd, endpoints, scanOrder]() {
+            for (const size_t i : scanOrder) {
+                if (state->exclusiveProbeStop.load(std::memory_order_acquire)) {
+                    break;
+                }
+                auto* message = new ExclusiveEndpointProbeMessage{};
+                message->endpointIndex = i;
+                message->probe = ProbeExclusiveBufferRecommendation(
+                    endpoints[i].id, &state->exclusiveProbeStop);
+                if (!PostMessageW(hwnd, WM_EXCLUSIVE_ENDPOINT_PROBE_COMPLETE,
+                                  reinterpret_cast<WPARAM>(message), 0)) {
+                    delete message;
+                    break;
+                }
+            }
+            state->exclusiveScanRunning.store(false, std::memory_order_release);
+            PostMessageW(hwnd, WM_EXCLUSIVE_SCAN_COMPLETE, 0, 0);
+        });
 }
 
 static std::wstring SelectedAsioDriverName(const SettingsDialogState* state) {
@@ -6846,10 +7961,16 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->frameRateCombo, CB_GETCURSEL, 0, 0);
         const LRESULT languageIndex = SendMessageW(
             state->languageCombo, CB_GETCURSEL, 0, 0);
+        if (audioIndex == 1 && !HasExclusiveVerificationForSelection(state)) {
+            UpdateExclusiveVerificationUi(state);
+            return;
+        }
         if (languageIndex >= 0 && languageIndex <= 2) {
             g_settings.uiLanguage = static_cast<UiLanguage>(languageIndex);
         }
-        if (audioIndex == 1 && state->asioAvailable) {
+        if (audioIndex == 1) {
+            g_settings.audioMode = AudioMode::WasapiExclusive;
+        } else if (audioIndex == 2 && state->asioAvailable) {
             g_settings.audioMode = AudioMode::Asio;
         } else {
             g_settings.audioMode = AudioMode::WasapiShared;
@@ -6897,6 +8018,20 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
                 state->selectedSharedPeriodFrames;
         }
         g_settings.audioOutputDeviceId = SelectedAudioEndpointId(state);
+        if (audioIndex == 1) {
+            // Persist the result for the endpoint the user actually chose.
+            // The list may have tested other outputs in this dialog, but only
+            // this endpoint can be used by the immediate-start profile.
+            g_settings.exclusiveVerifiedEndpointId =
+                EffectiveSelectedAudioEndpointId(state);
+            g_settings.exclusiveVerifiedBufferMs =
+                ExclusiveVerifiedBufferForSelection(state);
+        } else {
+            g_settings.exclusiveVerifiedEndpointId =
+                state->exclusiveVerifiedEndpointId;
+            g_settings.exclusiveVerifiedBufferMs =
+                state->exclusiveVerifiedBufferMs;
+        }
         g_settings.captureDeviceId = SelectedCaptureDeviceId(state);
         g_settings.captureAudioDeviceId = SelectedCaptureAudioDeviceId(state);
         if (pixelFormatIndex >= 0) {
@@ -6973,9 +8108,16 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->borderlessCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.windowSnap = SendMessageW(
             state->windowSnapCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        // The user has explicitly accepted a new settings profile, so do not
+        // preserve a stale immediate-start fallback from the previous run.
+        g_exclusiveStartupFallback = false;
         SaveSettings();
     }
 
+    // Stop the background per-endpoint scan only when the dialog is actually
+    // closing. A disabled Start button must leave the scan running so its
+    // result can eventually enable a compatible output.
+    state->exclusiveProbeStop.store(true, std::memory_order_release);
     state->accepted = accepted;
     DestroyWindow(hwnd);
 }
@@ -7009,6 +8151,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         SendMessageW(state->audioCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(
                          UI_TEXT(L"WASAPI Shared (호환성 우선 · 권장)")));
+        SendMessageW(state->audioCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(UI_TEXT(
+                         L"WASAPI Exclusive (이벤트 진단 · 장치 독점)")));
         if (state->asioAvailable) {
             SendMessageW(state->audioCombo, CB_ADDSTRING, 0,
                          reinterpret_cast<LPARAM>(UI_TEXT(
@@ -7016,8 +8161,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         }
         const LRESULT audioSelection =
             g_settings.audioMode == AudioMode::Asio && state->asioAvailable
-                  ? 1
-                  : 0;
+                ? 2
+                : g_settings.audioMode == AudioMode::WasapiExclusive ? 1 : 0;
         SendMessageW(state->audioCombo, CB_SETCURSEL,
                       audioSelection, 0);
 
@@ -7050,6 +8195,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             24, 104, 370, 22, hwnd,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(IDC_SETTINGS_AUDIO_STATUS)),
+            instance, nullptr);
+        state->exclusiveTestButton = CreateWindowExW(
+            0, L"BUTTON", UI_TEXT(L"독점 버퍼 검사"),
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+            350, 104, 125, 28, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_EXCLUSIVE_TEST)),
             instance, nullptr);
 
         state->volumeHudLabel = makeLabel(UI_TEXT(L"볼륨 HUD 위치"), 24, 142);
@@ -7482,6 +8634,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         LayoutSettingsControls(state, initialDpi);
         UpdateAdvancedControlVisibility(state);
         UpdateAsioControlVisibility(state);
+        UpdateExclusiveProbeControl(state);
+        UpdateExclusiveVerificationUi(state);
         RedrawWindow(hwnd, nullptr, nullptr,
                      RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN |
                          RDW_UPDATENOW);
@@ -7493,6 +8647,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             PostMessageW(hwnd, WM_AUDIOCLIENT3_PROBE_COMPLETE, 0, 0);
         });
         StartCaptureAudioProbe(state, hwnd);
+        if (SettingsUsesExclusiveMode(state)) {
+            StartExclusiveEndpointScan(state, hwnd);
+        }
         return 0;
     }
 
@@ -7527,10 +8684,77 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         break;
 
     case WM_AUDIOCLIENT3_PROBE_COMPLETE:
-        UpdateAudioClient3Status(state);
+        // The endpoint's Shared-mode capability probe still runs in the
+        // background after an output-device change, but it must not overwrite
+        // the meaningful Exclusive compatibility result shown to the user.
+        if (SettingsUsesExclusiveMode(state)) {
+            UpdateExclusiveVerificationUi(state);
+        } else {
+            UpdateAudioClient3Status(state);
+        }
         if (SettingsUsesSharedMode(state)) {
             RememberCurrentBufferChoice(state);
             PopulateSettingsBufferCombo(state);
+        }
+        return 0;
+
+    case WM_EXCLUSIVE_ENDPOINT_PROBE_COMPLETE: {
+        std::unique_ptr<ExclusiveEndpointProbeMessage> message(
+            reinterpret_cast<ExclusiveEndpointProbeMessage*>(wParam));
+        if (!state || !message ||
+            message->endpointIndex >= state->exclusiveEndpointResults.size()) {
+            return 0;
+        }
+        auto& result = state->exclusiveEndpointResults[message->endpointIndex];
+        result.state = message->probe.compatible
+            ? ExclusiveEndpointState::Supported
+            : ExclusiveEndpointState::Unsupported;
+        result.recommendedBufferMs = message->probe.compatible
+            ? static_cast<int>((message->probe.requestedFrames * 1000 +
+                                kSampleRate / 2) / kSampleRate)
+            : 0;
+        result.summary = message->probe.summary;
+        ++state->exclusiveScanCompleted;
+        fwprintf(stderr,
+                 L"[audio][exclusive-scan] %s: %s | requested=%u frames "
+                 L"actual=%u frames\n",
+                 state->audioEndpoints[message->endpointIndex].name.c_str(),
+                 result.summary.c_str(), message->probe.requestedFrames,
+                 message->probe.actualBufferFrames);
+        PopulateAudioOutputCombo(state);
+        const int recommendedBufferMs =
+            ExclusiveVerifiedBufferForSelection(state);
+        if (IsExclusiveLowLatencyBuffer(recommendedBufferMs)) {
+            state->selectedBufferMs = recommendedBufferMs;
+            PopulateSettingsBufferCombo(state);
+        }
+        UpdateExclusiveProbeControl(state);
+        UpdateExclusiveVerificationUi(state);
+        return 0;
+    }
+
+    case WM_EXCLUSIVE_SCAN_COMPLETE:
+        if (state) {
+            if (state->exclusiveProbeThread.joinable()) {
+                state->exclusiveProbeThread.join();
+            }
+            if (state->exclusiveProbeStop.load(std::memory_order_acquire)) {
+                // A canceled scan has no verdict for endpoints that did not
+                // reach their probe yet. Never label them as unavailable or
+                // completed merely because the user changed modes/closed UI.
+                for (auto& result : state->exclusiveEndpointResults) {
+                    if (result.state == ExclusiveEndpointState::Testing) {
+                        result.state = ExclusiveEndpointState::Unknown;
+                        result.summary.clear();
+                    }
+                }
+            } else if (state->exclusiveScanCompleted >=
+                       state->audioEndpoints.size()) {
+                PersistCompletedExclusiveEndpointResults(state);
+            }
+            PopulateAudioOutputCombo(state);
+            UpdateExclusiveProbeControl(state);
+            UpdateExclusiveVerificationUi(state);
         }
         return 0;
 
@@ -7586,6 +8810,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             PopulateSettingsBufferCombo(state);
             UpdateAsioControlVisibility(state);
             UpdateAudioClient3Status(state);
+            UpdateExclusiveProbeControl(state);
+            UpdateExclusiveVerificationUi(state);
+            if (SettingsUsesExclusiveMode(state)) {
+                StartExclusiveEndpointScan(state, hwnd);
+            }
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_AUDIO_OUTPUT &&
@@ -7599,6 +8828,25 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 state->probeReady.store(true, std::memory_order_release);
                 PostMessageW(hwnd, WM_AUDIOCLIENT3_PROBE_COMPLETE, 0, 0);
             });
+            const int recommendedBufferMs =
+                ExclusiveVerifiedBufferForSelection(state);
+            if (SettingsUsesExclusiveMode(state) &&
+                IsExclusiveLowLatencyBuffer(recommendedBufferMs)) {
+                state->selectedBufferMs = recommendedBufferMs;
+                PopulateSettingsBufferCombo(state);
+            }
+            UpdateExclusiveVerificationUi(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_BUFFER &&
+            HIWORD(wParam) == CBN_SELCHANGE) {
+            RememberCurrentBufferChoice(state);
+            UpdateExclusiveVerificationUi(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_EXCLUSIVE_TEST &&
+            HIWORD(wParam) == BN_CLICKED && state) {
+            StartExclusiveEndpointScan(state, hwnd, true);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_CAPTURE_DEVICE &&
@@ -7742,6 +8990,33 @@ static bool ShowSettingsDialog(HINSTANCE hInst,
     state.audioEndpoints = EnumerateAudioEndpoints();
     state.asioDrivers = llcv::asio::EnumerateDrivers();
     state.asioAvailable = !state.asioDrivers.empty();
+    state.exclusiveVerifiedEndpointId =
+        g_settings.exclusiveVerifiedEndpointId;
+    state.exclusiveVerifiedBufferMs =
+        g_settings.exclusiveVerifiedBufferMs;
+    state.exclusiveEndpointResults.assign(
+        state.audioEndpoints.size(), ExclusiveEndpointVerification{});
+    for (size_t i = 0; i < state.audioEndpoints.size(); ++i) {
+        const auto* cached = FindExclusiveEndpointCache(
+            state.audioEndpoints[i].id);
+        if (cached) {
+            state.exclusiveEndpointResults[i].state = cached->supported
+                ? ExclusiveEndpointState::Supported
+                : ExclusiveEndpointState::Unsupported;
+            state.exclusiveEndpointResults[i].recommendedBufferMs =
+                cached->supported ? cached->recommendedBufferMs : 0;
+            ++state.exclusiveScanCompleted;
+        } else if (state.audioEndpoints[i].id ==
+                       state.exclusiveVerifiedEndpointId &&
+                   IsExclusiveLowLatencyBuffer(
+                       state.exclusiveVerifiedBufferMs)) {
+            state.exclusiveEndpointResults[i].state =
+                ExclusiveEndpointState::Supported;
+            state.exclusiveEndpointResults[i].recommendedBufferMs =
+                state.exclusiveVerifiedBufferMs;
+            ++state.exclusiveScanCompleted;
+        }
+    }
     POINT cursor{};
     GetCursorPos(&cursor);
     const HMONITOR savedViewerMonitor = SavedViewerMonitor();
@@ -7825,6 +9100,10 @@ static bool ShowSettingsDialog(HINSTANCE hInst,
         DispatchMessageW(&msg);
     }
     if (state.probeThread.joinable()) state.probeThread.join();
+    state.exclusiveProbeStop.store(true, std::memory_order_release);
+    if (state.exclusiveProbeThread.joinable()) {
+        state.exclusiveProbeThread.join();
+    }
     if (state.captureAudioProbeThread.joinable()) {
         state.captureAudioProbeThread.join();
     }
@@ -8637,7 +9916,7 @@ static bool IsNewerReleaseTag(const std::wstring& latestTag) {
 
 static bool FetchLatestRelease(UpdateCheckResult& result) {
     HINTERNET session = WinHttpOpen(
-        L"LowLatencyCaptureViewer/1.1.7",
+        L"LowLatencyCaptureViewer/1.1.7.2",
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return false;
@@ -9440,6 +10719,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         UpdateBackgroundAudioMute(wParam != FALSE);
         return 0;
 
+    case WM_DISPLAYCHANGE:
+        LogDisplayChangeEvent(wParam, lParam);
+        break;
+
+    case WM_DEVICECHANGE:
+        if (wParam == DBT_DEVICEARRIVAL ||
+            wParam == DBT_DEVICEREMOVECOMPLETE ||
+            wParam == DBT_DEVICEREMOVEPENDING ||
+            wParam == DBT_DEVNODES_CHANGED) {
+            LogDeviceChangeEvent(wParam);
+        }
+        break;
+
     case WM_GETDPISCALEDSIZE:
         if ((g_settings.pixelPerfect || g_settings.relativeWindowSize) &&
             !g_fullscreen && lParam) {
@@ -9627,7 +10919,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_leftVolumePercent.load(std::memory_order_acquire);
         g_settings.rightVolumePercent =
             g_rightVolumePercent.load(std::memory_order_acquire);
-        if (!g_suppressSettingsSave) SaveSettings();
+        if (!g_suppressSettingsSave) {
+            // A default-output change may force this session to Shared before
+            // any renderer is opened. Preserve the user's Exclusive choice
+            // in settings so it can become eligible again after a verified
+            // device is selected, rather than silently rewriting it to Shared.
+            const AudioMode runtimeMode = g_settings.audioMode;
+            if (g_exclusiveStartupFallback) {
+                g_settings.audioMode = g_exclusiveStartupRequestedMode;
+            }
+            SaveSettings();
+            g_settings.audioMode = runtimeMode;
+        }
         g_running.store(false);
         PostQuitMessage(0);
         return 0;
@@ -9679,7 +10982,26 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     const bool smokeTest = commandLine &&
         (wcsstr(commandLine, L"--smoke-test") != nullptr ||
          audioOnlySmokeTest);
-    g_suppressSettingsSave = smokeTest;
+    const bool exclusiveProbeAll = commandLine &&
+        wcsstr(commandLine, L"--exclusive-probe-all") != nullptr;
+    const bool exclusiveProbeSelected = commandLine &&
+        wcsstr(commandLine, L"--exclusive-probe") != nullptr;
+    const bool exclusiveProbe = exclusiveProbeAll || exclusiveProbeSelected;
+    g_suppressSettingsSave = smokeTest || exclusiveProbe;
+    if (!smokeTest && !exclusiveProbe &&
+        g_settings.audioMode == AudioMode::WasapiExclusive) {
+        const std::wstring endpointId = ResolveAudioEndpointId(
+            g_settings.audioOutputDeviceId);
+        if (!HasVerifiedExclusiveEndpoint(endpointId,
+                                          g_settings.wasapiBufferMs)) {
+            // Never let the immediate-start path open an untested Exclusive
+            // stream. This preserves fast startup while keeping a changed
+            // Windows-default device from producing broken audio.
+            g_exclusiveStartupRequestedMode = g_settings.audioMode;
+            g_settings.audioMode = AudioMode::WasapiShared;
+            g_exclusiveStartupFallback = true;
+        }
+    }
     if (smokeTest && !audioOnlySmokeTest) {
         // Smoke tests must exercise the normal viewer even if a user's saved
         // profile currently selects audio-only mode.
@@ -9705,7 +11027,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     }
     const bool shiftLaunch = !smokeTest &&
         (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-    const bool showStartupSettings = !smokeTest &&
+    const bool showStartupSettings = !smokeTest && !exclusiveProbe &&
         (forceSettings || shiftLaunch || !g_settings.skipStartupSettings);
     if (showStartupSettings &&
         !ShowSettingsDialog(hInst, forceSettings)) return 0;
@@ -9744,9 +11066,27 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         _wfreopen_s(&f, L"CONOUT$", L"w", stdout);
         _wfreopen_s(&f, L"CONOUT$", L"w", stderr);
     }
+    if (exclusiveProbe) {
+        // A command-line compatibility run is deliberately logged even when
+        // the user normally keeps diagnostics off, so its result can be
+        // inspected after the temporary console has closed.
+        g_settings.saveLog = true;
+    }
     if (!smokeTest) OpenSavedLog();
+    if (g_exclusiveStartupFallback) {
+        fwprintf(stderr,
+                 L"[audio] saved Exclusive profile was not verified for the "
+                 L"current output; started with WASAPI Shared.\n");
+    }
     SetActiveAudioOutputName(ConfiguredAudioEndpointName(
         g_settings.audioOutputDeviceId));
+
+    if (exclusiveProbe) {
+        const int result = RunExclusiveCompatibilityProbeCli(exclusiveProbeAll);
+        CloseSavedLog();
+        if (allocatedConsole) FreeConsole();
+        return result;
+    }
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
@@ -9764,7 +11104,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     const auto& video = CurrentVideoPreset();
     const wchar_t* audioLabel =
         g_settings.audioMode == AudioMode::WasapiExclusive
-            ? L"WASAPI Exclusive" : L"WASAPI Shared";
+            ? L"WASAPI Exclusive"
+            : g_settings.audioMode == AudioMode::Asio ? L"ASIO"
+                                                       : L"WASAPI Shared";
     wchar_t title[256]{};
     const wchar_t* videoLabel =
         g_settings.presentationMode == PresentationMode::VSync
