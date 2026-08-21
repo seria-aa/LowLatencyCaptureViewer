@@ -7,7 +7,7 @@
 - Windows 10 or 11 x64
 - Visual Studio 2022 with **Desktop development with C++**
 - Windows SDK and CMake tools for Windows
-- Inno Setup 6 or newer only when building the installer
+- Inno Setup 7 only when building the installer
 
 The project uses Windows system APIs and libraries: Win32, DirectShow, D3D11,
 DXGI, Media Foundation for experimental MJPEG decoding, and WASAPI. It does not
@@ -39,7 +39,7 @@ The Inno Setup script is:
 installer\LowLatencyCaptureViewer.iss
 ```
 
-Build it with Inno Setup 6 or newer after producing the Release executable.
+Build it with Inno Setup 7 after producing the Release executable.
 Neither the installer nor the portable archive should contain machine-specific
 `settings.ini` files or diagnostic logs.
 

@@ -26,11 +26,6 @@ channel/master volume, and clipping OSD as the video viewer.
 
 ## WASAPI Shared and Exclusive
 
-In this release, WASAPI Exclusive is temporarily hidden from the settings UI
-while that backend is being investigated. Existing Exclusive profiles are
-migrated to WASAPI Shared on the next run. The Exclusive notes below are kept
-for reference if the backend is re-enabled later.
-
 **WASAPI Shared** allows other applications to use the output device and keeps
 Windows shared-mode effects available. It is the recommended default.
 
@@ -48,6 +43,14 @@ shared-mixer path, but other applications may be unable to use that endpoint at
 the same time. Shared-mode APO/DSP processing such as Equalizer APO, HeSuVi, or
 Windows spatial effects may also be bypassed. Use Shared when those effects or
 general compatibility are required.
+
+Exclusive is offered only after the application has performed a short,
+per-endpoint playback-event preflight. The output device list labels each
+endpoint as `Available · n ms`, `Unavailable`, or `Checking`; results are cached
+by endpoint ID. This avoids presenting Exclusive for drivers that accept
+initialization but do not deliver usable event timing. A passing preflight is
+not a universal guarantee, so switch back to Shared or ASIO and attach a log if
+the endpoint still misbehaves.
 
 ## ASIO (experimental)
 
@@ -80,10 +83,12 @@ These controls affect different parts of the path:
 - **Clock-drift correction** changes the long-run sample-rate relationship; it
   does not replace either buffer setting.
 
-Start with a 10 ms PCM target. Increase it to 15, 20, or 30 ms only when
-underruns repeat. A larger target improves scheduling tolerance but adds the
-same amount of audio queueing. A single occasional underrun is not necessarily
-audible or a reason to raise the target.
+New installations start with a 20 ms PCM target. Once a system is stable, try
+15 ms or 10 ms only when lower latency matters more than scheduling headroom;
+raise a too-small target back to 15, 20, 25, or 30 ms when underruns repeat. A
+larger target improves scheduling tolerance but adds the same amount of audio
+queueing. A single occasional underrun is not necessarily audible or a reason
+to raise the target.
 
 The DirectShow allocator reported in the log is controlled partly by the
 capture driver. Its block size or buffer count does not necessarily equal the
@@ -91,12 +96,12 @@ amount of audio queued by this application.
 
 ## Clock-drift correction
 
-**Off** leaves PCM samples unaltered. **Auto** watches the PCM queue and starts
-correction only after an imbalance has remained for five seconds; once started,
-it stays on for that session instead of repeatedly toggling. **On** uses the
-resampler from startup. Choose Auto when a long-running session shows repeated
-breakup or a persistent, growing PCM queue imbalance—especially when video and
-audio use separate capture filters.
+**Off** leaves PCM samples unaltered. **Auto** (the default) watches the PCM
+queue and starts correction only after an imbalance has remained for five
+seconds; once started, it stays on for that session instead of repeatedly
+toggling. **On** uses the resampler from startup. Choose Auto when a
+long-running session shows repeated breakup or a persistent, growing PCM queue
+imbalance—especially when video and audio use separate capture filters.
 
 Correction makes small continuous rate adjustments to keep the PCM queue near
 its target. It does not intentionally add another frame or packet queue. Use the

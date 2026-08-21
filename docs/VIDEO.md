@@ -91,6 +91,11 @@ option. If capture and monitor resolutions match, it uses fullscreen. If a 1:1
 window cannot fit the monitor work area, the HUD reports that it is unavailable.
 `F11` toggles borderless fullscreen independently.
 
+The fullscreen cursor defaults to **Auto-hide**: it disappears after two seconds
+without pointer activity and returns immediately on mouse movement or wheel
+input. Select **Always show** in the Video & window tab when a persistent
+pointer is preferred.
+
 When capture and monitor resolutions match, the viewer starts in borderless
 fullscreen regardless of the Pixel-perfect setting. A genuinely smaller saved
 relative window takes priority so that a window intentionally moved and resized
