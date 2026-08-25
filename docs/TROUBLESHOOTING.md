@@ -48,6 +48,17 @@ queue and falls back to Smooth when unavailable.
 Also confirm that the source and capture resolution match. Capturing a 1440p
 source as 4K does not create additional detail.
 
+## MJPEG color differs from another application
+
+Some MJPEG devices omit Full/Limited range or BT.601/709 information. The
+viewer resolves it from the Media Foundation decoder, DirectShow metadata, and
+finally the MJPEG fallback. Check **Video quality** in the Tab overlay and the
+`[video] MJPEG color` log line for the applied result. If another application
+still differs, explicitly select MJPEG and use the **MJPEG color
+interpretation** control that appears. Compare BT.709 Full/Limited first, then
+BT.601 combinations for SD input. If none matches, include screenshots of the
+same scene with the diagnostic log. The manual setting affects MJPEG only.
+
 ## Frame drops or stutter
 
 Confirm that Input FPS matches the selected source rate and compare it with

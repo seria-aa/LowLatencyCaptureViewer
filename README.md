@@ -115,7 +115,10 @@ cannot be guaranteed.
 
 - Standard support: 48 kHz stereo PCM audio and progressive NV12/YUY2 video
 - Compatibility mode: MJPEG, always listed for manual selection when the device
-  exposes it
+  exposes it, with automatic decoder-metadata-based range and BT.601/709 handling.
+  When colors still differ from another application, **MJPEG color
+  interpretation** appears for an explicit MJPEG selection and permits a manual
+  matrix/range override.
 - Experimental: ASIO output and P010 10-bit HDR10
 - Not supported: H.264/AVC, MPEG-4, automatic device reconnect
 

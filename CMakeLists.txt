@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 1.2.2 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 1.2.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,6 +14,7 @@ add_executable(LowLatencyCaptureViewer
     src/audio/CaptureAudioFormat.cpp
     src/diagnostics/Logger.cpp
     src/ui/AudioOsdLayout.cpp
+    src/video/VideoColor.cpp
 )
 
 target_include_directories(LowLatencyCaptureViewer PRIVATE
@@ -107,6 +108,23 @@ if (BUILD_TESTING)
         target_compile_options(LoggerTests PRIVATE /W4 /EHsc /permissive- /utf-8)
     endif()
     add_test(NAME LoggerTests COMMAND LoggerTests)
+
+    add_executable(VideoColorTests
+        tests/VideoColorTests.cpp
+        src/video/VideoColor.cpp
+    )
+    target_include_directories(VideoColorTests PRIVATE src)
+    target_compile_definitions(VideoColorTests PRIVATE
+        UNICODE
+        _UNICODE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+    )
+    set_target_properties(VideoColorTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    if (MSVC)
+        target_compile_options(VideoColorTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    endif()
+    add_test(NAME VideoColorTests COMMAND VideoColorTests)
 endif()
 
 install(TARGETS LowLatencyCaptureViewer RUNTIME DESTINATION .)

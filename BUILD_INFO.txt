@@ -1,4 +1,17 @@
-Low Latency Capture Viewer v1.2.2 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.3 x64 (continued from the v0.14.2 rework)
+
+v1.2.3 MJPEG automatic color interpretation
+---------------------------------------------
+- MJPEG decode output now uses Media Foundation range/matrix metadata first,
+  then DirectShow extended color information when available.
+- Metadata-free MJPEG uses JPEG full range, with BT.709 for HD and BT.601 for
+  SD, instead of always treating decoded NV12 as BT.709 Limited.
+- The Tab overlay and diagnostic log report the applied MJPEG color result and
+  the metadata/fallback source.
+- Explicit MJPEG selection exposes a manual BT.709/BT.601 and Full/Limited
+  override. P010 keeps its HDR10-force control in the same row; raw formats
+  show neither conditional control.
+- NV12, YUY2, P010, audio, and automatic raw-format selection are unchanged.
 
 v1.2.2 complete pixel-format visibility release
 -------------------------------------------------

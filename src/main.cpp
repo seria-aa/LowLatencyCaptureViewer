@@ -47,6 +47,7 @@
 #include "audio/CaptureAudioFormat.h"
 #include "diagnostics/Logger.h"
 #include "ui/AudioOsdLayout.h"
+#include "video/VideoColor.h"
 
 #include <atomic>
 #include <chrono>
@@ -108,7 +109,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.2.2";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.3";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -215,6 +216,26 @@ struct InternalCaptureAudioProbe {
     HRESULT result = S_OK;
 };
 
+// DirectShow carries extended color information in the upper 24 bits of
+// VIDEOINFOHEADER2::dwControlFlags. The enum values for the SDR matrix/range
+// fields are shared with Media Foundation, which lets the compressed decoder
+// preserve them without a lossy translation.
+struct DirectShowColorMetadata {
+    bool present = false;
+    DWORD controlFlags = 0;
+    UINT chromaSubsampling = 0;
+    UINT nominalRange = 0;
+    UINT transferMatrix = 0;
+    UINT lighting = 0;
+    UINT primaries = 0;
+    UINT transferFunction = 0;
+
+    bool hdr10() const {
+        return present && primaries == 9 && transferFunction == 15 &&
+               (transferMatrix == 4 || transferMatrix == 5);
+    }
+};
+
 // A preflight verdict belongs to one stable Core Audio endpoint ID. Keep both
 // passes and failures so the settings dialog does not repeat an expensive
 // real-device event test every time it opens.
@@ -261,6 +282,8 @@ struct AppSettings {
     bool checkForUpdates = true;
     bool audioOnly = false;
     bool forceHdr10 = false;
+    llcv::video_color::Override mjpegColorOverride =
+        llcv::video_color::Override::Auto;
     bool pixelPerfect = true;
     bool relativeWindowSize = false;
     int relativeWindowScalePpm = 0;
@@ -332,6 +355,8 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"P010 10-bit HDR10 (실험적)", L"P010 10-bit HDR10 (experimental)"},
         {L"P010 HDR10 강제 (메타데이터 없을 때 · 실험적)", L"Force P010 HDR10 (when metadata is missing · experimental)"},
         {L"MJPEG (실험적 압축 호환)", L"MJPEG (experimental compressed compatibility)"},
+        {L"MJPEG 색상 해석", L"MJPEG color interpretation"},
+        {L"자동 (권장)", L"Auto (recommended)"},
         {L"오디오 출력 모드", L"Audio output mode"},
         {L"WASAPI Shared (호환성 우선 · 권장)", L"WASAPI Shared (compatibility · recommended)"},
         {L"WASAPI Exclusive (지연 최소화 · 장치 독점)", L"WASAPI Exclusive (minimum latency · exclusive device)"},
@@ -604,6 +629,14 @@ static std::wstring g_activeAudioOutputName = L"Windows 기본 장치";
 static std::atomic<int> g_activePixelFormat{
     static_cast<int>(VideoPixelFormat::Nv12)};
 static std::atomic<bool> g_hdrOutputActive{false};
+static std::atomic<int> g_activeVideoColorMatrix{
+    static_cast<int>(llcv::video_color::Matrix::Bt709)};
+static std::atomic<int> g_activeVideoColorRange{
+    static_cast<int>(llcv::video_color::Range::Limited)};
+static std::atomic<int> g_activeVideoColorMatrixSource{
+    static_cast<int>(llcv::video_color::Source::Default)};
+static std::atomic<int> g_activeVideoColorRangeSource{
+    static_cast<int>(llcv::video_color::Source::Default)};
 static std::atomic<uint64_t> g_defaultAudioEndpointGeneration{0};
 static llcv::diagnostics::Logger g_logger;
 static std::mutex g_activeAudioOutputMutex;
@@ -687,6 +720,34 @@ static const GUID& PixelFormatSubtype(VideoPixelFormat format) {
 
 static bool IsCompressedVideoFormat(VideoPixelFormat format) {
     return format == VideoPixelFormat::Mjpeg;
+}
+
+static const wchar_t* MjpegColorOverrideSettingName(
+    llcv::video_color::Override mode) {
+    switch (mode) {
+    case llcv::video_color::Override::Bt709Full: return L"Bt709Full";
+    case llcv::video_color::Override::Bt709Limited: return L"Bt709Limited";
+    case llcv::video_color::Override::Bt601Full: return L"Bt601Full";
+    case llcv::video_color::Override::Bt601Limited: return L"Bt601Limited";
+    default: return L"Auto";
+    }
+}
+
+static llcv::video_color::Override ParseMjpegColorOverride(
+    const wchar_t* value) {
+    if (value && _wcsicmp(value, L"Bt709Full") == 0) {
+        return llcv::video_color::Override::Bt709Full;
+    }
+    if (value && _wcsicmp(value, L"Bt709Limited") == 0) {
+        return llcv::video_color::Override::Bt709Limited;
+    }
+    if (value && _wcsicmp(value, L"Bt601Full") == 0) {
+        return llcv::video_color::Override::Bt601Full;
+    }
+    if (value && _wcsicmp(value, L"Bt601Limited") == 0) {
+        return llcv::video_color::Override::Bt601Limited;
+    }
+    return llcv::video_color::Override::Auto;
 }
 
 static bool IsAutoSelectableVideoFormat(VideoPixelFormat format) {
@@ -1590,6 +1651,7 @@ static void LoadSettings() {
     wchar_t checkForUpdates[8]{};
     wchar_t audioOnly[8]{};
     wchar_t forceHdr10[8]{};
+    wchar_t mjpegColorOverride[32]{};
 
     GetPrivateProfileStringW(L"General", L"Language", L"Auto", language,
                              ARRAYSIZE(language), path.c_str());
@@ -1603,6 +1665,9 @@ static void LoadSettings() {
                              ARRAYSIZE(audioOnly), path.c_str());
     GetPrivateProfileStringW(L"Video", L"ForceHdr10", L"0", forceHdr10,
                              ARRAYSIZE(forceHdr10), path.c_str());
+    GetPrivateProfileStringW(L"Video", L"MjpegColor", L"Auto",
+                             mjpegColorOverride,
+                             ARRAYSIZE(mjpegColorOverride), path.c_str());
 
     GetPrivateProfileStringW(L"Audio", L"Mode", L"Shared", audio,
                              ARRAYSIZE(audio), path.c_str());
@@ -1858,6 +1923,8 @@ static void LoadSettings() {
         wcstol(skipStartupSettings, nullptr, 10) != 0;
     g_settings.audioOnly = wcstol(audioOnly, nullptr, 10) != 0;
     g_settings.forceHdr10 = wcstol(forceHdr10, nullptr, 10) != 0;
+    g_settings.mjpegColorOverride =
+        ParseMjpegColorOverride(mjpegColorOverride);
 
     if (_wcsicmp(resolution, L"1920x1080") == 0) {
         g_settings.videoPreset = VideoPreset::R1920x1080;
@@ -1929,6 +1996,10 @@ static void SaveSettings() {
     WritePrivateProfileStringW(L"Video", L"ForceHdr10",
                                g_settings.forceHdr10 ? L"1" : L"0",
                                path.c_str());
+    WritePrivateProfileStringW(
+        L"Video", L"MjpegColor",
+        MjpegColorOverrideSettingName(g_settings.mjpegColorOverride),
+        path.c_str());
     const wchar_t* audioMode = L"Shared";
     if (g_settings.audioMode == AudioMode::WasapiExclusive) {
         audioMode = L"Exclusive";
@@ -4086,7 +4157,9 @@ public:
     ~MediaFoundationCompressedDecoder() { reset(); }
 
     HRESULT initialize(VideoPixelFormat inputFormat, int width, int height,
-                       int fps, const AM_MEDIA_TYPE* captureType) {
+                       int fps, const AM_MEDIA_TYPE* captureType,
+                       const DirectShowColorMetadata* directShowColor,
+                       llcv::video_color::Override colorOverride) {
         reset();
         if (!IsCompressedVideoFormat(inputFormat) || width <= 0 ||
             height <= 0 || fps <= 0) {
@@ -4096,6 +4169,13 @@ public:
         HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
         if (FAILED(hr)) return hr;
         mfStarted_ = true;
+        inputFormat_ = inputFormat;
+        width_ = width;
+        height_ = height;
+        colorOverride_ = colorOverride;
+        if (directShowColor && directShowColor->present) {
+            directShowColor_ = *directShowColor;
+        }
 
         IMFMediaType* inputType = nullptr;
         hr = MFCreateMediaType(&inputType);
@@ -4112,6 +4192,9 @@ public:
         if (SUCCEEDED(hr)) hr = inputType->SetUINT32(
             MF_MT_ALL_SAMPLES_INDEPENDENT,
             inputFormat == VideoPixelFormat::Mjpeg ? TRUE : FALSE);
+        if (SUCCEEDED(hr)) {
+            CopyDirectShowColorAttributes(directShowColor_, inputType);
+        }
         if (SUCCEEDED(hr)) {
             CopyMpegSequenceHeader(captureType, inputType);
         }
@@ -4162,8 +4245,6 @@ public:
                 if (SUCCEEDED(candidateHr)) {
                     transform_ = candidate;
                     candidate = nullptr;
-                    width_ = width;
-                    height_ = height;
                     UINT32 defaultStride = 0;
                     if (outputType_) {
                         outputType_->GetUINT32(MF_MT_DEFAULT_STRIDE,
@@ -4273,6 +4354,9 @@ public:
     }
 
     LONG stride() const { return stride_; }
+    llcv::video_color::Configuration colorConfiguration() const {
+        return colorConfiguration_;
+    }
 
     void reset() {
         if (transform_) {
@@ -4286,6 +4370,10 @@ public:
         stride_ = 0;
         width_ = 0;
         height_ = 0;
+        inputFormat_ = VideoPixelFormat::Nv12;
+        directShowColor_ = {};
+        colorOverride_ = llcv::video_color::Override::Auto;
+        colorConfiguration_ = {};
         if (mfStarted_) {
             MFShutdown();
             mfStarted_ = false;
@@ -4293,6 +4381,55 @@ public:
     }
 
 private:
+    static void SetColorAttribute(IMFMediaType* destination, REFGUID key,
+                                  UINT32 value) {
+        if (destination && value != 0) destination->SetUINT32(key, value);
+    }
+
+    static void CopyDirectShowColorAttributes(
+        const DirectShowColorMetadata& metadata, IMFMediaType* destination) {
+        if (!metadata.present || !destination) return;
+        SetColorAttribute(destination, MF_MT_VIDEO_CHROMA_SITING,
+                          metadata.chromaSubsampling);
+        SetColorAttribute(destination, MF_MT_VIDEO_NOMINAL_RANGE,
+                          metadata.nominalRange);
+        SetColorAttribute(destination, MF_MT_YUV_MATRIX,
+                          metadata.transferMatrix);
+        SetColorAttribute(destination, MF_MT_VIDEO_LIGHTING,
+                          metadata.lighting);
+        SetColorAttribute(destination, MF_MT_VIDEO_PRIMARIES,
+                          metadata.primaries);
+        SetColorAttribute(destination, MF_MT_TRANSFER_FUNCTION,
+                          metadata.transferFunction);
+    }
+
+    static UINT32 ReadColorAttribute(IMFMediaType* type, REFGUID key) {
+        UINT32 value = 0;
+        if (type) type->GetUINT32(key, &value);
+        return value;
+    }
+
+    void UpdateColorConfiguration() {
+        const llcv::video_color::Metadata mf{
+            ReadColorAttribute(outputType_, MF_MT_YUV_MATRIX),
+            ReadColorAttribute(outputType_, MF_MT_VIDEO_NOMINAL_RANGE)};
+        const llcv::video_color::Metadata directShow{
+            directShowColor_.transferMatrix,
+            directShowColor_.nominalRange};
+        colorConfiguration_ = llcv::video_color::Resolve(
+            inputFormat_ == VideoPixelFormat::Mjpeg, width_, height_, mf,
+            directShow, colorOverride_);
+        fwprintf(
+            stderr,
+            L"[video] MJPEG color: %s · %s; matrix source=%s, range source=%s "
+            L"(MF matrix=%u range=%u; DirectShow matrix=%u range=%u).\n",
+            llcv::video_color::MatrixName(colorConfiguration_.matrix),
+            llcv::video_color::RangeName(colorConfiguration_.range),
+            llcv::video_color::SourceName(colorConfiguration_.matrixSource),
+            llcv::video_color::SourceName(colorConfiguration_.rangeSource),
+            mf.matrix, mf.range, directShow.matrix, directShow.range);
+    }
+
     static void CopyMpegSequenceHeader(const AM_MEDIA_TYPE* captureType,
                                        IMFMediaType* destination) {
         if (!captureType || !destination ||
@@ -4323,7 +4460,15 @@ private:
             if (SUCCEEDED(subtypeHr) && subtype == MFVideoFormat_NV12) {
                 hr = transform->SetOutputType(0, candidate, 0);
                 if (SUCCEEDED(hr)) {
-                    outputType_ = candidate;
+                    IMFMediaType* current = nullptr;
+                    if (SUCCEEDED(transform->GetOutputCurrentType(0, &current)) &&
+                        current) {
+                        SafeRelease(candidate);
+                        outputType_ = current;
+                    } else {
+                        outputType_ = candidate;
+                    }
+                    UpdateColorConfiguration();
                     return S_OK;
                 }
             }
@@ -4375,6 +4520,11 @@ private:
     LONG stride_ = 0;
     int width_ = 0;
     int height_ = 0;
+    VideoPixelFormat inputFormat_ = VideoPixelFormat::Nv12;
+    DirectShowColorMetadata directShowColor_{};
+    llcv::video_color::Override colorOverride_ =
+        llcv::video_color::Override::Auto;
+    llcv::video_color::Configuration colorConfiguration_{};
     bool mfStarted_ = false;
 };
 
@@ -4420,32 +4570,6 @@ static bool VideoFormatDetails(const AM_MEDIA_TYPE* mediaType, int& width,
     return width > 0 && height > 0;
 }
 
-// DirectShow carries extended color information in the upper 24 bits of
-// VIDEOINFOHEADER2::dwControlFlags.  The low eight bits are reserved for the
-// AMCONTROL_* flags.  Some capture drivers return a plain VIDEOINFOHEADER from
-// IAMStreamConfig::GetFormat even when the matching stream-capability entry
-// contains VIDEOINFOHEADER2, so this parser is intentionally independent of
-// the active-format query.
-struct DirectShowColorMetadata {
-    bool present = false;
-    DWORD controlFlags = 0;
-    UINT chromaSubsampling = 0;
-    UINT nominalRange = 0;
-    UINT transferMatrix = 0;
-    UINT lighting = 0;
-    UINT primaries = 0;
-    UINT transferFunction = 0;
-
-    bool hdr10() const {
-        // MF's canonical values are BT.2020 primaries (9), ST.2084/PQ (15),
-        // and a BT.2020 YUV matrix (4 or 5).  The DirectShow bitfield uses
-        // the same semantic values even though older dxva.h headers do not
-        // name the HDR-era enum members.
-        return present && primaries == 9 && transferFunction == 15 &&
-               (transferMatrix == 4 || transferMatrix == 5);
-    }
-};
-
 static void DeleteMediaType(AM_MEDIA_TYPE* mediaType);
 
 static bool ExtractDirectShowColorMetadata(
@@ -4485,6 +4609,32 @@ static bool ExtractDirectShowColorMetadata(
     return true;
 }
 
+static void MergeDirectShowColorMetadata(
+    DirectShowColorMetadata& destination,
+    const DirectShowColorMetadata& overrideValues) {
+    if (!overrideValues.present) return;
+    destination.present = true;
+    destination.controlFlags = overrideValues.controlFlags;
+    if (overrideValues.chromaSubsampling != 0) {
+        destination.chromaSubsampling = overrideValues.chromaSubsampling;
+    }
+    if (overrideValues.nominalRange != 0) {
+        destination.nominalRange = overrideValues.nominalRange;
+    }
+    if (overrideValues.transferMatrix != 0) {
+        destination.transferMatrix = overrideValues.transferMatrix;
+    }
+    if (overrideValues.lighting != 0) {
+        destination.lighting = overrideValues.lighting;
+    }
+    if (overrideValues.primaries != 0) {
+        destination.primaries = overrideValues.primaries;
+    }
+    if (overrideValues.transferFunction != 0) {
+        destination.transferFunction = overrideValues.transferFunction;
+    }
+}
+
 static const wchar_t* DirectShowTransferName(UINT value) {
     switch (value) {
     case 5: return L"BT.709";
@@ -4508,12 +4658,12 @@ static const wchar_t* DirectShowPrimariesName(UINT value) {
 static void LogDirectShowColorMetadata(const wchar_t* source,
                                        const DirectShowColorMetadata& metadata) {
     if (!metadata.present) {
-        fwprintf(stderr, L"[hdr] DirectShow color info (%s): unavailable.\n",
+        fwprintf(stderr, L"[video-color] DirectShow color info (%s): unavailable.\n",
                  source ? source : L"unknown");
         return;
     }
     fwprintf(stderr,
-             L"[hdr] DirectShow color info (%s): flags=0x%08X, primaries=%u (%s), "
+             L"[video-color] DirectShow color info (%s): flags=0x%08X, primaries=%u (%s), "
              L"transfer=%u (%s), matrix=%u, range=%u%s.\n",
              source ? source : L"unknown",
              static_cast<unsigned>(metadata.controlFlags), metadata.primaries,
@@ -5016,6 +5166,7 @@ struct DirectD3D11Renderer {
     uint64_t nextOcclusionTestMs = 0;
     DXGI_FORMAT inputFormat = DXGI_FORMAT_NV12;
     bool hdrOutput = false;
+    llcv::video_color::Configuration sdrColor{};
 
     void reset() {
         if (context) {
@@ -5089,6 +5240,7 @@ struct DirectD3D11Renderer {
         nextOcclusionTestMs = 0;
         inputFormat = DXGI_FORMAT_NV12;
         hdrOutput = false;
+        sdrColor = {};
         g_hdrOutputActive.store(false, std::memory_order_release);
     }
 
@@ -5107,8 +5259,20 @@ struct DirectD3D11Renderer {
 
     HRESULT initialize(HWND hwnd, int width, int height, int fps,
                        VideoPixelFormat pixelFormat,
-                       bool hdrInputMetadataAvailable = false) {
+                       bool hdrInputMetadataAvailable = false,
+                       llcv::video_color::Configuration color = {}) {
         reset();
+        sdrColor = color;
+        g_activeVideoColorMatrix.store(static_cast<int>(sdrColor.matrix),
+                                       std::memory_order_release);
+        g_activeVideoColorRange.store(static_cast<int>(sdrColor.range),
+                                      std::memory_order_release);
+        g_activeVideoColorMatrixSource.store(
+            static_cast<int>(sdrColor.matrixSource),
+            std::memory_order_release);
+        g_activeVideoColorRangeSource.store(
+            static_cast<int>(sdrColor.rangeSource),
+            std::memory_order_release);
         const uint64_t configurationGeneration =
             g_outputConfigurationGeneration.load(std::memory_order_acquire);
         RECT clientRect{};
@@ -5638,8 +5802,12 @@ struct DirectD3D11Renderer {
                 processor, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
         } else {
             D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputColor{};
-            inputColor.YCbCr_Matrix = 1; // BT.709
-            inputColor.Nominal_Range = 1; // studio 16-235
+            inputColor.YCbCr_Matrix =
+                sdrColor.matrix == llcv::video_color::Matrix::Bt709 ? 1u : 0u;
+            inputColor.Nominal_Range =
+                sdrColor.range == llcv::video_color::Range::Full
+                    ? D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255
+                    : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
             videoContext->VideoProcessorSetStreamColorSpace(processor, 0,
                                                             &inputColor);
         }
@@ -6251,25 +6419,27 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                                   std::memory_order_release);
 
         DirectShowColorMetadata directShowColorInfo{};
-        bool hdrInputMetadataDetected =
-            configuredFormat == VideoPixelFormat::P010 &&
+        const bool colorMetadataRelevant =
+            configuredFormat == VideoPixelFormat::P010 || compressedVideo;
+        bool directShowColorMetadataDetected = colorMetadataRelevant &&
             ExtractDirectShowColorMetadata(activeVideoType,
-                                           directShowColorInfo) &&
-            directShowColorInfo.hdr10();
-        if (configuredFormat == VideoPixelFormat::P010 &&
-            !hdrInputMetadataDetected) {
+                                           directShowColorInfo);
+        if (colorMetadataRelevant && !directShowColorMetadataDetected) {
             // A few capture drivers return a plain VIDEOINFOHEADER from
             // GetFormat but retain the extended color information on the
             // matching stream-capability entry.  Check that entry before
-            // falling back to SDR.
+            // falling back to the format-specific default.
             DirectShowColorMetadata capabilityColorInfo{};
             if (FindMatchingDirectShowColorMetadata(
                     videoPin, configuredFormat, preset.width, preset.height,
                     configuredFps, capabilityColorInfo)) {
                 directShowColorInfo = capabilityColorInfo;
-                hdrInputMetadataDetected = directShowColorInfo.hdr10();
+                directShowColorMetadataDetected = true;
             }
         }
+        const bool hdrInputMetadataDetected =
+            configuredFormat == VideoPixelFormat::P010 &&
+            directShowColorMetadataDetected && directShowColorInfo.hdr10();
         bool hdrInputMetadataAvailable = hdrInputMetadataDetected;
         if (configuredFormat == VideoPixelFormat::P010) {
             LogDirectShowColorMetadata(L"P010 selected format",
@@ -6288,26 +6458,34 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                                                    : L"unavailable");
             }
         }
+        if (compressedVideo) {
+            LogDirectShowColorMetadata(L"MJPEG selected format",
+                                       directShowColorInfo);
+        }
 
         g_videoConfiguredFps.store(configuredFps,
                                    std::memory_order_release);
-        initializationStage = L"initialize D3D11 video renderer";
-        hr = renderer.initialize(host, preset.width, preset.height,
-                                 configuredFps, rendererInputFormat,
-                                 hdrInputMetadataAvailable);
-        if (FAILED(hr)) {
-            LogHr(L"DirectD3D11Renderer::initialize", hr);
-            break;
-        }
+        llcv::video_color::Configuration sdrColor{};
         if (compressedVideo) {
             initializationStage = L"initialize Media Foundation compressed decoder";
-            hr = compressedDecoder.initialize(configuredFormat, preset.width,
-                                              preset.height, configuredFps,
-                                              activeVideoType);
+            hr = compressedDecoder.initialize(
+                configuredFormat, preset.width, preset.height, configuredFps,
+                activeVideoType,
+                directShowColorMetadataDetected ? &directShowColorInfo : nullptr,
+                g_settings.mjpegColorOverride);
             if (FAILED(hr)) {
                 LogHr(L"Media Foundation compressed decoder", hr);
                 break;
             }
+            sdrColor = compressedDecoder.colorConfiguration();
+        }
+        initializationStage = L"initialize D3D11 video renderer";
+        hr = renderer.initialize(host, preset.width, preset.height,
+                                 configuredFps, rendererInputFormat,
+                                 hdrInputMetadataAvailable, sdrColor);
+        if (FAILED(hr)) {
+            LogHr(L"DirectD3D11Renderer::initialize", hr);
+            break;
         }
         UpdateConfiguredVideoTitle(host, configuredFps);
 
@@ -6353,18 +6531,22 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         if (FAILED(hr = graph->ConnectDirect(videoPin, grabberIn,
                                              nullptr))) break;
         // Some drivers expose color information only on the negotiated
-        // connection type, not on IAMStreamConfig::GetFormat.  Inspect the
-        // Sample Grabber's connected type before starting the graph and, if
-        // it contains a complete HDR10 description, rebuild only the D3D11
-        // output resources with the HDR color space enabled.
-        if (configuredFormat == VideoPixelFormat::P010) {
+        // connection type, not on IAMStreamConfig::GetFormat. Inspect the
+        // Sample Grabber's connected type before starting the graph. For
+        // MJPEG, rebuild the decoder from that definitive type so its output
+        // metadata and DirectShow's extended-color flags can both participate
+        // in the automatic matrix/range decision.
+        if (colorMetadataRelevant) {
             AM_MEDIA_TYPE connectedVideoType{};
             const HRESULT connectedTypeHr =
                 grabber->GetConnectedMediaType(&connectedVideoType);
             if (SUCCEEDED(connectedTypeHr)) {
                 DirectShowColorMetadata connectedColorInfo{};
-                if (ExtractDirectShowColorMetadata(&connectedVideoType,
-                                                   connectedColorInfo)) {
+                const bool connectedColorDetected =
+                    ExtractDirectShowColorMetadata(&connectedVideoType,
+                                                   connectedColorInfo);
+                if (configuredFormat == VideoPixelFormat::P010 &&
+                    connectedColorDetected) {
                     LogDirectShowColorMetadata(L"P010 connected media type",
                                                connectedColorInfo);
                     if (!hdrInputMetadataAvailable &&
@@ -6376,12 +6558,46 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                         if (FAILED(hr)) {
                             LogHr(L"DirectD3D11Renderer::initialize(HDR metadata)",
                                   hr);
-                            break;
                         }
+                    }
+                }
+                if (SUCCEEDED(hr) && compressedVideo) {
+                    DirectShowColorMetadata effectiveColorInfo =
+                        directShowColorInfo;
+                    MergeDirectShowColorMetadata(effectiveColorInfo,
+                                                 connectedColorInfo);
+                    if (connectedColorDetected) {
+                        LogDirectShowColorMetadata(
+                            L"MJPEG connected media type", connectedColorInfo);
+                    }
+                    LogDirectShowColorMetadata(L"MJPEG effective metadata",
+                                               effectiveColorInfo);
+                    initializationStage =
+                        L"confirm Media Foundation MJPEG decoder color";
+                    hr = compressedDecoder.initialize(
+                        configuredFormat, preset.width, preset.height,
+                        configuredFps, &connectedVideoType,
+                        effectiveColorInfo.present ? &effectiveColorInfo
+                                                   : nullptr,
+                        g_settings.mjpegColorOverride);
+                    if (SUCCEEDED(hr)) {
+                        const auto connectedColor =
+                            compressedDecoder.colorConfiguration();
+                        if (!(connectedColor == sdrColor)) {
+                            sdrColor = connectedColor;
+                            hr = renderer.initialize(
+                                host, preset.width, preset.height,
+                                configuredFps, rendererInputFormat,
+                                hdrInputMetadataAvailable, sdrColor);
+                        }
+                    }
+                    if (FAILED(hr)) {
+                        LogHr(L"MJPEG connected-type color initialization", hr);
                     }
                 }
             }
             FreeMediaType(connectedVideoType);
+            if (FAILED(hr)) break;
         }
         if (FAILED(hr = graph->ConnectDirect(grabberOut, nullIn,
                                              nullptr))) break;
@@ -6521,7 +6737,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                 if (retryDelaysMs[attempt]) Sleep(retryDelaysMs[attempt]);
                 const HRESULT recoveryHr = renderer.initialize(
                     host, preset.width, preset.height, configuredFps,
-                    rendererInputFormat, hdrInputMetadataAvailable);
+                    rendererInputFormat, hdrInputMetadataAvailable, sdrColor);
                 if (SUCCEEDED(recoveryHr)) {
                     const bool recoveredTearing = renderer.allowTearing &&
                         g_settings.presentationMode ==
@@ -6566,7 +6782,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                 hr = renderer.initialize(host, preset.width, preset.height,
                                          configuredFps,
                                          rendererInputFormat,
-                                         hdrInputMetadataAvailable);
+                                         hdrInputMetadataAvailable, sdrColor);
                 if (FAILED(hr)) {
                     if (recoverRenderer(L"D3D11 output resize", hr)) {
                         hr = S_OK;
@@ -6583,6 +6799,20 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             IMFMediaBuffer* decodedBuffer = nullptr;
             if (compressedVideo) {
                 hr = compressedDecoder.decode(videoSample, &decodedBuffer);
+                if (SUCCEEDED(hr)) {
+                    const auto decodedColor =
+                        compressedDecoder.colorConfiguration();
+                    if (!(decodedColor == sdrColor)) {
+                        sdrColor = decodedColor;
+                        fwprintf(stderr,
+                                 L"[video] MJPEG decoder output color changed; "
+                                 L"reconfiguring D3D11 renderer.\n");
+                        hr = renderer.initialize(
+                            host, preset.width, preset.height, configuredFps,
+                            rendererInputFormat, hdrInputMetadataAvailable,
+                            sdrColor);
+                    }
+                }
                 if (SUCCEEDED(hr) && decodedBuffer) {
                     DWORD maximum = 0;
                     DWORD current = 0;
@@ -6731,6 +6961,8 @@ constexpr int IDC_SETTINGS_TAB = 2037;
 constexpr int IDC_SETTINGS_UPDATE_NOW = 2038;
 constexpr int IDC_SETTINGS_OPEN_LOG_FOLDER = 2039;
 constexpr int IDC_SETTINGS_FULLSCREEN_CURSOR = 2040;
+constexpr int IDC_SETTINGS_MJPEG_COLOR = 2041;
+constexpr int IDC_SETTINGS_MJPEG_COLOR_HELP = 2042;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
@@ -6804,6 +7036,9 @@ struct SettingsDialogState {
     HWND audioOnlyCheck = nullptr;
     HWND forceHdr10Check = nullptr;
     HWND forceHdr10Help = nullptr;
+    HWND mjpegColorLabel = nullptr;
+    HWND mjpegColorCombo = nullptr;
+    HWND mjpegColorHelp = nullptr;
     HWND driftCombo = nullptr;
     HWND pcmQueueCombo = nullptr;
     HWND audioStatus = nullptr;
@@ -7070,11 +7305,13 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
                          windowOptionY + 144, 120, 24, dpi);
     PlaceSettingsControl(state->fullscreenCursorCombo, 630,
                          windowOptionY + 140, 255, 120, dpi);
-    // P010 is an input-format override, so keep its optional HDR fallback
-    // immediately below the detected-format list instead of mixing it with
-    // presentation and window behavior.
+    // P010 and MJPEG use the same final capture-format row. Only the control
+    // relevant to the selected input format is made visible.
     PlaceSettingsControl(state->forceHdr10Check, 34, 374, 360, 28, dpi);
     PlaceSettingsControl(state->forceHdr10Help, 402, 370, 24, 24, dpi);
+    PlaceSettingsControl(state->mjpegColorLabel, 34, 374, 140, 24, dpi);
+    PlaceSettingsControl(state->mjpegColorCombo, 190, 370, 240, 150, dpi);
+    PlaceSettingsControl(state->mjpegColorHelp, 438, 370, 24, 24, dpi);
 
     // Guide and update tabs.
     PlaceSettingsControl(state->guideShortcutsTitle, 34, 58, 280, 20, dpi);
@@ -7185,8 +7422,13 @@ static void UpdateAdvancedControlVisibility(SettingsDialogState* state) {
     }
     const bool p010Selected = SelectedPixelFormat(state) ==
         VideoPixelFormat::P010;
+    const bool mjpegSelected = SelectedPixelFormat(state) ==
+        VideoPixelFormat::Mjpeg;
     SetSettingsControlVisible(state->forceHdr10Check, video && p010Selected);
     SetSettingsControlVisible(state->forceHdr10Help, video && p010Selected);
+    SetSettingsControlVisible(state->mjpegColorLabel, video && mjpegSelected);
+    SetSettingsControlVisible(state->mjpegColorCombo, video && mjpegSelected);
+    SetSettingsControlVisible(state->mjpegColorHelp, video && mjpegSelected);
     SetSettingsControlVisible(state->guideShortcutsTitle, guide);
     SetSettingsControlVisible(state->guideText, guide);
     SetSettingsControlVisible(state->guideDiagnosticsTitle, guide);
@@ -7281,9 +7523,10 @@ static bool IsSettingsHelpControl(const SettingsDialogState* state,
                                   HWND target) {
     return state && (target == state->driftHelp ||
                      target == state->pcmQueueHelp ||
-                     target == state->presentationHelp ||
-                     target == state->volumeBoostHelp ||
-                     target == state->forceHdr10Help);
+                      target == state->presentationHelp ||
+                      target == state->volumeBoostHelp ||
+                      target == state->forceHdr10Help ||
+                      target == state->mjpegColorHelp);
 }
 
 enum class SettingsHelpTopic {
@@ -7292,6 +7535,7 @@ enum class SettingsHelpTopic {
     Presentation,
     VolumeBoost,
     ForceHdr10,
+    MjpegColor,
 };
 
 static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
@@ -7344,6 +7588,13 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
                    L"If the source is SDR, or the monitor is not handling HDR correctly, colors can look strongly "
                    L"oversaturated or otherwise wrong. Turn it off in that case. This does not add a frame queue; "
                    L"it only changes the output color interpretation.";
+        case SettingsHelpTopic::MjpegColor:
+            return L"MJPEG color interpretation\n\n"
+                   L"Auto uses decoder metadata first, then DirectShow metadata. If neither identifies "
+                   L"the format, it uses JPEG Full range with BT.709 for HD or BT.601 for SD.\n\n"
+                   L"Use a manual combination only when MJPEG colors still differ from another capture "
+                   L"application. Full/Limited changes black and white levels; BT.709/BT.601 changes the "
+                   L"YUV color matrix. This does not add a frame queue or increase latency.";
         }
     }
     switch (topic) {
@@ -7388,6 +7639,13 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
                L"P010을 BT.2020/PQ로 처리하고 HDR10 출력으로 표시합니다.\n\n"
                L"입력이 SDR이거나 모니터의 HDR 처리가 맞지 않으면 색상이 과포화되거나 부정확해질 수 있습니다. "
                L"그 경우 이 옵션을 끄세요. 프레임 큐를 추가하지 않으므로 표시 지연은 늘지 않고 출력 색상 해석만 바뀝니다.";
+    case SettingsHelpTopic::MjpegColor:
+        return L"MJPEG 색상 해석 안내\n\n"
+               L"자동은 디코더 메타데이터를 먼저 사용하고, 없으면 DirectShow 정보를 확인합니다. 양쪽 모두 "
+               L"알려주지 않으면 JPEG Full range와 HD BT.709 또는 SD BT.601을 사용합니다.\n\n"
+               L"자동 색상이 다른 캡처 프로그램과 계속 다를 때만 수동 조합을 선택하세요. Full/Limited는 "
+               L"명암 범위를, BT.709/BT.601은 YUV 색상 행렬을 바꿉니다. 프레임 큐를 추가하지 않아 "
+               L"표시 지연은 늘지 않습니다.";
     }
     return L"";
 }
@@ -8186,6 +8444,8 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->pcmQueueCombo, CB_GETCURSEL, 0, 0);
         const LRESULT pixelFormatIndex = SendMessageW(
             state->pixelFormatCombo, CB_GETCURSEL, 0, 0);
+        const LRESULT mjpegColorIndex = SendMessageW(
+            state->mjpegColorCombo, CB_GETCURSEL, 0, 0);
         const LRESULT frameRateIndex = SendMessageW(
             state->frameRateCombo, CB_GETCURSEL, 0, 0);
         const LRESULT languageIndex = SendMessageW(
@@ -8280,6 +8540,15 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
                 static_cast<WPARAM>(frameRateIndex), 0);
             g_settings.videoFrameRate = value == CB_ERR
                                             ? 0 : static_cast<int>(value);
+        }
+        if (mjpegColorIndex >= 0) {
+            const LRESULT value = SendMessageW(
+                state->mjpegColorCombo, CB_GETITEMDATA,
+                static_cast<WPARAM>(mjpegColorIndex), 0);
+            if (value != CB_ERR) {
+                g_settings.mjpegColorOverride =
+                    static_cast<llcv::video_color::Override>(value);
+            }
         }
         g_settings.saveLog = SendMessageW(
             state->saveLogCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -8887,6 +9156,50 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             state, hwnd, state->forceHdr10Help,
             SettingsHelpText(SettingsHelpTopic::ForceHdr10));
 
+        state->mjpegColorLabel = makeLabel(
+            UI_TEXT(L"MJPEG 색상 해석"), 24, 376);
+        state->mjpegColorCombo = CreateWindowExW(
+            0, L"COMBOBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
+            190, 372, 240, 150, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_MJPEG_COLOR)),
+            instance, nullptr);
+        const struct {
+            const wchar_t* label;
+            llcv::video_color::Override value;
+        } mjpegColorChoices[] = {
+            {UI_TEXT(L"자동 (권장)"), llcv::video_color::Override::Auto},
+            {L"BT.709 · Full range", llcv::video_color::Override::Bt709Full},
+            {L"BT.709 · Limited range", llcv::video_color::Override::Bt709Limited},
+            {L"BT.601 · Full range", llcv::video_color::Override::Bt601Full},
+            {L"BT.601 · Limited range", llcv::video_color::Override::Bt601Limited},
+        };
+        LRESULT selectedMjpegColor = 0;
+        for (const auto& choice : mjpegColorChoices) {
+            const LRESULT index = SendMessageW(
+                state->mjpegColorCombo, CB_ADDSTRING, 0,
+                reinterpret_cast<LPARAM>(choice.label));
+            SendMessageW(state->mjpegColorCombo, CB_SETITEMDATA,
+                         static_cast<WPARAM>(index),
+                         static_cast<LPARAM>(choice.value));
+            if (choice.value == g_settings.mjpegColorOverride) {
+                selectedMjpegColor = index;
+            }
+        }
+        SendMessageW(state->mjpegColorCombo, CB_SETCURSEL,
+                     static_cast<WPARAM>(selectedMjpegColor), 0);
+        state->mjpegColorHelp = CreateWindowExW(
+            0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                BS_PUSHBUTTON,
+            438, 372, 24, 24, hwnd,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(IDC_SETTINGS_MJPEG_COLOR_HELP)),
+            instance, nullptr);
+        AddSettingsTooltip(
+            state, hwnd, state->mjpegColorHelp,
+            SettingsHelpText(SettingsHelpTopic::MjpegColor));
+
         state->pixelCheck = CreateWindowExW(
             0, L"BUTTON", UI_TEXT(L"Pixel-perfect (1:1 · 창 크기 고정)"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
@@ -9344,6 +9657,14 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 hwnd,
                 SettingsHelpText(SettingsHelpTopic::ForceHdr10),
                 UI_TEXT(L"HDR10 강제 출력"), MB_OK | MB_ICONINFORMATION);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_MJPEG_COLOR_HELP &&
+            HIWORD(wParam) == BN_CLICKED) {
+            MessageBoxW(
+                hwnd,
+                SettingsHelpText(SettingsHelpTopic::MjpegColor),
+                UI_TEXT(L"MJPEG 색상 해석"), MB_OK | MB_ICONINFORMATION);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_PCM_QUEUE_HELP &&
@@ -10384,7 +10705,7 @@ static bool IsNewerReleaseTag(const std::wstring& latestTag) {
 
 static bool FetchLatestRelease(UpdateCheckResult& result) {
     HINTERNET session = WinHttpOpen(
-        L"LowLatencyCaptureViewer/1.2.2",
+        L"LowLatencyCaptureViewer/1.2.3",
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return false;
@@ -10569,6 +10890,14 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     const bool p010Video = activeFormat == VideoPixelFormat::P010;
     const bool hdrVideo = p010Video &&
         g_hdrOutputActive.load(std::memory_order_acquire);
+    const auto activeColorMatrix = static_cast<llcv::video_color::Matrix>(
+        g_activeVideoColorMatrix.load(std::memory_order_acquire));
+    const auto activeColorRange = static_cast<llcv::video_color::Range>(
+        g_activeVideoColorRange.load(std::memory_order_acquire));
+    const auto activeColorMatrixSource = static_cast<llcv::video_color::Source>(
+        g_activeVideoColorMatrixSource.load(std::memory_order_acquire));
+    const auto activeColorRangeSource = static_cast<llcv::video_color::Source>(
+        g_activeVideoColorRangeSource.load(std::memory_order_acquire));
     const wchar_t* chromaText = compressedVideo
                                     ? L"decode→4:2:0"
                                     : activeFormat == VideoPixelFormat::Yuy2
@@ -10579,14 +10908,31 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     const wchar_t* bitDepthText = compressedVideo
                                       ? L"compressed"
                                       : p010Video ? L"10-bit" : L"8-bit";
+    wchar_t compressedQualityText[256]{};
+    if (compressedVideo) {
+        const bool manualColor =
+            activeColorMatrixSource == llcv::video_color::Source::UserOverride &&
+            activeColorRangeSource == llcv::video_color::Source::UserOverride;
+        swprintf_s(
+            compressedQualityText,
+            IsEnglishUi()
+                ? (manualColor
+                       ? L"%s · %s · MJPEG manual · D3D11 VP"
+                       : L"%s · %s · MJPEG auto(%s) · D3D11 VP")
+                : (manualColor
+                       ? L"%s · %s · MJPEG 수동 · D3D11 VP"
+                       : L"%s · %s · MJPEG 자동(%s) · D3D11 VP"),
+            llcv::video_color::MatrixName(activeColorMatrix),
+            llcv::video_color::RangeName(activeColorRange),
+            llcv::video_color::CompactSourceName(activeColorMatrixSource,
+                                                  activeColorRangeSource));
+    }
     const wchar_t* qualityText = hdrVideo
         ? L"BT.2020 · PQ · HDR10 prototype"
         : p010Video
         ? L"P010 · HDR output unavailable"
         : compressedVideo
-        ? (IsEnglishUi()
-            ? L"Compressed input · Media Foundation decode · NV12 output"
-            : L"실험적 압축 입력 · Media Foundation 디코드 · NV12 D3D11 출력")
+        ? compressedQualityText
         : IsEnglishUi()
         ? L"BT.709 · Limited range · D3D11 Video Processor"
         : L"BT.709 · Limited range · D3D11 Video Processor";
