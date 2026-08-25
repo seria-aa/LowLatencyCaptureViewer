@@ -114,8 +114,8 @@ capture devices are supported, but driver differences mean that every model
 cannot be guaranteed.
 
 - Standard support: 48 kHz stereo PCM audio and progressive NV12/YUY2 video
-- Compatibility mode: MJPEG, shown only when raw NV12/YUY2 at 30 fps or above
-  is unavailable at the selected resolution
+- Compatibility mode: MJPEG, always listed for manual selection when the device
+  exposes it
 - Experimental: ASIO output and P010 10-bit HDR10
 - Not supported: H.264/AVC, MPEG-4, automatic device reconnect
 

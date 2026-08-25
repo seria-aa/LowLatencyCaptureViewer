@@ -108,7 +108,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.2.1";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.2";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -687,6 +687,11 @@ static const GUID& PixelFormatSubtype(VideoPixelFormat format) {
 
 static bool IsCompressedVideoFormat(VideoPixelFormat format) {
     return format == VideoPixelFormat::Mjpeg;
+}
+
+static bool IsAutoSelectableVideoFormat(VideoPixelFormat format) {
+    return format == VideoPixelFormat::Nv12 ||
+           format == VideoPixelFormat::Yuy2;
 }
 
 static VideoPixelFormat VideoPixelFormatFromSubtype(const GUID& subtype) {
@@ -4656,8 +4661,7 @@ static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
         // Compressed capture is opt-in. Auto preserves the original raw
         // NV12/YUY2 path even when the device advertises alternatives.
         const bool formatMatches = wantedFormat == VideoPixelFormat::Auto
-            ? format == VideoPixelFormat::Nv12 ||
-              format == VideoPixelFormat::Yuy2
+            ? IsAutoSelectableVideoFormat(format)
             : format == wantedFormat;
         if (details && formatMatches && width == wantedWidth &&
             height == wantedHeight && fps > 0) {
@@ -7979,17 +7983,6 @@ static VideoPixelFormat SelectedPixelFormat(
                            : static_cast<VideoPixelFormat>(value);
 }
 
-static bool HasRealtimeRawVideoFormat(
-    const std::vector<PixelFormatSupport>& formats) {
-    return std::any_of(formats.begin(), formats.end(),
-                       [](const PixelFormatSupport& support) {
-                           const bool raw =
-                               support.format == VideoPixelFormat::Nv12 ||
-                               support.format == VideoPixelFormat::Yuy2;
-                           return raw && support.selectedFps >= 30;
-                       });
-}
-
 static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
     if (!state) return;
 
@@ -8014,19 +8007,11 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
         message = UI_TEXT(L"지원 모드 없음: 다른 장치 또는 해상도를 선택하세요.");
     } else {
         message = IsEnglishUi() ? L"Detected:\r\n" : L"자동 인식:\r\n";
-        // Do not hide MJPEG merely because a device advertises an unusably
-        // slow raw mode. A raw mode must reach at least 30 fps before it takes
-        // exclusive priority in the normal selector.
-        const bool realtimeRawAvailable = HasRealtimeRawVideoFormat(
-            state->pixelFormats);
         bool firstFormat = true;
         for (const auto format : {VideoPixelFormat::Nv12,
                                   VideoPixelFormat::Yuy2,
                                   VideoPixelFormat::P010,
                                   VideoPixelFormat::Mjpeg}) {
-            if (realtimeRawAvailable && IsCompressedVideoFormat(format)) {
-                continue;
-            }
             std::vector<int> frameRates;
             for (const auto& support : state->pixelFormats) {
                 if (support.format == format) {
@@ -8082,8 +8067,11 @@ static void PopulateFrameRateCombo(SettingsDialogState* state) {
     const VideoPixelFormat selectedFormat = SelectedPixelFormat(state);
     std::vector<int> frameRates;
     for (const auto& support : state->pixelFormats) {
-        if (selectedFormat != VideoPixelFormat::Auto &&
-            support.format != selectedFormat) continue;
+        if (selectedFormat == VideoPixelFormat::Auto) {
+            if (!IsAutoSelectableVideoFormat(support.format)) continue;
+        } else if (support.format != selectedFormat) {
+            continue;
+        }
         frameRates.push_back(support.selectedFps);
     }
     std::sort(frameRates.begin(), frameRates.end(), std::greater<int>());
@@ -8140,13 +8128,12 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
                  static_cast<WPARAM>(autoIndex),
                  static_cast<LPARAM>(VideoPixelFormat::Auto));
     LRESULT selectedIndex = autoIndex;
-    const bool realtimeRawAvailable = HasRealtimeRawVideoFormat(
-        state->pixelFormats);
     for (const auto format : {VideoPixelFormat::Nv12,
                               VideoPixelFormat::Yuy2,
                               VideoPixelFormat::P010,
                               VideoPixelFormat::Mjpeg}) {
-        if (realtimeRawAvailable && IsCompressedVideoFormat(format)) continue;
+        // Visibility follows the device capability report. Auto-selection
+        // preference is applied separately and must not hide manual choices.
         const bool available = std::any_of(
             state->pixelFormats.begin(), state->pixelFormats.end(),
             [format](const PixelFormatSupport& support) {
@@ -10397,7 +10384,7 @@ static bool IsNewerReleaseTag(const std::wstring& latestTag) {
 
 static bool FetchLatestRelease(UpdateCheckResult& result) {
     HINTERNET session = WinHttpOpen(
-        L"LowLatencyCaptureViewer/1.2.1",
+        L"LowLatencyCaptureViewer/1.2.2",
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return false;

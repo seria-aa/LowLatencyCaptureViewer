@@ -20,11 +20,10 @@ frame-rate lists. A fresh configuration starts at 1920 x 1080. The selected
 resolution is saved and does not change when the settings or viewer window is
 moved to another monitor.
 
-Auto pixel format prefers uncompressed NV12, followed by YUY2. If either raw
-format reaches at least 30 fps at the selected resolution, MJPEG is hidden so
-the tested raw path remains the clear default. **MJPEG (experimental compressed
-compatibility)** is available when raw formats are absent or all remain below
-30 fps.
+Auto pixel format prefers uncompressed NV12, followed by YUY2. Every NV12,
+YUY2, P010, and MJPEG format reported by the device at the selected resolution
+is listed regardless of performance. **MJPEG (experimental compressed
+compatibility)** is never chosen by Auto and must be selected explicitly.
 
 H.264/AVC and MPEG-4 are not supported. Their inter-frame references and decoder
 reordering make a consistently low-latency path difficult to guarantee.

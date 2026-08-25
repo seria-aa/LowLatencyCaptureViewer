@@ -110,7 +110,7 @@ AVerMedia GC573에서 주로 개발·검증했습니다. 다른 DirectShow 캡�
 장치별 드라이버 차이 때문에 모든 모델을 보장할 수는 없습니다.
 
 - 기본 지원: 48kHz 스테레오 PCM 오디오, progressive NV12/YUY2 영상
-- 호환 모드: MJPEG — 같은 해상도에서 30fps 이상 NV12/YUY2를 제공하지 않을 때 표시
+- 호환 모드: MJPEG — 장치가 제공하면 항상 목록에 표시되며 직접 선택
 - 실험 기능: ASIO 출력, P010 10-bit HDR10
 - 미지원: H.264/AVC, MPEG-4, 자동 장치 재연결
 

@@ -1,4 +1,12 @@
-Low Latency Capture Viewer v1.2.1 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.2 x64 (continued from the v0.14.2 rework)
+
+v1.2.2 complete pixel-format visibility release
+-------------------------------------------------
+- The settings selector and detected-capability summary now show every NV12,
+  YUY2, P010, and MJPEG format reported by the selected device and resolution.
+- Auto remains on the tested raw path and still prefers NV12, then YUY2.
+  Compressed MJPEG remains experimental and requires explicit selection.
+- Capture, decoding, D3D11 presentation, and audio paths are unchanged.
 
 v1.2.1 PCM buffer options and documentation alignment release
 -------------------------------------------------
