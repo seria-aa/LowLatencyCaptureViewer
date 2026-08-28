@@ -43,7 +43,7 @@ automatically,” no separate selection is needed.
 | Capture resolution | **1920 × 1080**; change it to match the source and capture device |
 | Pixel format | **Auto (NV12 preferred)** |
 | Frame rate | **Auto**, or the source's actual output rate |
-| Presentation | **Low latency**; choose VSync for tearing or intermittent monitor signal loss |
+| Presentation | **Immediate (minimum latency)**; choose **VSync (compatibility)** for tearing or intermittent monitor signal loss |
 | Pixel-perfect | On for exact 1:1 output; off for a freely resizable window |
 
 A 120 fps capture mode does not create extra visual information when the game

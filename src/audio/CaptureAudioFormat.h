@@ -40,7 +40,22 @@ struct Classification {
     Rejection rejection = Rejection::Malformed;
 };
 
+struct AllocatorInfo {
+    HRESULT result = E_FAIL;
+    LONG bufferCount = 0;
+    LONG bufferBytes = 0;
+    LONG framesPerBuffer = 0;
+};
+
 Classification Classify(const AM_MEDIA_TYPE& mediaType) noexcept;
+AM_MEDIA_TYPE* SelectSupportedType(
+    IPin* audioPin, Format& selectedFormat,
+    Rejection* rejection = nullptr);
+HRESULT SuggestCaptureBuffer(IPin* audioPin, WORD blockAlign,
+                             int sampleRate, int bufferMs,
+                             LONG* suggestedBytes = nullptr) noexcept;
+AllocatorInfo QueryConnectedAllocator(IPin* inputPin,
+                                      WORD blockAlign) noexcept;
 int16_t ConvertSample(const BYTE* source, const Format& format) noexcept;
 void ConvertFrame(const BYTE* source, const Format& format, int16_t& left,
                   int16_t& right) noexcept;

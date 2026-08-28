@@ -1,4 +1,19 @@
-Low Latency Capture Viewer v1.2.3 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.4 x64 (continued from the v0.14.2 rework)
+
+v1.2.4 maintainability and regression-safety release
+---------------------------------------------------
+- Split device discovery, capture callbacks, PCM buffering/resampling,
+  settings, update checks, window geometry, diagnostics, and video-format
+  handling into focused modules while preserving the existing runtime paths.
+- Added focused regression tests for audio device capabilities, PCM buffering,
+  DirectShow devices and formats, settings persistence, update comparison,
+  window geometry, and audio error-pattern analysis.
+- ASIO shutdown callbacks no longer count a final partial buffer as a runtime
+  underrun after the application has begun closing.
+- The troubleshooting guide now recommends VSync compatibility mode when the
+  immediate tearing path causes intermittent monitor signal loss.
+- Shared, ASIO, NV12, YUY2, MJPEG, and P010 behavior remains unchanged apart
+  from the shutdown diagnostic correction.
 
 v1.2.3 MJPEG automatic color interpretation
 ---------------------------------------------

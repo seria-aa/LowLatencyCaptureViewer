@@ -20,11 +20,8 @@
 #include <windowsx.h>
 #include <dbt.h>
 #include <shellapi.h>
-#include <winhttp.h>
 #include <dshow.h>
 #include <dvdmedia.h>
-#include <mmdeviceapi.h>
-#include <audioclient.h>
 #include <avrt.h>
 #include <d3d11.h>
 #include <d3d11_1.h>
@@ -35,7 +32,6 @@
 #include <dwrite.h>
 #include <shellscalingapi.h>
 #include <commctrl.h>
-#include <functiondiscoverykeys_devpkey.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mftransform.h>
@@ -43,10 +39,26 @@
 #include <dxva.h>
 
 #include "audio/AudioMix.h"
+#include "audio/AudioDeviceCapabilities.h"
 #include "audio/AsioOutput.h"
 #include "audio/CaptureAudioFormat.h"
+#include "audio/PcmPipeline.h"
+#include "audio/WasapiOutput.h"
+#include "capture/DirectShowDevices.h"
+#include "capture/AudioSampleGrabber.h"
+#include "capture/DirectShowGraphResources.h"
+#include "capture/LatestVideoSample.h"
 #include "diagnostics/Logger.h"
+#include "diagnostics/AudioErrorHistory.h"
+#include "settings/AppSettings.h"
+#include "settings/SettingsStore.h"
 #include "ui/AudioOsdLayout.h"
+#include "ui/PresentationModeUi.h"
+#include "ui/WindowGeometry.h"
+#include "update/UpdateChecker.h"
+#include "video/CaptureColorMetadata.h"
+#include "video/DirectShowVideoFormat.h"
+#include "video/MjpegDecoder.h"
 #include "video/VideoColor.h"
 
 #include <atomic>
@@ -60,7 +72,6 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
-#include <deque>
 #include <string>
 #include <thread>
 #include <vector>
@@ -69,34 +80,6 @@
 #include <functional>
 #include <cstdarg>
 #include <unordered_map>
-
-// -----------------------------------------------------------------------------
-// Minimal Sample Grabber declarations.
-// qedit.h is no longer shipped in modern Windows SDKs, so the interfaces and
-// CLSIDs are declared locally. The COM component itself is part of legacy
-// DirectShow on many desktop Windows installations.
-// -----------------------------------------------------------------------------
-
-struct __declspec(uuid("0579154A-2B53-4994-B0D0-E773148EFF85")) ISampleGrabberCB : IUnknown {
-    virtual HRESULT STDMETHODCALLTYPE SampleCB(double SampleTime, IMediaSample* pSample) = 0;
-    virtual HRESULT STDMETHODCALLTYPE BufferCB(double SampleTime, BYTE* pBuffer, long BufferLen) = 0;
-};
-
-struct __declspec(uuid("6B652FFF-11FE-4FCE-92AD-0266B5D7C78F")) ISampleGrabber : IUnknown {
-    virtual HRESULT STDMETHODCALLTYPE SetOneShot(BOOL OneShot) = 0;
-    virtual HRESULT STDMETHODCALLTYPE SetMediaType(const AM_MEDIA_TYPE* pType) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetConnectedMediaType(AM_MEDIA_TYPE* pType) = 0;
-    virtual HRESULT STDMETHODCALLTYPE SetBufferSamples(BOOL BufferThem) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetCurrentBuffer(long* pBufferSize, long* pBuffer) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetCurrentSample(IMediaSample** ppSample) = 0;
-    virtual HRESULT STDMETHODCALLTYPE SetCallback(ISampleGrabberCB* pCallback, long WhichMethodToCallback) = 0;
-};
-
-static const CLSID CLSID_SampleGrabber =
-{0xC1F400A0,0x3F08,0x11D3,{0x9F,0x0B,0x00,0x60,0x08,0x03,0x9E,0x37}};
-
-static const CLSID CLSID_NullRenderer =
-{0xC1F400A4,0x3F08,0x11D3,{0x9F,0x0B,0x00,0x60,0x08,0x03,0x9E,0x37}};
 
 // -----------------------------------------------------------------------------
 // User-tested settings.
@@ -109,7 +92,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.2.3";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.4";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -131,62 +114,29 @@ constexpr int kRecommendedPcmQueueMs = 20;
 constexpr double kAutoCorrectionEngageDeviationFrames = 96.0;
 constexpr uint64_t kAutoCorrectionEngageHoldMs = 5000;
 
-enum class AudioMode {
-    WasapiShared,
-    WasapiExclusive,
-    Asio,
-};
-
-enum class DriftCorrectionMode {
-    Off,
-    Auto,
-    Resample,
-};
-
-enum class VolumeHudPosition {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-};
-
-enum class VideoPreset {
-    R1920x1080,
-    R2560x1440,
-    R3840x2160,
-};
-
-enum class PresentationMode {
-    AllowTearing,
-    VSync,
-};
-
-enum class ScalingMode {
-    Smooth,
-    Sharp,
-};
-
-// Fullscreen is often used as a clean display surface, but this viewer also
-// exposes mouse-wheel volume control.  Keep the pointer available on motion
-// while allowing it to disappear when it is no longer needed.
-enum class FullscreenCursorMode {
-    AutoHide,
-    AlwaysVisible,
-};
-
-enum class VideoPixelFormat {
-    Auto,
-    Nv12,
-    Yuy2,
-    Mjpeg,
-    P010,
-};
-
-enum class UiLanguage {
-    Auto,
-    Korean,
-    English,
-};
+using AppSettings = llcv::settings::AppSettings;
+using AudioClient3Support = llcv::audio_device::SharedModeSupport;
+using AudioEndpointInfo = llcv::audio_device::EndpointInfo;
+using AudioMode = llcv::settings::AudioMode;
+using PcmRing = llcv::audio::PcmRing;
+using SincDriftResampler = llcv::audio::SincDriftResampler;
+using CaptureDeviceInfo = llcv::capture::DeviceInfo;
+using DriftCorrectionMode = llcv::settings::DriftCorrectionMode;
+using AudioErrorCause = llcv::diagnostics::AudioErrorCause;
+using AudioErrorHistory = llcv::diagnostics::AudioErrorHistory;
+using AudioErrorKind = llcv::diagnostics::AudioErrorKind;
+using AudioPatternStats = llcv::diagnostics::AudioPatternStats;
+using ExclusiveCompatibilityProbe = llcv::audio_device::ExclusiveProbe;
+using ExclusiveEndpointCacheEntry =
+    llcv::settings::ExclusiveEndpointCacheEntry;
+using FullscreenCursorMode = llcv::settings::FullscreenCursorMode;
+using PresentationMode = llcv::settings::PresentationMode;
+using PixelFormatSupport = llcv::video::PixelFormatSupport;
+using ScalingMode = llcv::settings::ScalingMode;
+using UiLanguage = llcv::settings::UiLanguage;
+using VideoPixelFormat = llcv::settings::VideoPixelFormat;
+using VideoPreset = llcv::settings::VideoPreset;
+using VolumeHudPosition = llcv::settings::VolumeHudPosition;
 
 enum class InternalCaptureAudioState {
     Checking,
@@ -195,105 +145,12 @@ enum class InternalCaptureAudioState {
     Unknown,
 };
 
-struct CaptureDeviceInfo {
-    std::wstring id;
-    std::wstring name;
-};
-
-struct AudioEndpointInfo {
-    std::wstring id;
-    std::wstring name;
-    bool isDefault = false;
-};
-
-struct PixelFormatSupport {
-    VideoPixelFormat format = VideoPixelFormat::Auto;
-    int selectedFps = 0;
-};
-
 struct InternalCaptureAudioProbe {
     InternalCaptureAudioState state = InternalCaptureAudioState::Checking;
     HRESULT result = S_OK;
 };
 
-// DirectShow carries extended color information in the upper 24 bits of
-// VIDEOINFOHEADER2::dwControlFlags. The enum values for the SDR matrix/range
-// fields are shared with Media Foundation, which lets the compressed decoder
-// preserve them without a lossy translation.
-struct DirectShowColorMetadata {
-    bool present = false;
-    DWORD controlFlags = 0;
-    UINT chromaSubsampling = 0;
-    UINT nominalRange = 0;
-    UINT transferMatrix = 0;
-    UINT lighting = 0;
-    UINT primaries = 0;
-    UINT transferFunction = 0;
-
-    bool hdr10() const {
-        return present && primaries == 9 && transferFunction == 15 &&
-               (transferMatrix == 4 || transferMatrix == 5);
-    }
-};
-
-// A preflight verdict belongs to one stable Core Audio endpoint ID. Keep both
-// passes and failures so the settings dialog does not repeat an expensive
-// real-device event test every time it opens.
-struct ExclusiveEndpointCacheEntry {
-    std::wstring endpointId;
-    bool supported = false;
-    int recommendedBufferMs = 0;
-};
-
-struct AppSettings {
-    UiLanguage uiLanguage = UiLanguage::Auto;
-    AudioMode audioMode = AudioMode::WasapiShared;
-    int wasapiBufferMs = kRecommendedWasapiBufferMs;
-    UINT32 wasapiSharedPeriodFrames = 0;
-    DriftCorrectionMode driftCorrection = DriftCorrectionMode::Auto;
-    int pcmQueueTargetMs = kRecommendedPcmQueueMs;
-    int volumePercent = 100;
-    int leftVolumePercent = 100;
-    int rightVolumePercent = 100;
-    bool allowVolumeBoost = false;
-    VolumeHudPosition volumeHudPosition = VolumeHudPosition::TopLeft;
-    bool muteWhenBackground = false;
-    PresentationMode presentationMode = PresentationMode::AllowTearing;
-    ScalingMode scalingMode = ScalingMode::Smooth;
-    FullscreenCursorMode fullscreenCursorMode =
-        FullscreenCursorMode::AutoHide;
-    VideoPreset videoPreset = VideoPreset::R1920x1080;
-    VideoPixelFormat pixelFormat = VideoPixelFormat::Auto;
-    int videoFrameRate = 0;
-    std::wstring captureDeviceId;
-    // Empty means: use an audio pin on the video filter when available, then
-    // try a clearly matching DirectShow audio-capture filter.
-    std::wstring captureAudioDeviceId;
-    std::wstring audioOutputDeviceId;
-    // A successful low-latency Exclusive preflight is tied to the resolved
-    // endpoint, even when the user chose to follow the Windows default.
-    std::wstring exclusiveVerifiedEndpointId;
-    int exclusiveVerifiedBufferMs = 0;
-    std::vector<ExclusiveEndpointCacheEntry> exclusiveEndpointCache;
-    std::wstring asioDriverName;
-    bool saveLog = false;
-    bool showDiagnosticConsole = false;
-    bool skipStartupSettings = false;
-    bool checkForUpdates = true;
-    bool audioOnly = false;
-    bool forceHdr10 = false;
-    llcv::video_color::Override mjpegColorOverride =
-        llcv::video_color::Override::Auto;
-    bool pixelPerfect = true;
-    bool relativeWindowSize = false;
-    int relativeWindowScalePpm = 0;
-    bool borderlessWindow = false;
-    bool windowSnap = true;
-    bool hasWindowPosition = false;
-    int windowX = 0;
-    int windowY = 0;
-    std::wstring monitorDevice;
-};
+using DirectShowColorMetadata = llcv::video::CaptureColorMetadata;
 
 struct VideoPresetInfo {
     VideoPreset preset;
@@ -508,35 +365,6 @@ static const wchar_t* UiText(const wchar_t* korean) {
 
 #define UI_TEXT(text) UiText(text)
 
-struct AudioClient3Support {
-    bool supported = false;
-    HRESULT result = E_FAIL;
-    UINT32 defaultFrames = 0;
-    UINT32 fundamentalFrames = 0;
-    UINT32 minimumFrames = 0;
-    UINT32 maximumFrames = 0;
-    double probeMilliseconds = 0.0;
-};
-
-// A successful IsFormatSupported/Initialize call is not enough to advertise
-// low-latency Exclusive mode: some endpoint drivers accept the stream but
-// signal its event late, or silently allocate a much larger buffer.  This
-// probe intentionally exercises the real event path before it is offered as
-// a supported configuration.
-struct ExclusiveCompatibilityProbe {
-    bool compatible = false;
-    HRESULT result = E_FAIL;
-    UINT32 requestedFrames = 0;
-    UINT32 actualBufferFrames = 0;
-    UINT32 events = 0;
-    uint64_t submittedFrames = 0;
-    uint64_t testDurationMs = 0;
-    double expectedPeriodMs = 0.0;
-    double averageEventMs = 0.0;
-    double maximumEventMs = 0.0;
-    std::wstring summary;
-};
-
 enum class ExclusiveEndpointState {
     Unknown,
     Testing,
@@ -637,34 +465,13 @@ static std::atomic<int> g_activeVideoColorMatrixSource{
     static_cast<int>(llcv::video_color::Source::Default)};
 static std::atomic<int> g_activeVideoColorRangeSource{
     static_cast<int>(llcv::video_color::Source::Default)};
-static std::atomic<uint64_t> g_defaultAudioEndpointGeneration{0};
 static llcv::diagnostics::Logger g_logger;
 static std::mutex g_activeAudioOutputMutex;
-
-enum class AudioErrorKind {
-    Underrun,
-    Overrun,
-};
-
-enum class AudioErrorCause {
-    InputLate,
-    PcmDepletion,
-    Resampler,
-    Overrun,
-};
-
-struct AudioErrorEvent {
-    uint64_t timestampMs = 0;
-    uint32_t frames = 0;
-    AudioErrorKind kind = AudioErrorKind::Underrun;
-    AudioErrorCause cause = AudioErrorCause::PcmDepletion;
-};
 
 // Error events are rare. A small bounded history is enough to distinguish a
 // burst from occasional errors without adding work to the normal audio loop.
 constexpr size_t kAudioErrorHistoryCapacity = 128;
-static std::mutex g_audioErrorHistoryMutex;
-static std::deque<AudioErrorEvent> g_audioErrorHistory;
+static AudioErrorHistory g_audioErrorHistory{kAudioErrorHistoryCapacity};
 
 static bool AudioTrackingActive();
 
@@ -672,12 +479,7 @@ static void RecordAudioErrorEvent(uint64_t timestampMs, uint32_t frames,
                                   AudioErrorKind kind,
                                   AudioErrorCause cause) {
     if (!timestampMs || !AudioTrackingActive()) return;
-    std::lock_guard<std::mutex> lock(g_audioErrorHistoryMutex);
-    if (g_audioErrorHistory.size() >= kAudioErrorHistoryCapacity) {
-        g_audioErrorHistory.pop_front();
-    }
-    g_audioErrorHistory.push_back(
-        AudioErrorEvent{timestampMs, frames, kind, cause});
+    g_audioErrorHistory.Record({timestampMs, frames, kind, cause});
 }
 
 // -----------------------------------------------------------------------------
@@ -700,69 +502,15 @@ static int TeeFwprintf(FILE* stream, const wchar_t* format, ...) {
 #define fwprintf TeeFwprintf
 
 static const wchar_t* PixelFormatName(VideoPixelFormat format) {
-    switch (format) {
-    case VideoPixelFormat::Mjpeg: return L"MJPEG";
-    case VideoPixelFormat::Yuy2: return L"YUY2";
-    case VideoPixelFormat::Nv12: return L"NV12";
-    case VideoPixelFormat::P010: return L"P010";
-    default: return L"Auto";
-    }
-}
-
-static const GUID& PixelFormatSubtype(VideoPixelFormat format) {
-    switch (format) {
-    case VideoPixelFormat::Mjpeg: return MEDIASUBTYPE_MJPG;
-    case VideoPixelFormat::Yuy2: return MEDIASUBTYPE_YUY2;
-    case VideoPixelFormat::P010: return MFVideoFormat_P010;
-    default: return MEDIASUBTYPE_NV12;
-    }
+    return llcv::video::PixelFormatName(format);
 }
 
 static bool IsCompressedVideoFormat(VideoPixelFormat format) {
-    return format == VideoPixelFormat::Mjpeg;
-}
-
-static const wchar_t* MjpegColorOverrideSettingName(
-    llcv::video_color::Override mode) {
-    switch (mode) {
-    case llcv::video_color::Override::Bt709Full: return L"Bt709Full";
-    case llcv::video_color::Override::Bt709Limited: return L"Bt709Limited";
-    case llcv::video_color::Override::Bt601Full: return L"Bt601Full";
-    case llcv::video_color::Override::Bt601Limited: return L"Bt601Limited";
-    default: return L"Auto";
-    }
-}
-
-static llcv::video_color::Override ParseMjpegColorOverride(
-    const wchar_t* value) {
-    if (value && _wcsicmp(value, L"Bt709Full") == 0) {
-        return llcv::video_color::Override::Bt709Full;
-    }
-    if (value && _wcsicmp(value, L"Bt709Limited") == 0) {
-        return llcv::video_color::Override::Bt709Limited;
-    }
-    if (value && _wcsicmp(value, L"Bt601Full") == 0) {
-        return llcv::video_color::Override::Bt601Full;
-    }
-    if (value && _wcsicmp(value, L"Bt601Limited") == 0) {
-        return llcv::video_color::Override::Bt601Limited;
-    }
-    return llcv::video_color::Override::Auto;
+    return llcv::video::IsCompressedVideoFormat(format);
 }
 
 static bool IsAutoSelectableVideoFormat(VideoPixelFormat format) {
-    return format == VideoPixelFormat::Nv12 ||
-           format == VideoPixelFormat::Yuy2;
-}
-
-static VideoPixelFormat VideoPixelFormatFromSubtype(const GUID& subtype) {
-    if (subtype == MEDIASUBTYPE_NV12) return VideoPixelFormat::Nv12;
-    if (subtype == MEDIASUBTYPE_YUY2) return VideoPixelFormat::Yuy2;
-    if (subtype == MEDIASUBTYPE_MJPG || subtype == MFVideoFormat_MJPG) {
-        return VideoPixelFormat::Mjpeg;
-    }
-    if (subtype == MFVideoFormat_P010) return VideoPixelFormat::P010;
-    return VideoPixelFormat::Auto;
+    return llcv::video::IsAutoSelectableVideoFormat(format);
 }
 
 static DXGI_FORMAT PixelFormatDxgi(VideoPixelFormat format) {
@@ -878,363 +626,15 @@ static void LogDeviceChangeEvent(WPARAM event) {
         DeviceChangeEventName(event));
 }
 
-static WAVEFORMATEX PcmOutputFormat() {
-    WAVEFORMATEX wf{};
-    wf.wFormatTag = WAVE_FORMAT_PCM;
-    wf.nChannels = kChannels;
-    wf.nSamplesPerSec = kSampleRate;
-    wf.wBitsPerSample = kBitsPerSample;
-    wf.nBlockAlign = wf.nChannels * wf.wBitsPerSample / 8;
-    wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
-    return wf;
-}
+using llcv::audio_device::ClosestSupportedSharedPeriod;
 
-static UINT32 ClosestSupportedSharedPeriod(
-    UINT32 requestedFrames, const AudioClient3Support& support) {
-    if (!support.supported || support.fundamentalFrames == 0) return 0;
+static void LogModuleMessage(const wchar_t* message);
 
-    const UINT32 fundamental = support.fundamentalFrames;
-    const UINT32 firstMultiple =
-        (support.minimumFrames + fundamental - 1) / fundamental;
-    const UINT32 lastMultiple = support.maximumFrames / fundamental;
-    if (firstMultiple > lastMultiple) return 0;
-
-    UINT32 requestedMultiple =
-        (requestedFrames + fundamental / 2) / fundamental;
-    requestedMultiple = (std::max)(firstMultiple, requestedMultiple);
-    requestedMultiple = (std::min)(lastMultiple, requestedMultiple);
-    return requestedMultiple * fundamental;
-}
-
-static AudioClient3Support QueryAudioClient3Support(IMMDevice* device) {
-    AudioClient3Support support{};
-    const auto begin = std::chrono::steady_clock::now();
-
-    IAudioClient* baseClient = nullptr;
-    IAudioClient3* client3 = nullptr;
-    HRESULT hr = device->Activate(__uuidof(IAudioClient), CLSCTX_INPROC_SERVER,
-                                  nullptr,
-                                  reinterpret_cast<void**>(&baseClient));
-    if (SUCCEEDED(hr)) {
-        hr = baseClient->QueryInterface(IID_PPV_ARGS(&client3));
-    }
-    if (SUCCEEDED(hr)) {
-        AudioClientProperties properties{};
-        properties.cbSize = sizeof(properties);
-        properties.eCategory = AudioCategory_Media;
-        const HRESULT propertiesHr = client3->SetClientProperties(&properties);
-        if (FAILED(propertiesHr)) hr = propertiesHr;
-    }
-    if (SUCCEEDED(hr)) {
-        const WAVEFORMATEX wf = PcmOutputFormat();
-        hr = client3->GetSharedModeEnginePeriod(
-            &wf, &support.defaultFrames, &support.fundamentalFrames,
-            &support.minimumFrames, &support.maximumFrames);
-    }
-
-    support.result = hr;
-    support.supported = SUCCEEDED(hr) && support.defaultFrames != 0 &&
-                        support.fundamentalFrames != 0 &&
-                        support.minimumFrames != 0 &&
-                        support.maximumFrames >= support.minimumFrames;
-    const auto end = std::chrono::steady_clock::now();
-    support.probeMilliseconds =
-        std::chrono::duration<double, std::milli>(end - begin).count();
-
-    SafeRelease(client3);
-    SafeRelease(baseClient);
-    return support;
-}
-
-static HRESULT GetConfiguredAudioEndpoint(IMMDeviceEnumerator* enumerator,
-                                          const std::wstring& endpointId,
-                                          IMMDevice** device) {
-    if (!enumerator || !device) return E_POINTER;
-    *device = nullptr;
-    return endpointId.empty()
-               ? enumerator->GetDefaultAudioEndpoint(
-                     eRender, eConsole, device)
-               : enumerator->GetDevice(endpointId.c_str(), device);
-}
-
-static AudioClient3Support ProbeAudioClient3Support(
-    const std::wstring& endpointId) {
-    AudioClient3Support support{};
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const bool uninitialize = SUCCEEDED(hr);
-    if (hr == RPC_E_CHANGED_MODE) hr = S_OK;
-    if (FAILED(hr)) {
-        support.result = hr;
-        return support;
-    }
-
-    IMMDeviceEnumerator* enumerator = nullptr;
-    IMMDevice* device = nullptr;
-    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
-                          CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&enumerator));
-    if (SUCCEEDED(hr)) {
-        hr = GetConfiguredAudioEndpoint(enumerator, endpointId, &device);
-    }
-    if (SUCCEEDED(hr)) {
-        support = QueryAudioClient3Support(device);
-    } else {
-        support.result = hr;
-    }
-
-    SafeRelease(device);
-    SafeRelease(enumerator);
-    if (uninitialize) CoUninitialize();
-    return support;
-}
-
-static ExclusiveCompatibilityProbe ProbeExclusiveCompatibility(
-    const std::wstring& endpointId, int requestedMs,
-    const std::atomic<bool>* cancel) {
-    ExclusiveCompatibilityProbe probe{};
-    probe.requestedFrames = static_cast<UINT32>(
-        (std::max)(1, requestedMs) * kSampleRate / 1000);
-
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const bool uninitialize = SUCCEEDED(hr);
-    if (hr == RPC_E_CHANGED_MODE) hr = S_OK;
-    if (FAILED(hr)) {
-        probe.result = hr;
-        probe.summary = L"COM 초기화 실패";
-        return probe;
-    }
-
-    IMMDeviceEnumerator* enumerator = nullptr;
-    IMMDevice* device = nullptr;
-    IAudioClient* client = nullptr;
-    IAudioRenderClient* render = nullptr;
-    HANDLE eventHandle = nullptr;
-    WAVEFORMATEX* closest = nullptr;
-    bool started = false;
-    uint64_t runBeganMs = 0;
-    DWORD mmcssTaskIndex = 0;
-    HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio",
-                                                  &mmcssTaskIndex);
-    if (mmcss) {
-        AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_CRITICAL);
-    }
-
-    do {
-        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
-                              CLSCTX_INPROC_SERVER,
-                              IID_PPV_ARGS(&enumerator));
-        if (SUCCEEDED(hr)) {
-            hr = GetConfiguredAudioEndpoint(enumerator, endpointId, &device);
-        }
-        if (SUCCEEDED(hr)) {
-            hr = device->Activate(__uuidof(IAudioClient),
-                                  CLSCTX_INPROC_SERVER, nullptr,
-                                  reinterpret_cast<void**>(&client));
-        }
-        if (FAILED(hr)) break;
-
-        const WAVEFORMATEX format = PcmOutputFormat();
-        hr = client->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &format,
-                                       &closest);
-        if (closest) {
-            CoTaskMemFree(closest);
-            closest = nullptr;
-        }
-        if (hr != S_OK) {
-            if (SUCCEEDED(hr)) hr = AUDCLNT_E_UNSUPPORTED_FORMAT;
-            break;
-        }
-
-        REFERENCE_TIME defaultPeriod = 0;
-        REFERENCE_TIME minimumPeriod = 0;
-        hr = client->GetDevicePeriod(&defaultPeriod, &minimumPeriod);
-        if (FAILED(hr)) break;
-
-        const REFERENCE_TIME requestedDuration =
-            static_cast<REFERENCE_TIME>((std::max)(1, requestedMs)) * 10'000;
-        hr = client->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE,
-                                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                                requestedDuration, requestedDuration,
-                                &format, nullptr);
-        if (FAILED(hr)) break;
-
-        hr = client->GetBufferSize(&probe.actualBufferFrames);
-        if (FAILED(hr)) break;
-        probe.expectedPeriodMs = 1000.0 * probe.actualBufferFrames / kSampleRate;
-
-        eventHandle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!eventHandle) {
-            hr = HRESULT_FROM_WIN32(GetLastError());
-            break;
-        }
-        hr = client->SetEventHandle(eventHandle);
-        if (FAILED(hr)) break;
-        hr = client->GetService(IID_PPV_ARGS(&render));
-        if (FAILED(hr)) break;
-
-        BYTE* bytes = nullptr;
-        hr = render->GetBuffer(probe.actualBufferFrames, &bytes);
-        if (SUCCEEDED(hr)) {
-            hr = render->ReleaseBuffer(probe.actualBufferFrames,
-                                       AUDCLNT_BUFFERFLAGS_SILENT);
-        }
-        if (FAILED(hr)) break;
-        hr = client->Start();
-        if (FAILED(hr)) break;
-        started = true;
-        runBeganMs = GetTickCount64();
-
-        constexpr uint64_t kProbeDurationMs = 5000;
-        uint64_t previousEventMs = 0;
-        double intervalTotalMs = 0.0;
-        UINT32 intervalCount = 0;
-        while (!cancel || !cancel->load(std::memory_order_acquire)) {
-            const uint64_t now = GetTickCount64();
-            if (now - runBeganMs >= kProbeDurationMs) break;
-            const DWORD wait = WaitForSingleObject(eventHandle, 250);
-            if (wait == WAIT_TIMEOUT) continue;
-            if (wait != WAIT_OBJECT_0) {
-                hr = HRESULT_FROM_WIN32(GetLastError());
-                break;
-            }
-
-            const uint64_t eventNow = GetTickCount64();
-            ++probe.events;
-            if (previousEventMs) {
-                const double interval = static_cast<double>(
-                    eventNow - previousEventMs);
-                intervalTotalMs += interval;
-                ++intervalCount;
-                probe.maximumEventMs = (std::max)(probe.maximumEventMs,
-                                                   interval);
-            }
-            previousEventMs = eventNow;
-
-            UINT32 padding = 0;
-            hr = client->GetCurrentPadding(&padding);
-            if (FAILED(hr)) break;
-            const UINT32 writable = probe.actualBufferFrames > padding
-                ? probe.actualBufferFrames - padding : 0;
-            if (writable) {
-                bytes = nullptr;
-                hr = render->GetBuffer(writable, &bytes);
-                if (SUCCEEDED(hr)) {
-                    hr = render->ReleaseBuffer(writable,
-                                               AUDCLNT_BUFFERFLAGS_SILENT);
-                    if (SUCCEEDED(hr)) probe.submittedFrames += writable;
-                }
-                if (FAILED(hr)) break;
-            }
-        }
-        if (runBeganMs) {
-            probe.testDurationMs = GetTickCount64() - runBeganMs;
-        }
-        if (cancel && cancel->load(std::memory_order_acquire)) {
-            hr = HRESULT_FROM_WIN32(ERROR_CANCELLED);
-            break;
-        }
-        if (SUCCEEDED(hr) && intervalCount) {
-            probe.averageEventMs = intervalTotalMs / intervalCount;
-        }
-    } while (false);
-
-    if (started) client->Stop();
-    if (closest) CoTaskMemFree(closest);
-    if (eventHandle) CloseHandle(eventHandle);
-    SafeRelease(render);
-    SafeRelease(client);
-    SafeRelease(device);
-    SafeRelease(enumerator);
-    if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
-    if (uninitialize) CoUninitialize();
-
-    probe.result = hr;
-    if (FAILED(hr)) {
-        wchar_t message[128]{};
-        swprintf_s(message, L"Exclusive 초기화/실행 실패 (0x%08X)",
-                   static_cast<unsigned>(hr));
-        probe.summary = message;
-        return probe;
-    }
-
-    const double requestedPeriodMs = 1000.0 * probe.requestedFrames /
-                                     kSampleRate;
-    const double expectedEvents = 5000.0 / requestedPeriodMs;
-    const double maximumAllowedInterval = requestedPeriodMs * 1.25 + 1.0;
-    const bool bufferMatches = probe.actualBufferFrames <=
-        probe.requestedFrames + 1;
-    const bool eventsAreTimely =
-        probe.events >= static_cast<UINT32>(std::floor(expectedEvents * 0.90)) &&
-        probe.maximumEventMs <= maximumAllowedInterval;
-    const double expectedSubmittedFrames =
-        kSampleRate * (std::max)(1.0, probe.testDurationMs / 1000.0);
-    const bool outputSupplyMatchesClock =
-        probe.submittedFrames >= static_cast<uint64_t>(
-            std::floor(expectedSubmittedFrames * 0.98));
-    probe.compatible = bufferMatches && eventsAreTimely &&
-                       outputSupplyMatchesClock;
-
-    wchar_t message[256]{};
-    if (probe.compatible) {
-        swprintf_s(message,
-                   L"통과 · 실제 %.2f ms · 이벤트 평균/최대 %.2f/%.2f ms",
-                   probe.expectedPeriodMs, probe.averageEventMs,
-                   probe.maximumEventMs);
-    } else if (!bufferMatches) {
-        swprintf_s(message,
-                   L"미통과 · 요청 %.2f ms, 실제 버퍼 %.2f ms",
-                   requestedPeriodMs, probe.expectedPeriodMs);
-    } else if (!outputSupplyMatchesClock) {
-        const double suppliedPercent = expectedSubmittedFrames > 0.0
-            ? 100.0 * probe.submittedFrames / expectedSubmittedFrames : 0.0;
-        swprintf_s(message,
-                   L"미통과 · 출력 공급 %.1f%% (목표 98%% 이상)",
-                   suppliedPercent);
-    } else {
-        swprintf_s(message,
-                   L"미통과 · 이벤트 %u회, 평균/최대 %.2f/%.2f ms (목표 %.2f ms)",
-                   probe.events, probe.averageEventMs, probe.maximumEventMs,
-                   requestedPeriodMs);
-    }
-    probe.summary = message;
-    return probe;
-}
-
-// Finds the lowest selectable Exclusive buffer that survives the same real
-// event-path test. This is deliberately called a test recommendation, not a
-// guarantee: drivers and system scheduling can still change after the probe.
 static ExclusiveCompatibilityProbe ProbeExclusiveBufferRecommendation(
     const std::wstring& endpointId, const std::atomic<bool>* cancel) {
-    ExclusiveCompatibilityProbe last{};
-    for (const int candidateMs : kExclusiveBufferOptionsMs) {
-        if (cancel && cancel->load(std::memory_order_acquire)) break;
-        auto result = ProbeExclusiveCompatibility(endpointId, candidateMs,
-                                                  cancel);
-        fwprintf(stderr,
-                 L"[audio][exclusive-probe] candidate=%d ms: %s | "
-                 L"events=%u avg/max=%.2f/%.2f ms\n",
-                 candidateMs, result.summary.c_str(), result.events,
-                 result.averageEventMs, result.maximumEventMs);
-        if (result.compatible) {
-            wchar_t summary[256]{};
-            swprintf_s(summary,
-                       L"테스트 권장 %d ms · 실제 %.2f ms · 이벤트 평균/최대 %.2f/%.2f ms",
-                       candidateMs, result.expectedPeriodMs,
-                       result.averageEventMs, result.maximumEventMs);
-            result.summary = summary;
-            return result;
-        }
-        last = std::move(result);
-    }
-    if (cancel && cancel->load(std::memory_order_acquire)) {
-        last.result = HRESULT_FROM_WIN32(ERROR_CANCELLED);
-        last.summary = L"독점 버퍼 검사 취소됨";
-        return last;
-    }
-    if (last.summary.empty()) last.summary = L"검사할 Exclusive 버퍼가 없음";
-    else last.summary = L"Exclusive 저지연 미지원 (5–40 ms 모두 미통과)";
-    return last;
+    return llcv::audio_device::ProbeExclusiveBufferRecommendation(
+        endpointId, cancel, LogModuleMessage);
 }
-
 static std::wstring AppDirectory() {
     wchar_t path[MAX_PATH]{};
     const DWORD n = GetModuleFileNameW(nullptr, path, ARRAYSIZE(path));
@@ -1296,162 +696,14 @@ static void CloseSavedLog() {
     g_logger.Close();
 }
 
-static std::wstring MonikerDisplayName(IMoniker* moniker) {
-    if (!moniker) return {};
-    IBindCtx* bindContext = nullptr;
-    if (FAILED(CreateBindCtx(0, &bindContext))) return {};
-    LPOLESTR value = nullptr;
-    std::wstring result;
-    if (SUCCEEDED(moniker->GetDisplayName(bindContext, nullptr, &value)) &&
-        value) {
-        result = value;
-    }
-    CoTaskMemFree(value);
-    bindContext->Release();
-    return result;
-}
-
-static std::wstring MonikerFriendlyName(IMoniker* moniker) {
-    if (!moniker) return {};
-    IPropertyBag* bag = nullptr;
-    VARIANT value;
-    VariantInit(&value);
-    std::wstring result;
-    if (SUCCEEDED(moniker->BindToStorage(
-            nullptr, nullptr, IID_PPV_ARGS(&bag))) &&
-        SUCCEEDED(bag->Read(L"FriendlyName", &value, nullptr)) &&
-        value.vt == VT_BSTR && value.bstrVal) {
-        result = value.bstrVal;
-    }
-    VariantClear(&value);
-    SafeRelease(bag);
-    return result;
-}
-
-static std::vector<CaptureDeviceInfo> EnumerateInputDevices(
-    const CLSID& category) {
-    std::vector<CaptureDeviceInfo> devices;
-    HRESULT initHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    const bool uninitialize = SUCCEEDED(initHr);
-    if (initHr == RPC_E_CHANGED_MODE) initHr = S_OK;
-    if (FAILED(initHr)) return devices;
-    ICreateDevEnum* deviceEnumerator = nullptr;
-    IEnumMoniker* monikers = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr,
-                                  CLSCTX_INPROC_SERVER,
-                                  IID_PPV_ARGS(&deviceEnumerator));
-    if (SUCCEEDED(hr)) {
-        hr = deviceEnumerator->CreateClassEnumerator(category, &monikers, 0);
-    }
-    IMoniker* moniker = nullptr;
-    while (monikers && monikers->Next(1, &moniker, nullptr) == S_OK) {
-        CaptureDeviceInfo info{};
-        info.id = MonikerDisplayName(moniker);
-        info.name = MonikerFriendlyName(moniker);
-        if (!info.id.empty() && !info.name.empty()) {
-            devices.push_back(std::move(info));
-        }
-        SafeRelease(moniker);
-    }
-    SafeRelease(monikers);
-    SafeRelease(deviceEnumerator);
-    if (uninitialize) CoUninitialize();
-    return devices;
-}
-
 static std::vector<CaptureDeviceInfo> EnumerateCaptureDevices() {
-    return EnumerateInputDevices(CLSID_VideoInputDeviceCategory);
+    return llcv::capture::EnumerateVideoInputDevices();
 }
 
 static std::vector<CaptureDeviceInfo> EnumerateCaptureAudioDevices() {
-    return EnumerateInputDevices(CLSID_AudioInputDeviceCategory);
+    return llcv::capture::EnumerateAudioInputDevices();
 }
-
-static std::wstring AudioEndpointFriendlyName(IMMDevice* device) {
-    IPropertyStore* store = nullptr;
-    PROPVARIANT value;
-    PropVariantInit(&value);
-    std::wstring result;
-    if (device && SUCCEEDED(device->OpenPropertyStore(STGM_READ, &store)) &&
-        SUCCEEDED(store->GetValue(PKEY_Device_FriendlyName, &value)) &&
-        value.vt == VT_LPWSTR && value.pwszVal) {
-        result = value.pwszVal;
-    }
-    PropVariantClear(&value);
-    SafeRelease(store);
-    return result;
-}
-
-static std::vector<AudioEndpointInfo> EnumerateAudioEndpoints() {
-    std::vector<AudioEndpointInfo> endpoints;
-    HRESULT initHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    const bool uninitialize = SUCCEEDED(initHr);
-    if (initHr == RPC_E_CHANGED_MODE) initHr = S_OK;
-    if (FAILED(initHr)) return endpoints;
-    IMMDeviceEnumerator* enumerator = nullptr;
-    IMMDeviceCollection* collection = nullptr;
-    IMMDevice* defaultDevice = nullptr;
-    LPWSTR defaultIdRaw = nullptr;
-    std::wstring defaultId;
-    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
-                                  CLSCTX_INPROC_SERVER,
-                                  IID_PPV_ARGS(&enumerator));
-    if (SUCCEEDED(hr)) {
-        if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(
-                eRender, eConsole, &defaultDevice)) &&
-            SUCCEEDED(defaultDevice->GetId(&defaultIdRaw)) && defaultIdRaw) {
-            defaultId = defaultIdRaw;
-        }
-        hr = enumerator->EnumAudioEndpoints(
-            eRender, DEVICE_STATE_ACTIVE, &collection);
-    }
-    UINT count = 0;
-    if (collection) collection->GetCount(&count);
-    for (UINT i = 0; i < count; ++i) {
-        IMMDevice* device = nullptr;
-        LPWSTR idRaw = nullptr;
-        if (SUCCEEDED(collection->Item(i, &device)) &&
-            SUCCEEDED(device->GetId(&idRaw)) && idRaw) {
-            AudioEndpointInfo info{};
-            info.id = idRaw;
-            info.name = AudioEndpointFriendlyName(device);
-            info.isDefault = info.id == defaultId;
-            if (!info.name.empty()) endpoints.push_back(std::move(info));
-        }
-        CoTaskMemFree(idRaw);
-        SafeRelease(device);
-    }
-    CoTaskMemFree(defaultIdRaw);
-    SafeRelease(defaultDevice);
-    SafeRelease(collection);
-    SafeRelease(enumerator);
-    if (uninitialize) CoUninitialize();
-    return endpoints;
-}
-
-static std::wstring ResolveAudioEndpointId(const std::wstring& configuredId) {
-    const auto endpoints = EnumerateAudioEndpoints();
-    if (!configuredId.empty()) {
-        for (const auto& endpoint : endpoints) {
-            if (endpoint.id == configuredId) return endpoint.id;
-        }
-        // A disconnected explicitly-selected device must not inherit an old
-        // Exclusive verification result. The immediate-start path will use
-        // Shared until the user selects and rechecks an active endpoint.
-        return {};
-    }
-    for (const auto& endpoint : endpoints) {
-        if (endpoint.isDefault) return endpoint.id;
-    }
-    return {};
-}
-
-static bool IsExclusiveLowLatencyBuffer(int bufferMs) {
-    return std::find(std::begin(kExclusiveBufferOptionsMs),
-                     std::end(kExclusiveBufferOptionsMs), bufferMs) !=
-           std::end(kExclusiveBufferOptionsMs);
-}
-
+using llcv::audio_device::IsExclusiveLowLatencyBuffer;
 static const ExclusiveEndpointCacheEntry* FindExclusiveEndpointCache(
     const std::wstring& endpointId) {
     const auto it = std::find_if(
@@ -1480,7 +732,7 @@ static bool HasVerifiedExclusiveEndpoint(const std::wstring& endpointId,
 
 static std::wstring ConfiguredAudioEndpointName(
     const std::wstring& endpointId) {
-    const auto endpoints = EnumerateAudioEndpoints();
+    const auto endpoints = llcv::audio_device::EnumerateRenderEndpoints();
     if (!endpointId.empty()) {
         for (const auto& endpoint : endpoints) {
             if (endpoint.id == endpointId) return endpoint.name;
@@ -1494,7 +746,7 @@ static std::wstring ConfiguredAudioEndpointName(
 }
 
 static int RunExclusiveCompatibilityProbeCli(bool allEndpoints) {
-    const auto endpoints = EnumerateAudioEndpoints();
+    const auto endpoints = llcv::audio_device::EnumerateRenderEndpoints();
     std::vector<AudioEndpointInfo> targets;
     if (allEndpoints) {
         targets = endpoints;
@@ -1552,7 +804,8 @@ static int RequestedVideoFrameRate() {
 }
 
 static constexpr int kRelativeScaleUnit = 1'000'000;
-static constexpr int kRelativeScaleSettingsVersion = 4;
+static constexpr int kRelativeScaleSettingsVersion =
+    llcv::settings::kRelativeWindowScaleVersion;
 
 static int LegacyRelativeScaleForMonitor(HMONITOR monitor) {
     MONITORINFO info{sizeof(info)};
@@ -1612,213 +865,13 @@ static HMONITOR SavedViewerMonitor();
 
 static void LoadSettings() {
     MigrateLegacySettings();
-    const std::wstring path = SettingsPath();
-    wchar_t language[16]{};
-    wchar_t audio[32]{};
-    wchar_t bufferMs[16]{};
-    wchar_t sharedPeriodFrames[16]{};
-    wchar_t driftCorrection[32]{};
-    wchar_t pcmQueueTargetMs[16]{};
-    wchar_t volume[16]{};
-    wchar_t leftVolume[16]{};
-    wchar_t rightVolume[16]{};
-    wchar_t allowVolumeBoost[8]{};
-    wchar_t volumeHudPosition[32]{};
-    wchar_t muteWhenBackground[8]{};
-    wchar_t audioOutputDeviceId[1024]{};
-    wchar_t exclusiveVerifiedEndpointId[1024]{};
-    wchar_t exclusiveVerifiedBufferMs[16]{};
-    wchar_t asioDriverName[128]{};
-    wchar_t resolution[32]{};
-    wchar_t captureDeviceId[1024]{};
-    wchar_t captureAudioDeviceId[1024]{};
-    wchar_t pixelFormat[32]{};
-    wchar_t frameRate[16]{};
-    wchar_t presentation[32]{};
-    wchar_t pixelPerfect[8]{};
-    wchar_t relativeWindowSize[8]{};
-    wchar_t relativeWindowScale[16]{};
-    wchar_t relativeWindowScaleVersion[16]{};
-    wchar_t borderlessWindow[8]{};
-    wchar_t fullscreenCursorMode[32]{};
-    wchar_t windowSnap[8]{};
-    wchar_t windowX[32]{};
-    wchar_t windowY[32]{};
-    wchar_t monitorDevice[64]{};
-    wchar_t saveLog[8]{};
-    wchar_t showDiagnosticConsole[8]{};
-    wchar_t skipStartupSettings[8]{};
-    wchar_t checkForUpdates[8]{};
-    wchar_t audioOnly[8]{};
-    wchar_t forceHdr10[8]{};
-    wchar_t mjpegColorOverride[32]{};
+    llcv::settings::LoadResult loaded =
+        llcv::settings::LoadFromIni(SettingsPath());
+    g_settings = std::move(loaded.settings);
 
-    GetPrivateProfileStringW(L"General", L"Language", L"Auto", language,
-                             ARRAYSIZE(language), path.c_str());
-    GetPrivateProfileStringW(L"General", L"SkipStartupSettings", L"0",
-                             skipStartupSettings,
-                             ARRAYSIZE(skipStartupSettings), path.c_str());
-    GetPrivateProfileStringW(L"General", L"CheckForUpdates", L"1",
-                             checkForUpdates,
-                             ARRAYSIZE(checkForUpdates), path.c_str());
-    GetPrivateProfileStringW(L"General", L"AudioOnly", L"0", audioOnly,
-                             ARRAYSIZE(audioOnly), path.c_str());
-    GetPrivateProfileStringW(L"Video", L"ForceHdr10", L"0", forceHdr10,
-                             ARRAYSIZE(forceHdr10), path.c_str());
-    GetPrivateProfileStringW(L"Video", L"MjpegColor", L"Auto",
-                             mjpegColorOverride,
-                             ARRAYSIZE(mjpegColorOverride), path.c_str());
-
-    GetPrivateProfileStringW(L"Audio", L"Mode", L"Shared", audio,
-                             ARRAYSIZE(audio), path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"BufferMs", L"20", bufferMs,
-                             ARRAYSIZE(bufferMs), path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"SharedPeriodFrames", L"0",
-                             sharedPeriodFrames, ARRAYSIZE(sharedPeriodFrames),
-                             path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"DriftCorrection", L"Auto",
-                             driftCorrection, ARRAYSIZE(driftCorrection),
-                             path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"PcmQueueTargetMs", L"20",
-                             pcmQueueTargetMs, ARRAYSIZE(pcmQueueTargetMs),
-                             path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"Volume", L"100", volume,
-                             ARRAYSIZE(volume), path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"LeftVolume", L"100", leftVolume,
-                             ARRAYSIZE(leftVolume), path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"RightVolume", L"100", rightVolume,
-                             ARRAYSIZE(rightVolume), path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"AllowVolumeBoost", L"0",
-                             allowVolumeBoost, ARRAYSIZE(allowVolumeBoost),
-                             path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"VolumeHudPosition", L"TopLeft",
-                             volumeHudPosition,
-                             ARRAYSIZE(volumeHudPosition), path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"MuteWhenBackground", L"0",
-                             muteWhenBackground,
-                             ARRAYSIZE(muteWhenBackground), path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"OutputDeviceId", L"",
-                              audioOutputDeviceId,
-                              ARRAYSIZE(audioOutputDeviceId), path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"ExclusiveVerifiedEndpointId", L"",
-                             exclusiveVerifiedEndpointId,
-                             ARRAYSIZE(exclusiveVerifiedEndpointId), path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"ExclusiveVerifiedBufferMs", L"0",
-                             exclusiveVerifiedBufferMs,
-                             ARRAYSIZE(exclusiveVerifiedBufferMs), path.c_str());
-    GetPrivateProfileStringW(L"Audio", L"AsioDriver", L"", asioDriverName,
-                              ARRAYSIZE(asioDriverName), path.c_str());
-    GetPrivateProfileStringW(L"Video", L"Resolution", L"1920x1080", resolution,
-                             ARRAYSIZE(resolution), path.c_str());
-    GetPrivateProfileStringW(L"Video", L"CaptureDeviceId", L"",
-                             captureDeviceId, ARRAYSIZE(captureDeviceId),
-                             path.c_str());
-    GetPrivateProfileStringW(L"Video", L"CaptureAudioDeviceId", L"",
-                             captureAudioDeviceId,
-                             ARRAYSIZE(captureAudioDeviceId), path.c_str());
-    GetPrivateProfileStringW(L"Video", L"PixelFormat", L"Auto",
-                             pixelFormat, ARRAYSIZE(pixelFormat), path.c_str());
-    GetPrivateProfileStringW(L"Video", L"FrameRate", L"0", frameRate,
-                             ARRAYSIZE(frameRate), path.c_str());
-    GetPrivateProfileStringW(L"Video", L"Presentation", L"AllowTearing",
-                             presentation, ARRAYSIZE(presentation), path.c_str());
-    wchar_t scaling[32]{};
-    GetPrivateProfileStringW(L"Video", L"Scaling", L"Smooth",
-                             scaling, ARRAYSIZE(scaling), path.c_str());
-    GetPrivateProfileStringW(L"Video", L"PixelPerfect", L"1", pixelPerfect,
-                             ARRAYSIZE(pixelPerfect), path.c_str());
-    GetPrivateProfileStringW(L"Video", L"RelativeWindowSize", L"0",
-                             relativeWindowSize,
-                             ARRAYSIZE(relativeWindowSize), path.c_str());
-    GetPrivateProfileStringW(L"Video", L"RelativeWindowScalePpm", L"0",
-                             relativeWindowScale,
-                             ARRAYSIZE(relativeWindowScale), path.c_str());
-    GetPrivateProfileStringW(L"Video", L"RelativeWindowScaleVersion", L"0",
-                             relativeWindowScaleVersion,
-                             ARRAYSIZE(relativeWindowScaleVersion),
-                             path.c_str());
-    GetPrivateProfileStringW(L"Video", L"BorderlessWindow", L"0", borderlessWindow,
-                             ARRAYSIZE(borderlessWindow), path.c_str());
-    GetPrivateProfileStringW(L"Video", L"FullscreenCursor", L"AutoHide",
-                             fullscreenCursorMode,
-                             ARRAYSIZE(fullscreenCursorMode), path.c_str());
-    GetPrivateProfileStringW(L"Window", L"Snap", L"1", windowSnap,
-                             ARRAYSIZE(windowSnap), path.c_str());
-    GetPrivateProfileStringW(L"Window", L"X", L"", windowX,
-                             ARRAYSIZE(windowX), path.c_str());
-    GetPrivateProfileStringW(L"Window", L"Y", L"", windowY,
-                             ARRAYSIZE(windowY), path.c_str());
-    GetPrivateProfileStringW(L"Window", L"Monitor", L"", monitorDevice,
-                             ARRAYSIZE(monitorDevice), path.c_str());
-    GetPrivateProfileStringW(L"Diagnostics", L"SaveLog", L"0", saveLog,
-                             ARRAYSIZE(saveLog), path.c_str());
-    GetPrivateProfileStringW(L"Diagnostics", L"ShowConsole", L"0",
-                             showDiagnosticConsole,
-                             ARRAYSIZE(showDiagnosticConsole), path.c_str());
-
-    if (_wcsicmp(language, L"English") == 0) {
-        g_settings.uiLanguage = UiLanguage::English;
-    } else if (_wcsicmp(language, L"Korean") == 0) {
-        g_settings.uiLanguage = UiLanguage::Korean;
-    } else {
-        g_settings.uiLanguage = UiLanguage::Auto;
-    }
-    g_settings.checkForUpdates =
-        wcstol(checkForUpdates, nullptr, 10) != 0;
-
-    if (_wcsicmp(audio, L"Exclusive") == 0) {
-        g_settings.audioMode = AudioMode::WasapiExclusive;
-    } else if (_wcsicmp(audio, L"ASIO") == 0) {
-        g_settings.audioMode = AudioMode::Asio;
-    } else {
-        g_settings.audioMode = AudioMode::WasapiShared;
-    }
-    g_settings.asioDriverName = asioDriverName;
-    g_settings.exclusiveVerifiedEndpointId = exclusiveVerifiedEndpointId;
-    g_settings.exclusiveVerifiedBufferMs = static_cast<int>(
-        wcstol(exclusiveVerifiedBufferMs, nullptr, 10));
-    g_settings.exclusiveEndpointCache.clear();
-    const UINT cacheCount = (std::min)(
-        GetPrivateProfileIntW(L"ExclusiveEndpointCache", L"Count", 0,
-                              path.c_str()),
-        static_cast<UINT>(kMaximumExclusiveEndpointCacheEntries));
-    for (UINT i = 0; i < cacheCount; ++i) {
-        wchar_t idKey[32]{};
-        wchar_t stateKey[32]{};
-        wchar_t bufferKey[32]{};
-        wchar_t endpointId[1024]{};
-        wchar_t cacheState[16]{};
-        wchar_t cacheBuffer[16]{};
-        swprintf_s(idKey, L"Endpoint%uId", i);
-        swprintf_s(stateKey, L"Endpoint%uState", i);
-        swprintf_s(bufferKey, L"Endpoint%uBufferMs", i);
-        GetPrivateProfileStringW(L"ExclusiveEndpointCache", idKey, L"",
-                                 endpointId, ARRAYSIZE(endpointId),
-                                 path.c_str());
-        GetPrivateProfileStringW(L"ExclusiveEndpointCache", stateKey, L"",
-                                 cacheState, ARRAYSIZE(cacheState),
-                                 path.c_str());
-        GetPrivateProfileStringW(L"ExclusiveEndpointCache", bufferKey, L"0",
-                                 cacheBuffer, ARRAYSIZE(cacheBuffer),
-                                 path.c_str());
-        const bool supported = _wcsicmp(cacheState, L"Supported") == 0;
-        const bool unsupported = _wcsicmp(cacheState, L"Unsupported") == 0;
-        const int cachedBufferMs = static_cast<int>(
-            wcstol(cacheBuffer, nullptr, 10));
-        if (endpointId[0] && (unsupported ||
-            (supported && IsExclusiveLowLatencyBuffer(cachedBufferMs)))) {
-            g_settings.exclusiveEndpointCache.push_back({
-                endpointId, supported, supported ? cachedBufferMs : 0});
-        }
-    }
-    // Migrate a result written by the original one-endpoint prototype.
-    if (g_settings.exclusiveEndpointCache.empty() &&
-        !g_settings.exclusiveVerifiedEndpointId.empty() &&
-        IsExclusiveLowLatencyBuffer(g_settings.exclusiveVerifiedBufferMs)) {
-        g_settings.exclusiveEndpointCache.push_back({
-            g_settings.exclusiveVerifiedEndpointId, true,
-            g_settings.exclusiveVerifiedBufferMs});
-    }
+    // ASIO driver presence is machine state, not INI parsing. Keep this
+    // validation at the application boundary and fall back safely when a
+    // saved driver has been removed.
     if (g_settings.audioMode == AudioMode::Asio) {
         const auto drivers = llcv::asio::EnumerateDrivers();
         const bool found = std::any_of(
@@ -1831,142 +884,26 @@ static void LoadSettings() {
             g_settings.asioDriverName.clear();
         }
     }
-    const int requestedBufferMs = static_cast<int>(wcstol(bufferMs, nullptr, 10));
-    g_settings.wasapiBufferMs = kRecommendedWasapiBufferMs;
-    for (const int option : kExclusiveBufferOptionsMs) {
-        if (requestedBufferMs == option) {
-            g_settings.wasapiBufferMs = option;
-            break;
-        }
-    }
-    g_settings.wasapiSharedPeriodFrames =
-        static_cast<UINT32>(wcstoul(sharedPeriodFrames, nullptr, 10));
-    if (_wcsicmp(driftCorrection, L"Resample") == 0) {
-        g_settings.driftCorrection = DriftCorrectionMode::Resample;
-    } else if (_wcsicmp(driftCorrection, L"Auto") == 0) {
-        g_settings.driftCorrection = DriftCorrectionMode::Auto;
-    } else {
-        g_settings.driftCorrection = DriftCorrectionMode::Off;
-    }
-    // New installs favor a stable 20 ms app queue. An explicit saved value
-    // below always wins, so existing users keep their chosen latency target.
-    g_settings.pcmQueueTargetMs = kRecommendedPcmQueueMs;
-    if (pcmQueueTargetMs[0]) {
-        const int requestedQueueMs = static_cast<int>(
-            wcstol(pcmQueueTargetMs, nullptr, 10));
-        for (const int option : kPcmQueueOptionsMs) {
-            if (requestedQueueMs == option) {
-                g_settings.pcmQueueTargetMs = option;
-                break;
-            }
-        }
-    }
-    g_settings.allowVolumeBoost =
-        wcstol(allowVolumeBoost, nullptr, 10) != 0;
-    const int loadedVolume = std::clamp(
-        static_cast<int>(wcstol(volume, nullptr, 10)), 0,
-        g_settings.allowVolumeBoost ? kMaximumVolumePercent : 100);
-    g_settings.volumePercent =
-        std::clamp(((loadedVolume + 2) / 5) * 5, 0,
-                   g_settings.allowVolumeBoost ? kMaximumVolumePercent : 100);
-    g_settings.leftVolumePercent = std::clamp(
-        ((static_cast<int>(wcstol(leftVolume, nullptr, 10)) + 2) / 5) * 5,
-        0, 100);
-    g_settings.rightVolumePercent = std::clamp(
-        ((static_cast<int>(wcstol(rightVolume, nullptr, 10)) + 2) / 5) * 5,
-        0, 100);
-    if (_wcsicmp(volumeHudPosition, L"TopRight") == 0) {
-        g_settings.volumeHudPosition = VolumeHudPosition::TopRight;
-    } else if (_wcsicmp(volumeHudPosition, L"BottomLeft") == 0) {
-        g_settings.volumeHudPosition = VolumeHudPosition::BottomLeft;
-    } else if (_wcsicmp(volumeHudPosition, L"BottomRight") == 0) {
-        g_settings.volumeHudPosition = VolumeHudPosition::BottomRight;
-    } else {
-        g_settings.volumeHudPosition = VolumeHudPosition::TopLeft;
-    }
-    g_settings.muteWhenBackground =
-        wcstol(muteWhenBackground, nullptr, 10) != 0;
-    g_volumePercent.store(g_settings.volumePercent,
-                          std::memory_order_release);
-    g_leftVolumePercent.store(g_settings.leftVolumePercent,
-                              std::memory_order_release);
-    g_rightVolumePercent.store(g_settings.rightVolumePercent,
-                               std::memory_order_release);
-    g_settings.presentationMode = (_wcsicmp(presentation, L"VSync") == 0)
-                                      ? PresentationMode::VSync
-                                      : PresentationMode::AllowTearing;
-    g_settings.scalingMode = (_wcsicmp(scaling, L"Sharp") == 0)
-        ? ScalingMode::Sharp : ScalingMode::Smooth;
-    g_settings.audioOutputDeviceId = audioOutputDeviceId;
-    g_settings.captureDeviceId = captureDeviceId;
-    g_settings.captureAudioDeviceId = captureAudioDeviceId;
-    if (_wcsicmp(pixelFormat, L"NV12") == 0) {
-        g_settings.pixelFormat = VideoPixelFormat::Nv12;
-    } else if (_wcsicmp(pixelFormat, L"YUY2") == 0) {
-        g_settings.pixelFormat = VideoPixelFormat::Yuy2;
-    } else if (_wcsicmp(pixelFormat, L"MJPEG") == 0) {
-        g_settings.pixelFormat = VideoPixelFormat::Mjpeg;
-    } else if (_wcsicmp(pixelFormat, L"P010") == 0) {
-        g_settings.pixelFormat = VideoPixelFormat::P010;
-    } else {
-        // Older beta settings may contain H.264 or MPEG-4. Those modes are
-        // no longer accepted by this low-latency viewer, so use Auto instead.
-        g_settings.pixelFormat = VideoPixelFormat::Auto;
-    }
-    const int savedFrameRate = static_cast<int>(
-        wcstol(frameRate, nullptr, 10));
-    g_settings.videoFrameRate = savedFrameRate > 0 ? savedFrameRate : 0;
-    g_settings.saveLog = wcstol(saveLog, nullptr, 10) != 0;
-    g_settings.showDiagnosticConsole =
-        wcstol(showDiagnosticConsole, nullptr, 10) != 0;
-    g_settings.skipStartupSettings =
-        wcstol(skipStartupSettings, nullptr, 10) != 0;
-    g_settings.audioOnly = wcstol(audioOnly, nullptr, 10) != 0;
-    g_settings.forceHdr10 = wcstol(forceHdr10, nullptr, 10) != 0;
-    g_settings.mjpegColorOverride =
-        ParseMjpegColorOverride(mjpegColorOverride);
 
-    if (_wcsicmp(resolution, L"1920x1080") == 0) {
-        g_settings.videoPreset = VideoPreset::R1920x1080;
-    } else if (_wcsicmp(resolution, L"3840x2160") == 0) {
-        g_settings.videoPreset = VideoPreset::R3840x2160;
-    } else {
-        g_settings.videoPreset = VideoPreset::R2560x1440;
-    }
-    g_settings.pixelPerfect = (wcstol(pixelPerfect, nullptr, 10) != 0);
-    g_settings.relativeWindowSize =
-        (wcstol(relativeWindowSize, nullptr, 10) != 0);
-    g_settings.relativeWindowScalePpm = std::clamp(
-        static_cast<int>(wcstol(relativeWindowScale, nullptr, 10)),
-        0, kRelativeScaleUnit);
-    g_settings.borderlessWindow = (wcstol(borderlessWindow, nullptr, 10) != 0);
-    g_settings.fullscreenCursorMode =
-        _wcsicmp(fullscreenCursorMode, L"AlwaysVisible") == 0
-            ? FullscreenCursorMode::AlwaysVisible
-            : FullscreenCursorMode::AutoHide;
-    g_settings.windowSnap = (wcstol(windowSnap, nullptr, 10) != 0);
-    if (windowX[0] && windowY[0]) {
-        g_settings.hasWindowPosition = true;
-        g_settings.windowX = static_cast<int>(wcstol(windowX, nullptr, 10));
-        g_settings.windowY = static_cast<int>(wcstol(windowY, nullptr, 10));
-        g_settings.monitorDevice = monitorDevice;
-    }
+    g_volumePercent.store(
+        g_settings.volumePercent, std::memory_order_release);
+    g_leftVolumePercent.store(
+        g_settings.leftVolumePercent, std::memory_order_release);
+    g_rightVolumePercent.store(
+        g_settings.rightVolumePercent, std::memory_order_release);
 
     // Older builds used the smaller normalized dimension on mixed-aspect
     // displays. Correct only values that exactly match that legacy formula;
-    // do not recompute every saved scale from the last monitor. Recomputing
-    // would destroy a legitimate 50%/66.67% ratio after the user moved the
-    // viewer to another monitor and closed it there.
-    const int relativeScaleVersion = static_cast<int>(
-        wcstol(relativeWindowScaleVersion, nullptr, 10));
-    if (relativeScaleVersion < kRelativeScaleSettingsVersion &&
+    // do not recompute every saved scale from the last monitor.
+    if (loaded.relativeWindowScaleVersion <
+            kRelativeScaleSettingsVersion &&
         g_settings.relativeWindowSize && g_settings.pixelPerfect &&
         g_settings.hasWindowPosition) {
         const HMONITOR savedViewerMonitor = SavedViewerMonitor();
-        const int legacyScale = LegacyRelativeScaleForMonitor(
-            savedViewerMonitor);
-        const int correctedScale = RelativeScaleForMonitor(
-            savedViewerMonitor);
+        const int legacyScale =
+            LegacyRelativeScaleForMonitor(savedViewerMonitor);
+        const int correctedScale =
+            RelativeScaleForMonitor(savedViewerMonitor);
         if (correctedScale > 0 &&
             (g_settings.relativeWindowScalePpm <= 0 ||
              (legacyScale != correctedScale &&
@@ -1978,1013 +915,128 @@ static void LoadSettings() {
 
 static void SaveSettings() {
     EnsureUserDataDirectory();
-    const std::wstring path = SettingsPath();
-    const wchar_t* language = L"Auto";
-    if (g_settings.uiLanguage == UiLanguage::Korean) language = L"Korean";
-    if (g_settings.uiLanguage == UiLanguage::English) language = L"English";
-    WritePrivateProfileStringW(L"General", L"Language", language,
-                               path.c_str());
-    WritePrivateProfileStringW(L"General", L"SkipStartupSettings",
-                               g_settings.skipStartupSettings ? L"1" : L"0",
-                               path.c_str());
-    WritePrivateProfileStringW(L"General", L"CheckForUpdates",
-                               g_settings.checkForUpdates ? L"1" : L"0",
-                               path.c_str());
-    WritePrivateProfileStringW(L"General", L"AudioOnly",
-                               g_settings.audioOnly ? L"1" : L"0",
-                               path.c_str());
-    WritePrivateProfileStringW(L"Video", L"ForceHdr10",
-                               g_settings.forceHdr10 ? L"1" : L"0",
-                               path.c_str());
-    WritePrivateProfileStringW(
-        L"Video", L"MjpegColor",
-        MjpegColorOverrideSettingName(g_settings.mjpegColorOverride),
-        path.c_str());
-    const wchar_t* audioMode = L"Shared";
-    if (g_settings.audioMode == AudioMode::WasapiExclusive) {
-        audioMode = L"Exclusive";
-    } else if (g_settings.audioMode == AudioMode::Asio) {
-        audioMode = L"ASIO";
-    }
-    WritePrivateProfileStringW(L"Audio", L"Mode", audioMode, path.c_str());
-    WritePrivateProfileStringW(L"Audio", L"AsioDriver",
-                               g_settings.asioDriverName.c_str(), path.c_str());
-    wchar_t bufferMs[16]{};
-    swprintf_s(bufferMs, L"%d", g_settings.wasapiBufferMs);
-    WritePrivateProfileStringW(L"Audio", L"BufferMs", bufferMs, path.c_str());
-    wchar_t sharedPeriodFrames[16]{};
-    swprintf_s(sharedPeriodFrames, L"%u", g_settings.wasapiSharedPeriodFrames);
-    WritePrivateProfileStringW(L"Audio", L"SharedPeriodFrames",
-                               sharedPeriodFrames, path.c_str());
-    const wchar_t* driftCorrection = L"Off";
-    if (g_settings.driftCorrection == DriftCorrectionMode::Auto) {
-        driftCorrection = L"Auto";
-    } else if (g_settings.driftCorrection == DriftCorrectionMode::Resample) {
-        driftCorrection = L"Resample";
-    }
-    WritePrivateProfileStringW(L"Audio", L"DriftCorrection", driftCorrection,
-                               path.c_str());
-    wchar_t pcmQueueTargetMs[16]{};
-    swprintf_s(pcmQueueTargetMs, L"%d", g_settings.pcmQueueTargetMs);
-    WritePrivateProfileStringW(L"Audio", L"PcmQueueTargetMs",
-                               pcmQueueTargetMs, path.c_str());
-    wchar_t volume[16]{};
-    swprintf_s(volume, L"%d", g_settings.volumePercent);
-    WritePrivateProfileStringW(L"Audio", L"Volume", volume, path.c_str());
-    wchar_t leftVolume[16]{};
-    swprintf_s(leftVolume, L"%d", g_settings.leftVolumePercent);
-    WritePrivateProfileStringW(L"Audio", L"LeftVolume", leftVolume,
-                               path.c_str());
-    wchar_t rightVolume[16]{};
-    swprintf_s(rightVolume, L"%d", g_settings.rightVolumePercent);
-    WritePrivateProfileStringW(L"Audio", L"RightVolume", rightVolume,
-                               path.c_str());
-    WritePrivateProfileStringW(L"Audio", L"AllowVolumeBoost",
-                               g_settings.allowVolumeBoost ? L"1" : L"0",
-                               path.c_str());
-    const wchar_t* hudPosition = L"TopLeft";
-    switch (g_settings.volumeHudPosition) {
-    case VolumeHudPosition::TopRight: hudPosition = L"TopRight"; break;
-    case VolumeHudPosition::BottomLeft: hudPosition = L"BottomLeft"; break;
-    case VolumeHudPosition::BottomRight: hudPosition = L"BottomRight"; break;
-    default: break;
-    }
-    WritePrivateProfileStringW(L"Audio", L"VolumeHudPosition", hudPosition,
-                               path.c_str());
-    WritePrivateProfileStringW(L"Audio", L"MuteWhenBackground",
-                               g_settings.muteWhenBackground ? L"1" : L"0",
-                               path.c_str());
-    WritePrivateProfileStringW(L"Audio", L"OutputDeviceId",
-                               g_settings.audioOutputDeviceId.c_str(),
-                               path.c_str());
-    WritePrivateProfileStringW(L"Audio", L"ExclusiveVerifiedEndpointId",
-                               g_settings.exclusiveVerifiedEndpointId.c_str(),
-                               path.c_str());
-    wchar_t exclusiveVerifiedBufferMs[16]{};
-    swprintf_s(exclusiveVerifiedBufferMs, L"%d",
-               g_settings.exclusiveVerifiedBufferMs);
-    WritePrivateProfileStringW(L"Audio", L"ExclusiveVerifiedBufferMs",
-                               exclusiveVerifiedBufferMs, path.c_str());
-
-    // Rewrite this small cache as one section so removed/disconnected devices
-    // cannot leave stale numbered entries behind indefinitely.
-    WritePrivateProfileStringW(L"ExclusiveEndpointCache", nullptr, nullptr,
-                               path.c_str());
-    const size_t cacheCount = (std::min)(
-        g_settings.exclusiveEndpointCache.size(),
-        kMaximumExclusiveEndpointCacheEntries);
-    wchar_t cacheCountText[16]{};
-    swprintf_s(cacheCountText, L"%zu", cacheCount);
-    WritePrivateProfileStringW(L"ExclusiveEndpointCache", L"Count",
-                               cacheCountText, path.c_str());
-    for (size_t i = 0; i < cacheCount; ++i) {
-        const auto& entry = g_settings.exclusiveEndpointCache[i];
-        wchar_t idKey[32]{};
-        wchar_t stateKey[32]{};
-        wchar_t bufferKey[32]{};
-        wchar_t bufferText[16]{};
-        swprintf_s(idKey, L"Endpoint%zuId", i);
-        swprintf_s(stateKey, L"Endpoint%zuState", i);
-        swprintf_s(bufferKey, L"Endpoint%zuBufferMs", i);
-        swprintf_s(bufferText, L"%d", entry.recommendedBufferMs);
-        WritePrivateProfileStringW(L"ExclusiveEndpointCache", idKey,
-                                   entry.endpointId.c_str(), path.c_str());
-        WritePrivateProfileStringW(L"ExclusiveEndpointCache", stateKey,
-                                   entry.supported ? L"Supported" : L"Unsupported",
-                                   path.c_str());
-        WritePrivateProfileStringW(L"ExclusiveEndpointCache", bufferKey,
-                                   bufferText, path.c_str());
-    }
-
-    const auto& video = CurrentVideoPreset();
-    wchar_t resolution[32]{};
-    swprintf_s(resolution, L"%dx%d", video.width, video.height);
-    WritePrivateProfileStringW(L"Video", L"Resolution", resolution, path.c_str());
-    WritePrivateProfileStringW(L"Video", L"CaptureDeviceId",
-                               g_settings.captureDeviceId.c_str(), path.c_str());
-    WritePrivateProfileStringW(L"Video", L"CaptureAudioDeviceId",
-                               g_settings.captureAudioDeviceId.c_str(),
-                               path.c_str());
-    WritePrivateProfileStringW(L"Video", L"PixelFormat",
-                               PixelFormatName(g_settings.pixelFormat),
-                               path.c_str());
-    wchar_t frameRate[16]{};
-    swprintf_s(frameRate, L"%d", g_settings.videoFrameRate);
-    WritePrivateProfileStringW(L"Video", L"FrameRate", frameRate,
-                               path.c_str());
-    WritePrivateProfileStringW(
-        L"Video", L"Presentation",
-        g_settings.presentationMode == PresentationMode::VSync
-            ? L"VSync" : L"AllowTearing",
-        path.c_str());
-    WritePrivateProfileStringW(
-        L"Video", L"Scaling",
-        g_settings.scalingMode == ScalingMode::Sharp ? L"Sharp" : L"Smooth",
-        path.c_str());
-    WritePrivateProfileStringW(L"Video", L"PixelPerfect",
-                               g_settings.pixelPerfect ? L"1" : L"0", path.c_str());
-    WritePrivateProfileStringW(L"Video", L"RelativeWindowSize",
-                               g_settings.relativeWindowSize ? L"1" : L"0",
-                               path.c_str());
-    wchar_t relativeScale[16]{};
-    swprintf_s(relativeScale, L"%d", g_settings.relativeWindowScalePpm);
-    WritePrivateProfileStringW(L"Video", L"RelativeWindowScalePpm",
-                               relativeScale, path.c_str());
-    wchar_t relativeScaleVersion[16]{};
-    swprintf_s(relativeScaleVersion, L"%d", kRelativeScaleSettingsVersion);
-    WritePrivateProfileStringW(L"Video", L"RelativeWindowScaleVersion",
-                               relativeScaleVersion, path.c_str());
-    WritePrivateProfileStringW(L"Video", L"BorderlessWindow",
-                               g_settings.borderlessWindow ? L"1" : L"0", path.c_str());
-    WritePrivateProfileStringW(
-        L"Video", L"FullscreenCursor",
-        g_settings.fullscreenCursorMode == FullscreenCursorMode::AlwaysVisible
-            ? L"AlwaysVisible" : L"AutoHide",
-        path.c_str());
-    WritePrivateProfileStringW(L"Window", L"Snap",
-                               g_settings.windowSnap ? L"1" : L"0", path.c_str());
-    WritePrivateProfileStringW(L"Diagnostics", L"SaveLog",
-                               g_settings.saveLog ? L"1" : L"0",
-                               path.c_str());
-    WritePrivateProfileStringW(L"Diagnostics", L"ShowConsole",
-                               g_settings.showDiagnosticConsole ? L"1" : L"0",
-                               path.c_str());
+    llcv::settings::SaveToIni(SettingsPath(), g_settings);
 }
 
 // -----------------------------------------------------------------------------
-// Lock-protected PCM ring buffer.
-// The callback copies only the delivered PCM packet and never blocks capture.
-// -----------------------------------------------------------------------------
+// Bounded PCM storage and the optional drift resampler live in the audio
+// module. Only rare tracked overruns call back into application diagnostics.
+static bool OnPcmRingOverrun(void*, size_t droppedFrames) {
+    if (!AudioTrackingActive()) return false;
+    const uint64_t nowMs = GetTickCount64();
+    g_audioOverrunFrames.fetch_add(droppedFrames, std::memory_order_relaxed);
+    g_audioLastOverrunMs.store(nowMs, std::memory_order_release);
+    RecordAudioErrorEvent(
+        nowMs,
+        static_cast<uint32_t>((std::min)(
+            droppedFrames, static_cast<size_t>(UINT32_MAX))),
+        AudioErrorKind::Overrun, AudioErrorCause::Overrun);
+    return true;
+}
 
-class PcmRing {
-public:
-    PcmRing() : data_(kRingFrames * kChannels) {}
-
-    void push(const int16_t* samples, size_t frames) {
-        std::lock_guard<std::mutex> lock(mu_);
-
-        if (frames >= kRingFrames) {
-            samples += (frames - kRingFrames) * kChannels;
-            frames = kRingFrames;
-            readFrame_ = 0;
-            writeFrame_ = 0;
-            available_ = 0;
-        }
-
-        while (available_ + frames > kRingFrames) {
-            // Drop the oldest frame(s), never block capture.
-            const size_t drop = std::min(available_ + frames - kRingFrames, available_);
-            readFrame_ = (readFrame_ + drop) % kRingFrames;
-            available_ -= drop;
-            if (AudioTrackingActive()) {
-                const uint64_t nowMs = GetTickCount64();
-                overruns_++;
-                g_audioOverrunFrames.fetch_add(drop,
-                                               std::memory_order_relaxed);
-                g_audioLastOverrunMs.store(nowMs,
-                                           std::memory_order_release);
-                RecordAudioErrorEvent(
-                    nowMs, static_cast<uint32_t>((std::min)(
-                            drop, static_cast<size_t>(UINT32_MAX))),
-                    AudioErrorKind::Overrun, AudioErrorCause::Overrun);
-            }
-        }
-
-        for (size_t i = 0; i < frames; ++i) {
-            const size_t dst = ((writeFrame_ + i) % kRingFrames) * kChannels;
-            const size_t src = i * kChannels;
-            data_[dst] = samples[src];
-            data_[dst + 1] = samples[src + 1];
-        }
-
-        writeFrame_ = (writeFrame_ + frames) % kRingFrames;
-        available_ += frames;
-        g_audioRingFrames.store(static_cast<UINT32>(available_),
-                                std::memory_order_release);
-    }
-
-    void pushConverted(const BYTE* source, size_t frames,
-                       const llcv::capture_audio::Format& format) {
-        if (!source || frames == 0 || format.blockAlign == 0) return;
-        std::lock_guard<std::mutex> lock(mu_);
-
-        if (frames >= kRingFrames) {
-            source += (frames - kRingFrames) * format.blockAlign;
-            frames = kRingFrames;
-            readFrame_ = 0;
-            writeFrame_ = 0;
-            available_ = 0;
-        }
-
-        while (available_ + frames > kRingFrames) {
-            const size_t drop = std::min(available_ + frames - kRingFrames,
-                                         available_);
-            readFrame_ = (readFrame_ + drop) % kRingFrames;
-            available_ -= drop;
-            if (AudioTrackingActive()) {
-                const uint64_t nowMs = GetTickCount64();
-                overruns_++;
-                g_audioOverrunFrames.fetch_add(drop,
-                                               std::memory_order_relaxed);
-                g_audioLastOverrunMs.store(nowMs,
-                                           std::memory_order_release);
-                RecordAudioErrorEvent(
-                    nowMs, static_cast<uint32_t>((std::min)(
-                            drop, static_cast<size_t>(UINT32_MAX))),
-                    AudioErrorKind::Overrun, AudioErrorCause::Overrun);
-            }
-        }
-
-        for (size_t i = 0; i < frames; ++i) {
-            int16_t left = 0;
-            int16_t right = 0;
-            llcv::capture_audio::ConvertFrame(
-                source + i * format.blockAlign, format, left, right);
-            const size_t dst = ((writeFrame_ + i) % kRingFrames) * kChannels;
-            data_[dst] = left;
-            data_[dst + 1] = right;
-        }
-        writeFrame_ = (writeFrame_ + frames) % kRingFrames;
-        available_ += frames;
-        g_audioRingFrames.store(static_cast<UINT32>(available_),
-                                std::memory_order_release);
-    }
-
-    size_t pop(int16_t* out, size_t frames) {
-        std::lock_guard<std::mutex> lock(mu_);
-        const size_t n = std::min(frames, available_);
-
-        for (size_t i = 0; i < n; ++i) {
-            const size_t src = ((readFrame_ + i) % kRingFrames) * kChannels;
-            const size_t dst = i * kChannels;
-            out[dst] = data_[src];
-            out[dst + 1] = data_[src + 1];
-        }
-
-        readFrame_ = (readFrame_ + n) % kRingFrames;
-        available_ -= n;
-        g_audioRingFrames.store(static_cast<UINT32>(available_),
-                                std::memory_order_release);
-        return n;
-    }
-
-    size_t availableFrames() const {
-        std::lock_guard<std::mutex> lock(mu_);
-        return available_;
-    }
-
-    void clear() {
-        std::lock_guard<std::mutex> lock(mu_);
-        readFrame_ = 0;
-        writeFrame_ = 0;
-        available_ = 0;
-        g_audioRingFrames.store(0, std::memory_order_release);
-    }
-
-    uint64_t overruns() const { return overruns_.load(); }
-
-private:
-    std::vector<int16_t> data_;
-    mutable std::mutex mu_;
-    size_t readFrame_ = 0;
-    size_t writeFrame_ = 0;
-    size_t available_ = 0;
-    std::atomic<uint64_t> overruns_{0};
-};
-
-static PcmRing g_ring;
+static PcmRing g_ring{kRingFrames, &g_audioRingFrames,
+                      OnPcmRingOverrun, nullptr};
 static std::atomic<uint64_t> g_underruns{0};
-
-// Optional clock-drift correction. A short windowed-sinc interpolator changes
-// the consumption rate by at most +/-1000 ppm. With correction disabled this
-// class is bypassed completely, preserving the original integer PCM samples.
-class SincDriftResampler {
-public:
-    // Reserve the bounded working set before entering a realtime callback.
-    // The ASIO callback cannot afford a vector growth after the driver starts;
-    // WASAPI also benefits from keeping this capacity between resets.
-    void prepare(size_t maxOutputFrames) {
-        const size_t sourceFrames = (std::max)(
-            static_cast<size_t>(32768), maxOutputFrames * 4 + 64);
-        source_.reserve(sourceFrames * kChannels);
-        transfer_.reserve((maxOutputFrames + kHalfTaps * 2 + 8) * kChannels);
-    }
-
-    void reset() {
-        source_.clear();
-        transfer_.clear();
-        position_ = 0.0;
-        primed_ = false;
-        g_audioResamplerFrames.store(0, std::memory_order_release);
-    }
-
-    size_t render(int16_t* output, size_t outputFrames, double ratio) {
-        if (!output || outputFrames == 0) return 0;
-        ratio = std::clamp(ratio, 0.999, 1.001);
-
-        if (!primed_) {
-            const size_t wanted = outputFrames + kHalfTaps * 2 + 2;
-            const size_t pulled = appendFromRing(wanted);
-            if (pulled == 0) return 0;
-            const int16_t firstLeft = source_[0];
-            const int16_t firstRight = source_[1];
-            source_.insert(source_.begin(), kHistoryFrames * kChannels, 0);
-            for (int i = 0; i < kHistoryFrames; ++i) {
-                source_[static_cast<size_t>(i) * kChannels] = firstLeft;
-                source_[static_cast<size_t>(i) * kChannels + 1] = firstRight;
-            }
-            position_ = static_cast<double>(kHistoryFrames);
-            primed_ = true;
-        }
-
-        const double lastPosition =
-            position_ + ratio * static_cast<double>(outputFrames - 1);
-        const size_t requiredFrames =
-            static_cast<size_t>(std::floor(lastPosition)) + 1;
-        const size_t currentFrames = source_.size() / kChannels;
-        if (requiredFrames > currentFrames) {
-            appendFromRing(requiredFrames - currentFrames);
-        }
-
-        size_t produced = 0;
-        const size_t sourceFrames = source_.size() / kChannels;
-        while (produced < outputFrames) {
-            const double samplePosition =
-                position_ - static_cast<double>(kHalfTaps);
-            const size_t center =
-                static_cast<size_t>(std::floor(samplePosition));
-            if (center < static_cast<size_t>(kHalfTaps - 1) ||
-                center + kHalfTaps >= sourceFrames) {
-                break;
-            }
-            const double fraction =
-                samplePosition - static_cast<double>(center);
-            for (int channel = 0; channel < kChannels; ++channel) {
-                double sum = 0.0;
-                double normalization = 0.0;
-                for (int tap = -kHalfTaps + 1; tap <= kHalfTaps; ++tap) {
-                    const double distance =
-                        static_cast<double>(tap) - fraction;
-                    const double weight = WindowedSinc(distance);
-                    const size_t index =
-                        (center + static_cast<size_t>(tap + kHalfTaps - 1) -
-                         static_cast<size_t>(kHalfTaps - 1)) * kChannels +
-                        static_cast<size_t>(channel);
-                    sum += static_cast<double>(source_[index]) * weight;
-                    normalization += weight;
-                }
-                if (std::abs(normalization) > 1.0e-12) {
-                    sum /= normalization;
-                }
-                const long sample = std::lround(std::clamp(
-                    sum, static_cast<double>(INT16_MIN),
-                    static_cast<double>(INT16_MAX)));
-                output[produced * kChannels + static_cast<size_t>(channel)] =
-                    static_cast<int16_t>(sample);
-            }
-            ++produced;
-            position_ += ratio;
-        }
-
-        compactHistory();
-        g_audioResamplerFrames.store(
-            static_cast<UINT32>((std::min)(bufferedFrames(),
-                                           static_cast<size_t>(UINT32_MAX))),
-            std::memory_order_release);
-        return produced;
-    }
-
-    size_t bufferedFrames() const {
-        const size_t frames = source_.size() / kChannels;
-        const size_t consumed = static_cast<size_t>(std::floor(position_));
-        return frames > consumed ? frames - consumed : 0;
-    }
-
-private:
-    static constexpr int kHalfTaps = 8;
-    static constexpr int kHistoryFrames = kHalfTaps * 2;
-    static constexpr double kPi = 3.14159265358979323846;
-
-    static double Sinc(double value) {
-        if (std::abs(value) < 1.0e-12) return 1.0;
-        const double radians = kPi * value;
-        return std::sin(radians) / radians;
-    }
-
-    static double WindowedSinc(double distance) {
-        if (std::abs(distance) >= static_cast<double>(kHalfTaps)) return 0.0;
-        return Sinc(distance) *
-               Sinc(distance / static_cast<double>(kHalfTaps));
-    }
-
-    size_t appendFromRing(size_t wantedFrames) {
-        const size_t available = g_ring.availableFrames();
-        const size_t frames = (std::min)(wantedFrames, available);
-        if (frames == 0) return 0;
-        transfer_.resize(frames * kChannels);
-        const size_t pulled = g_ring.pop(transfer_.data(), frames);
-        source_.insert(source_.end(), transfer_.begin(),
-                       transfer_.begin() +
-                           static_cast<ptrdiff_t>(pulled * kChannels));
-        return pulled;
-    }
-
-    void compactHistory() {
-        const size_t integerPosition =
-            static_cast<size_t>(std::floor(position_));
-        if (integerPosition <= static_cast<size_t>(kHistoryFrames)) return;
-        const size_t dropFrames =
-            integerPosition - static_cast<size_t>(kHistoryFrames);
-        source_.erase(source_.begin(),
-                      source_.begin() +
-                          static_cast<ptrdiff_t>(dropFrames * kChannels));
-        position_ -= static_cast<double>(dropFrames);
-    }
-
-    std::vector<int16_t> source_;
-    std::vector<int16_t> transfer_;
-    double position_ = 0.0;
-    bool primed_ = false;
-};
 
 // -----------------------------------------------------------------------------
 // Sample Grabber callback
 // -----------------------------------------------------------------------------
 
-class SampleGrabberCB final : public ISampleGrabberCB {
-public:
-    explicit SampleGrabberCB(llcv::capture_audio::Format format)
-        : format_(format) {}
+static bool CaptureAudioTrackingActive(void*) {
+    return AudioTrackingActive();
+}
 
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
-        if (!ppv) return E_POINTER;
-        if (riid == IID_IUnknown || riid == __uuidof(ISampleGrabberCB)) {
-            *ppv = static_cast<ISampleGrabberCB*>(this);
-            AddRef();
-            return S_OK;
-        }
-        *ppv = nullptr;
-        return E_NOINTERFACE;
-    }
-
-    STDMETHODIMP_(ULONG) AddRef() override {
-        return ++ref_;
-    }
-
-    STDMETHODIMP_(ULONG) Release() override {
-        ULONG r = --ref_;
-        if (r == 0) delete this;
-        return r;
-    }
-
-    STDMETHODIMP SampleCB(double, IMediaSample* pSample) override {
-        if (!pSample) return E_POINTER;
-
-        BYTE* p = nullptr;
-        HRESULT hr = pSample->GetPointer(&p);
-        if (FAILED(hr) || !p) return hr;
-
-        const long bytes = pSample->GetActualDataLength();
-        if (bytes <= 0 || format_.blockAlign == 0 ||
-            bytes % format_.blockAlign != 0) return S_OK;
-
-        const size_t frames = static_cast<size_t>(bytes / format_.blockAlign);
-        const uint64_t nowMs = GetTickCount64();
-        const bool track = AudioTrackingActive();
-        if (track) {
-            uint64_t unsetStart = 0;
-            g_audioMonitorStartMs.compare_exchange_strong(
-                unsetStart, nowMs, std::memory_order_release,
-                std::memory_order_relaxed);
-            g_audioCapturePacketFrames.store(static_cast<UINT32>(frames),
-                                             std::memory_order_release);
-        }
-        const auto now = std::chrono::steady_clock::now();
-        if (hasPreviousCallback_) {
-            const int64_t intervalUs =
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    now - previousCallback_).count();
-            if (track) {
-                g_audioCaptureIntervalUs.store(intervalUs,
-                                               std::memory_order_release);
-                g_audioCaptureIntervalTotalUs.fetch_add(
-                    static_cast<uint64_t>((std::max)(int64_t{0}, intervalUs)),
-                    std::memory_order_relaxed);
-            }
-        }
-        previousCallback_ = now;
-        hasPreviousCallback_ = true;
-        g_audioLastCaptureCallbackMs.store(nowMs,
-                                           std::memory_order_release);
-        if (track) {
-            g_audioCaptureCallbacks.fetch_add(1, std::memory_order_relaxed);
-            g_audioCaptureFrames.fetch_add(frames, std::memory_order_relaxed);
-        }
-        if (format_.path == llcv::capture_audio::Path::Direct16BitStereo) {
-            g_ring.push(reinterpret_cast<const int16_t*>(p), frames);
-        } else {
-            g_ring.pushConverted(p, frames, format_);
-        }
-        return S_OK;
-    }
-
-    STDMETHODIMP BufferCB(double, BYTE*, long) override {
-        return E_NOTIMPL;
-    }
-
-private:
-    std::atomic<ULONG> ref_{1};
-    llcv::capture_audio::Format format_{};
-    std::chrono::steady_clock::time_point previousCallback_{};
-    bool hasPreviousCallback_ = false;
-};
+static ISampleGrabberCB* CreateAudioSampleCallback(
+    const llcv::capture_audio::Format& format) {
+    llcv::capture::AudioSampleTelemetry telemetry{
+        &g_audioMonitorStartMs,
+        &g_audioCapturePacketFrames,
+        &g_audioCaptureIntervalUs,
+        &g_audioCaptureIntervalTotalUs,
+        &g_audioLastCaptureCallbackMs,
+        &g_audioCaptureCallbacks,
+        &g_audioCaptureFrames,
+    };
+    return new llcv::capture::AudioSampleGrabberCallback(
+        format, g_ring, telemetry, CaptureAudioTrackingActive, nullptr);
+}
 
 // -----------------------------------------------------------------------------
 // DirectShow helpers
 // -----------------------------------------------------------------------------
 
-static HRESULT FindCaptureFilter(const std::wstring& selectedId,
-                                 IBaseFilter** out,
-                                 std::wstring* selectedName = nullptr) {
-    if (!out) return E_POINTER;
-    *out = nullptr;
-
-    ICreateDevEnum* devEnum = nullptr;
-    IEnumMoniker* enumMon = nullptr;
-
-    HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER,
-                                  IID_PPV_ARGS(&devEnum));
-    if (FAILED(hr)) return hr;
-
-    hr = devEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &enumMon, 0);
-    if (hr != S_OK) {
-        SafeRelease(devEnum);
-        return E_FAIL;
-    }
-
-    IMoniker* mon = nullptr;
-    IMoniker* selectedMoniker = nullptr;
-    std::wstring chosenName;
-    int chosenRank = 0;
-    while (enumMon->Next(1, &mon, nullptr) == S_OK) {
-        const std::wstring name = MonikerFriendlyName(mon);
-        const std::wstring id = MonikerDisplayName(mon);
-        if (!name.empty()) {
-            fwprintf(stderr, L"[capture] video device: %s\n", name.c_str());
-        }
-        int rank = 0;
-        if (!selectedId.empty()) {
-            if (id == selectedId) rank = 100;
-        } else {
-            std::wstring lowerName(name);
-            std::transform(lowerName.begin(), lowerName.end(),
-                           lowerName.begin(), [](wchar_t value) {
-                               return static_cast<wchar_t>(std::towlower(value));
-                           });
-            if (_wcsicmp(name.c_str(), kCaptureName) == 0) {
-                rank = 30;
-            } else if (lowerName.find(L"gc573") != std::wstring::npos ||
-                       lowerName.find(L"live gamer 4k") !=
-                           std::wstring::npos) {
-                rank = 20;
-            } else {
-                rank = 10;
-            }
-        }
-        if (rank > chosenRank) {
-            SafeRelease(selectedMoniker);
-            selectedMoniker = mon;
-            selectedMoniker->AddRef();
-            chosenName = name;
-            chosenRank = rank;
-        }
-        SafeRelease(mon);
-    }
-
-    if (selectedMoniker) {
-        hr = selectedMoniker->BindToObject(nullptr, nullptr,
-                                           IID_PPV_ARGS(out));
-        if (SUCCEEDED(hr)) {
-            fwprintf(stderr,
-                     L"[capture] selected device: %s%s\n",
-                     chosenName.c_str(),
-                     selectedId.empty() ? L" (auto)" : L"");
-            if (selectedName) *selectedName = chosenName;
-        }
-    } else {
-        hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-    }
-    SafeRelease(selectedMoniker);
-    SafeRelease(enumMon);
-    SafeRelease(devEnum);
-    return hr;
+static HRESULT FindCaptureFilter(
+    const std::wstring& selectedId, IBaseFilter** output,
+    std::wstring* selectedName = nullptr) {
+    return llcv::capture::FindVideoCaptureFilter(
+        selectedId, kCaptureName, output, selectedName,
+        LogModuleMessage);
 }
 
-static std::wstring NormalizedDeviceName(const std::wstring& value) {
-    std::wstring normalized;
-    bool previousWasSpace = true;
-    for (const wchar_t ch : value) {
-        if (std::iswalnum(ch)) {
-            normalized.push_back(static_cast<wchar_t>(std::towlower(ch)));
-            previousWasSpace = false;
-        } else if (!previousWasSpace) {
-            normalized.push_back(L' ');
-            previousWasSpace = true;
-        }
-    }
-    while (!normalized.empty() && normalized.back() == L' ') normalized.pop_back();
-    return normalized;
+static HRESULT FindCaptureAudioFilter(
+    const std::wstring& selectedId, const std::wstring& videoName,
+    IBaseFilter** output, std::wstring* selectedName = nullptr) {
+    return llcv::capture::FindCaptureAudioFilter(
+        selectedId, videoName, output, selectedName,
+        LogModuleMessage);
 }
 
-static int RelatedCaptureAudioScore(const std::wstring& videoName,
-                                    const std::wstring& audioName) {
-    const std::wstring video = NormalizedDeviceName(videoName);
-    const std::wstring audio = NormalizedDeviceName(audioName);
-    if (video.empty() || audio.empty()) return 0;
-    if (video == audio) return 1000;
-    if (video.find(audio) != std::wstring::npos ||
-        audio.find(video) != std::wstring::npos) return 800;
-
-    int score = 0;
-    size_t start = 0;
-    while (start < video.size()) {
-        const size_t end = video.find(L' ', start);
-        const std::wstring token = video.substr(
-            start, end == std::wstring::npos ? std::wstring::npos : end - start);
-        // Ignore vendor/generic words. Model identifiers such as GC313Pro and
-        // HD60 X remain useful identifiers across video/audio filter names.
-        if (token.size() >= 3 && token != L"avermedia" && token != L"elgato" &&
-            token != L"capture" && token != L"video" && token != L"audio" &&
-            audio.find(token) != std::wstring::npos) {
-            score += 100;
-        }
-        if (end == std::wstring::npos) break;
-        start = end + 1;
-    }
-    return score;
+static HRESULT FindOutputPinByName(
+    IBaseFilter* filter, const wchar_t* name, IPin** output) {
+    return llcv::capture::FindOutputPinByName(filter, name, output);
 }
 
-static HRESULT FindCaptureAudioFilter(const std::wstring& selectedId,
-                                      const std::wstring& videoName,
-                                      IBaseFilter** out,
-                                      std::wstring* selectedName = nullptr) {
-    if (!out) return E_POINTER;
-    *out = nullptr;
-
-    ICreateDevEnum* devEnum = nullptr;
-    IEnumMoniker* enumMon = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr,
-                                  CLSCTX_INPROC_SERVER,
-                                  IID_PPV_ARGS(&devEnum));
-    if (FAILED(hr)) return hr;
-    hr = devEnum->CreateClassEnumerator(CLSID_AudioInputDeviceCategory,
-                                        &enumMon, 0);
-    if (hr != S_OK) {
-        SafeRelease(devEnum);
-        return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-    }
-
-    IMoniker* mon = nullptr;
-    IMoniker* chosen = nullptr;
-    std::wstring chosenName;
-    int chosenScore = 0;
-    while (enumMon->Next(1, &mon, nullptr) == S_OK) {
-        const std::wstring name = MonikerFriendlyName(mon);
-        const std::wstring id = MonikerDisplayName(mon);
-        if (!name.empty()) fwprintf(stderr, L"[capture] audio input: %s\n", name.c_str());
-        const int score = !selectedId.empty()
-            ? (id == selectedId ? 10000 : 0)
-            : RelatedCaptureAudioScore(videoName, name);
-        if (score > chosenScore) {
-            SafeRelease(chosen);
-            chosen = mon;
-            chosen->AddRef();
-            chosenName = name;
-            chosenScore = score;
-        }
-        SafeRelease(mon);
-    }
-
-    if (chosen) {
-        hr = chosen->BindToObject(nullptr, nullptr, IID_PPV_ARGS(out));
-        if (SUCCEEDED(hr)) {
-            fwprintf(stderr, L"[capture] selected audio input: %s%s\n",
-                     chosenName.c_str(), selectedId.empty() ? L" (auto match)" : L"");
-            if (selectedName) *selectedName = chosenName;
-        }
-    } else {
-        hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-    }
-    SafeRelease(chosen);
-    SafeRelease(enumMon);
-    SafeRelease(devEnum);
-    return hr;
+static HRESULT GetFirstPin(
+    IBaseFilter* filter, PIN_DIRECTION wanted, IPin** output) {
+    return llcv::capture::GetFirstPin(filter, wanted, output);
 }
 
-static HRESULT FindOutputPinByName(IBaseFilter* filter, const wchar_t* name, IPin** out) {
-    if (!filter || !out) return E_POINTER;
-    *out = nullptr;
-
-    IEnumPins* e = nullptr;
-    HRESULT hr = filter->EnumPins(&e);
-    if (FAILED(hr)) return hr;
-
-    IPin* pin = nullptr;
-    while (e->Next(1, &pin, nullptr) == S_OK) {
-        PIN_DIRECTION dir{};
-        PIN_INFO info{};
-        if (SUCCEEDED(pin->QueryDirection(&dir)) && dir == PINDIR_OUTPUT &&
-            SUCCEEDED(pin->QueryPinInfo(&info))) {
-            if (info.pFilter) info.pFilter->Release();
-            if (_wcsicmp(info.achName, name) == 0) {
-                *out = pin;
-                e->Release();
-                return S_OK;
-            }
-        }
-        pin->Release();
-    }
-
-    e->Release();
-    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-}
-
-static HRESULT GetFirstPin(IBaseFilter* filter, PIN_DIRECTION wanted, IPin** out) {
-    if (!filter || !out) return E_POINTER;
-    *out = nullptr;
-
-    IEnumPins* e = nullptr;
-    HRESULT hr = filter->EnumPins(&e);
-    if (FAILED(hr)) return hr;
-
-    IPin* pin = nullptr;
-    while (e->Next(1, &pin, nullptr) == S_OK) {
-        PIN_DIRECTION dir{};
-        if (SUCCEEDED(pin->QueryDirection(&dir)) && dir == wanted) {
-            *out = pin;
-            e->Release();
-            return S_OK;
-        }
-        pin->Release();
-    }
-
-    e->Release();
-    return E_FAIL;
-}
-
-static void DeleteMediaType(AM_MEDIA_TYPE* mediaType);
-
-static HRESULT FindOutputPinByMajorType(IBaseFilter* filter,
-                                        const GUID& majorType, IPin** out) {
-    if (!filter || !out) return E_POINTER;
-    *out = nullptr;
-    IEnumPins* pins = nullptr;
-    HRESULT hr = filter->EnumPins(&pins);
-    if (FAILED(hr)) return hr;
-
-    IPin* pin = nullptr;
-    while (pins->Next(1, &pin, nullptr) == S_OK) {
-        PIN_DIRECTION direction{};
-        if (SUCCEEDED(pin->QueryDirection(&direction)) &&
-            direction == PINDIR_OUTPUT) {
-            IEnumMediaTypes* types = nullptr;
-            if (SUCCEEDED(pin->EnumMediaTypes(&types))) {
-                AM_MEDIA_TYPE* type = nullptr;
-                while (types->Next(1, &type, nullptr) == S_OK) {
-                    const bool matches = type && type->majortype == majorType;
-                    DeleteMediaType(type);
-                    if (matches) {
-                        SafeRelease(types);
-                        *out = pin;
-                        SafeRelease(pins);
-                        return S_OK;
-                    }
-                }
-                SafeRelease(types);
-            }
-        }
-        SafeRelease(pin);
-    }
-    SafeRelease(pins);
-    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+static HRESULT FindOutputPinByMajorType(
+    IBaseFilter* filter, const GUID& majorType, IPin** output) {
+    return llcv::capture::FindOutputPinByMajorType(
+        filter, majorType, output);
 }
 
 static void LogFilterPins(IBaseFilter* filter, const wchar_t* label) {
-    if (!filter || !label) return;
-    IEnumPins* pins = nullptr;
-    if (FAILED(filter->EnumPins(&pins))) return;
-    fwprintf(stderr, L"[capture] %s pin diagnostics:\n", label);
-    IPin* pin = nullptr;
-    while (pins->Next(1, &pin, nullptr) == S_OK) {
-        PIN_INFO info{};
-        PIN_DIRECTION direction{};
-        pin->QueryDirection(&direction);
-        const bool hasInfo = SUCCEEDED(pin->QueryPinInfo(&info));
-        fwprintf(stderr, L"[capture]   %s: %s\n",
-                 hasInfo ? info.achName : L"(unnamed pin)",
-                 direction == PINDIR_OUTPUT ? L"output" : L"input");
-        if (hasInfo && info.pFilter) info.pFilter->Release();
-        IEnumMediaTypes* types = nullptr;
-        if (SUCCEEDED(pin->EnumMediaTypes(&types))) {
-            int index = 0;
-            AM_MEDIA_TYPE* type = nullptr;
-            while (index < 12 && types->Next(1, &type, nullptr) == S_OK) {
-                wchar_t major[48]{};
-                wchar_t subtype[48]{};
-                StringFromGUID2(type->majortype, major, ARRAYSIZE(major));
-                StringFromGUID2(type->subtype, subtype, ARRAYSIZE(subtype));
-                fwprintf(stderr, L"[capture]     type %d: %s / %s\n",
-                         index + 1, major, subtype);
-                DeleteMediaType(type);
-                ++index;
-            }
-            SafeRelease(types);
-        }
-        SafeRelease(pin);
-    }
-    SafeRelease(pins);
-}
-
-// Prefer the existing direct 48 kHz / 16-bit stereo route when a device
-// advertises it. Otherwise keep the first supported 24/32-bit or float route
-// and convert at the callback without inserting a DirectShow transform.
-static AM_MEDIA_TYPE* SelectSupportedCaptureAudioType(
-    IPin* audioPin, llcv::capture_audio::Format& selectedFormat,
-    llcv::capture_audio::Rejection* rejection = nullptr) {
-    if (rejection) *rejection = llcv::capture_audio::Rejection::Malformed;
-    if (!audioPin) return nullptr;
-    IEnumMediaTypes* types = nullptr;
-    if (FAILED(audioPin->EnumMediaTypes(&types)) || !types) return nullptr;
-
-    AM_MEDIA_TYPE* fallback = nullptr;
-    llcv::capture_audio::Format fallbackFormat{};
-    llcv::capture_audio::Rejection firstRejection =
-        llcv::capture_audio::Rejection::Malformed;
-    AM_MEDIA_TYPE* type = nullptr;
-    while (types->Next(1, &type, nullptr) == S_OK) {
-        const auto classification = llcv::capture_audio::Classify(*type);
-        if (classification.supported) {
-            if (classification.format.path ==
-                llcv::capture_audio::Path::Direct16BitStereo) {
-                DeleteMediaType(fallback);
-                selectedFormat = classification.format;
-                types->Release();
-                return type;
-            }
-            if (!fallback) {
-                fallback = type;
-                fallbackFormat = classification.format;
-                type = nullptr;
-            }
-        } else if (firstRejection ==
-                       llcv::capture_audio::Rejection::Malformed ||
-                   classification.rejection ==
-                       llcv::capture_audio::Rejection::SampleRate) {
-            firstRejection = classification.rejection;
-        }
-        DeleteMediaType(type);
-        type = nullptr;
-    }
-    types->Release();
-    if (fallback) {
-        selectedFormat = fallbackFormat;
-    } else if (rejection) {
-        *rejection = firstRejection;
-    }
-    return fallback;
+    llcv::capture::LogFilterPins(
+        filter, label, LogModuleMessage);
 }
 
 static void SuggestCaptureBuffer(IPin* audioPin, WORD blockAlign) {
-    if (blockAlign == 0) return;
-    IAMBufferNegotiation* neg = nullptr;
-    if (FAILED(audioPin->QueryInterface(IID_PPV_ARGS(&neg)))) {
+    LONG suggestedBytes = 0;
+    const HRESULT hr = llcv::capture_audio::SuggestCaptureBuffer(
+        audioPin, blockAlign, kSampleRate, kRecommendedCaptureBufferMs,
+        &suggestedBytes);
+    if (hr == E_NOINTERFACE) {
         fwprintf(stderr, L"[audio] IAMBufferNegotiation unavailable; driver controls capture buffer.\n");
         return;
     }
-
-    ALLOCATOR_PROPERTIES props{};
-    props.cBuffers = 4;
-    props.cbBuffer = (kSampleRate * blockAlign *
-                      kRecommendedCaptureBufferMs) / 1000;
-    props.cbAlign = 1;
-    props.cbPrefix = 0;
-
-    HRESULT hr = neg->SuggestAllocatorProperties(&props);
     if (FAILED(hr)) LogHr(L"IAMBufferNegotiation::SuggestAllocatorProperties", hr);
     else fwprintf(stderr, L"[audio] requested DirectShow capture buffer: %d ms (%ld bytes)\n",
-                  kRecommendedCaptureBufferMs, props.cbBuffer);
-
-    neg->Release();
+                  kRecommendedCaptureBufferMs, suggestedBytes);
 }
 
 static void ReportConnectedAudioAllocator(IPin* inputPin, WORD blockAlign) {
-    IMemInputPin* memoryInput = nullptr;
-    IMemAllocator* allocator = nullptr;
-    ALLOCATOR_PROPERTIES properties{};
-    HRESULT hr = inputPin
-                     ? inputPin->QueryInterface(IID_PPV_ARGS(&memoryInput))
-                     : E_POINTER;
-    if (SUCCEEDED(hr)) hr = memoryInput->GetAllocator(&allocator);
-    if (SUCCEEDED(hr)) hr = allocator->GetProperties(&properties);
-    if (SUCCEEDED(hr)) {
-        const LONG frames = blockAlign > 0
-                                ? properties.cbBuffer / blockAlign : 0;
-        g_audioCaptureAllocatorFrames.store(frames,
+    const auto info = llcv::capture_audio::QueryConnectedAllocator(
+        inputPin, blockAlign);
+    if (SUCCEEDED(info.result)) {
+        g_audioCaptureAllocatorFrames.store(info.framesPerBuffer,
                                             std::memory_order_release);
-        g_audioCaptureAllocatorBuffers.store(properties.cBuffers,
+        g_audioCaptureAllocatorBuffers.store(info.bufferCount,
                                              std::memory_order_release);
         fwprintf(stderr,
                  L"[audio] actual DirectShow allocator: %ld buffers x "
                  L"%ld bytes (%ld frames / %.2f ms each)\n",
-                 properties.cBuffers, properties.cbBuffer, frames,
-                 1000.0 * frames / kSampleRate);
+                 info.bufferCount, info.bufferBytes, info.framesPerBuffer,
+                 1000.0 * info.framesPerBuffer / kSampleRate);
     } else {
-        LogHr(L"DirectShow audio allocator query", hr);
+        LogHr(L"DirectShow audio allocator query", info.result);
     }
-    SafeRelease(allocator);
-    SafeRelease(memoryInput);
 }
 
 // -----------------------------------------------------------------------------
 // WASAPI render thread (user-selectable Shared or Exclusive mode)
 // -----------------------------------------------------------------------------
-
-class DefaultAudioEndpointNotification final : public IMMNotificationClient {
-public:
-    STDMETHODIMP QueryInterface(REFIID riid, void** object) override {
-        if (!object) return E_POINTER;
-        if (riid == IID_IUnknown || riid == __uuidof(IMMNotificationClient)) {
-            *object = static_cast<IMMNotificationClient*>(this);
-            AddRef();
-            return S_OK;
-        }
-        *object = nullptr;
-        return E_NOINTERFACE;
-    }
-    STDMETHODIMP_(ULONG) AddRef() override { return ++references_; }
-    STDMETHODIMP_(ULONG) Release() override {
-        const ULONG remaining = --references_;
-        if (!remaining) delete this;
-        return remaining;
-    }
-    STDMETHODIMP OnDefaultDeviceChanged(EDataFlow flow, ERole role,
-                                         LPCWSTR) override {
-        if (flow == eRender && role == eConsole) {
-            g_defaultAudioEndpointGeneration.fetch_add(
-                1, std::memory_order_acq_rel);
-        }
-        return S_OK;
-    }
-    STDMETHODIMP OnDeviceAdded(LPCWSTR) override { return S_OK; }
-    STDMETHODIMP OnDeviceRemoved(LPCWSTR) override { return S_OK; }
-    STDMETHODIMP OnDeviceStateChanged(LPCWSTR, DWORD) override { return S_OK; }
-    STDMETHODIMP OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override {
-        return S_OK;
-    }
-
-private:
-    std::atomic<ULONG> references_{1};
-};
 
 static double TargetAudioVolumeGain() {
     if (g_backgroundAudioMuted.load(std::memory_order_acquire)) return 0.0;
@@ -3005,7 +1057,7 @@ static void PublishAudioPeak(std::atomic<int>& destination, int observed) {
 }
 
 struct AsioRenderState {
-    SincDriftResampler driftResampler;
+    SincDriftResampler driftResampler{g_ring, &g_audioResamplerFrames};
     double filteredQueuedFrames = -1.0;
     double correctionPpm = 0.0;
     uint64_t autoCandidateSinceMs = 0;
@@ -3024,7 +1076,7 @@ static size_t FillAsioPcm(void* user, int16_t* out, size_t frames) {
     const UINT32 targetFrames = g_audioQueueTargetFrames.load(
         std::memory_order_acquire);
     const size_t availableBeforeRender =
-        g_ring.availableFrames() + state->driftResampler.bufferedFrames();
+        g_ring.AvailableFrames() + state->driftResampler.BufferedFrames();
     if (state->audioStarted && AudioTrackingActive()) {
         UINT32 observed = static_cast<UINT32>((std::min)(
             availableBeforeRender, static_cast<size_t>(UINT32_MAX)));
@@ -3046,7 +1098,7 @@ static size_t FillAsioPcm(void* user, int16_t* out, size_t frames) {
         const double queued = static_cast<double>(
             g_audioRingFrames.load(std::memory_order_acquire) +
             static_cast<UINT32>((std::min)(
-                state->driftResampler.bufferedFrames(),
+                state->driftResampler.BufferedFrames(),
                 static_cast<size_t>(UINT32_MAX))));
         if (!state->audioStarted && queued >= target) {
             state->audioStarted = true;
@@ -3073,7 +1125,7 @@ static size_t FillAsioPcm(void* user, int16_t* out, size_t frames) {
                                kAutoCorrectionEngageHoldMs &&
                            queued >= static_cast<double>(frames)) {
                     state->autoCorrectionActive = true;
-                    state->driftResampler.reset();
+                    state->driftResampler.Reset();
                     state->correctionPpm = 0.0;
                     fwprintf(stderr,
                              L"[audio] ASIO auto clock-drift correction "
@@ -3097,7 +1149,7 @@ static size_t FillAsioPcm(void* user, int16_t* out, size_t frames) {
                 (requestedPpm - state->correctionPpm) * 0.02;
             const double ratio = 1.0 + state->correctionPpm / 1'000'000.0;
             if (state->audioStarted) {
-                got = state->driftResampler.render(out, frames, ratio);
+                got = state->driftResampler.Render(out, frames, ratio);
             }
             g_audioResamplePpm.store(
                 static_cast<int>(std::lround(state->correctionPpm)),
@@ -3105,18 +1157,18 @@ static size_t FillAsioPcm(void* user, int16_t* out, size_t frames) {
             g_audioResampledOutputFrames.fetch_add(
                 got, std::memory_order_relaxed);
         } else {
-            if (state->audioStarted) got = g_ring.pop(out, frames);
+            if (state->audioStarted) got = g_ring.Pop(out, frames);
             state->correctionPpm = 0.0;
             g_audioResamplePpm.store(0, std::memory_order_release);
             g_audioResamplerFrames.store(0, std::memory_order_release);
         }
     } else {
         if (!state->audioStarted &&
-            g_ring.availableFrames() >= targetFrames) {
+            g_ring.AvailableFrames() >= targetFrames) {
             state->audioStarted = true;
             g_asioAudioStarted.store(true, std::memory_order_release);
         }
-        if (state->audioStarted) got = g_ring.pop(out, frames);
+        if (state->audioStarted) got = g_ring.Pop(out, frames);
         state->correctionPpm = 0.0;
         g_audioResamplePpm.store(0, std::memory_order_release);
         g_audioResamplerFrames.store(0, std::memory_order_release);
@@ -3140,7 +1192,8 @@ static size_t FillAsioPcm(void* user, int16_t* out, size_t frames) {
         g_audioClipUntilMs.store(GetTickCount64() + 1500,
                                  std::memory_order_release);
     }
-    if (got < frames && state->audioStarted && AudioTrackingActive()) {
+    if (got < frames && state->audioStarted &&
+        g_running.load(std::memory_order_acquire) && AudioTrackingActive()) {
         const UINT32 missing = static_cast<UINT32>(frames - got);
         const uint64_t nowMs = GetTickCount64();
         g_underruns.fetch_add(1, std::memory_order_relaxed);
@@ -3169,7 +1222,7 @@ static size_t FillAsioPcm(void* user, int16_t* out, size_t frames) {
     }
     const UINT32 queued = static_cast<UINT32>((std::min)(
         g_audioRingFrames.load(std::memory_order_acquire) +
-            state->driftResampler.bufferedFrames(),
+                state->driftResampler.BufferedFrames(),
         static_cast<size_t>(UINT32_MAX)));
     UINT32 previous = g_audioMinimumPreRenderFrames.load(
         std::memory_order_acquire);
@@ -3181,765 +1234,262 @@ static size_t FillAsioPcm(void* user, int16_t* out, size_t frames) {
     return got;
 }
 
-static bool AudioRenderThreadWasapi(AudioMode mode,
-                                    bool reinitializingEndpoint) {
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (FAILED(hr)) {
-        LogHr(L"CoInitializeEx(audio render)", hr);
-        return false;
-    }
+struct WasapiRenderState {
+    SincDriftResampler driftResampler{g_ring, &g_audioResamplerFrames};
+    double filteredQueuedFrames = -1.0;
+    double correctionPpm = 0.0;
+    uint64_t autoCandidateSinceMs = 0;
+    bool audioStarted = false;
+    bool autoCorrectionActive = false;
+    UINT32 queueTargetFrames = 0;
+    llcv::audio::StereoGain currentMix{};
+};
 
-    const bool exclusive = mode == AudioMode::WasapiExclusive;
-    const bool followDefault = g_settings.audioOutputDeviceId.empty();
-    uint64_t watchedDefaultGeneration =
-        g_defaultAudioEndpointGeneration.load(std::memory_order_acquire);
-    IMMDeviceEnumerator* en = nullptr;
-    IMMDevice* dev = nullptr;
-    IAudioClient* client = nullptr;
-    IAudioClient3* client3 = nullptr;
-    IAudioRenderClient* render = nullptr;
-    IAudioClock* clock = nullptr;
-    DefaultAudioEndpointNotification* endpointNotification = nullptr;
-    bool notificationRegistered = false;
-    bool restartForDefaultChange = false;
-    HANDLE eventHandle = nullptr;
+static llcv::wasapi::FillResult FillWasapiPcm(
+    void* user, int16_t* output, size_t frames) {
+    llcv::wasapi::FillResult result{};
+    auto* state = static_cast<WasapiRenderState*>(user);
+    if (!state || !output || frames == 0) return result;
 
-    DWORD taskIndex = 0;
-    HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
-    if (exclusive && mmcss) {
-        // The Exclusive event is a hard output deadline: a late wake leaves
-        // one complete endpoint buffer unfilled.  Raise only this diagnostic
-        // renderer relative to other Pro Audio MMCSS work; no buffer depth or
-        // rendering queue is changed.
-        if (AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_CRITICAL)) {
-            fwprintf(stderr,
-                     L"[audio][exclusive] MMCSS priority: Critical\n");
-        } else {
-            fwprintf(stderr,
-                     L"[audio][exclusive] MMCSS Critical priority request "
-                     L"failed (error %lu); using task default.\n",
-                     GetLastError());
+    result.availableBeforeRender =
+        g_ring.AvailableFrames() + state->driftResampler.BufferedFrames();
+    if (state->audioStarted && AudioTrackingActive()) {
+        UINT32 observed = static_cast<UINT32>((std::min)(
+            result.availableBeforeRender,
+            static_cast<size_t>(UINT32_MAX)));
+        UINT32 previousMinimum = g_audioMinimumPreRenderFrames.load(
+            std::memory_order_relaxed);
+        while (observed < previousMinimum &&
+               !g_audioMinimumPreRenderFrames.compare_exchange_weak(
+                   previousMinimum, observed, std::memory_order_release,
+                   std::memory_order_relaxed)) {
         }
     }
 
-    do {
-        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
-                              CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&en));
-        if (FAILED(hr)) { LogHr(L"CoCreateInstance(MMDeviceEnumerator)", hr); break; }
-
-        if (followDefault) {
-            endpointNotification = new DefaultAudioEndpointNotification();
-            hr = en->RegisterEndpointNotificationCallback(
-                endpointNotification);
-            if (SUCCEEDED(hr)) {
-                notificationRegistered = true;
-                watchedDefaultGeneration =
-                    g_defaultAudioEndpointGeneration.load(
-                        std::memory_order_acquire);
-            } else {
-                LogHr(L"RegisterEndpointNotificationCallback", hr);
-                endpointNotification->Release();
-                endpointNotification = nullptr;
-            }
+    size_t got = 0;
+    const bool correctionConfigured =
+        g_settings.driftCorrection != DriftCorrectionMode::Off;
+    if (correctionConfigured) {
+        const double targetFrames =
+            static_cast<double>(state->queueTargetFrames);
+        const double queuedFrames = static_cast<double>(
+            g_audioRingFrames.load(std::memory_order_acquire) +
+            static_cast<UINT32>((std::min)(
+                state->driftResampler.BufferedFrames(),
+                static_cast<size_t>(UINT32_MAX))));
+        if (!state->audioStarted && queuedFrames >= targetFrames) {
+            state->audioStarted = true;
         }
-
-        hr = GetConfiguredAudioEndpoint(
-            en, g_settings.audioOutputDeviceId, &dev);
-        if (FAILED(hr)) { LogHr(L"GetConfiguredAudioEndpoint", hr); break; }
-        std::wstring outputName = AudioEndpointFriendlyName(dev);
-        if (outputName.empty()) {
-            outputName = g_settings.audioOutputDeviceId.empty()
-                ? L"Windows 기본 장치" : L"선택한 출력 장치";
-        }
-        fwprintf(stderr, L"[audio] output endpoint: %s%s\n",
-                 outputName.c_str(),
-                 followDefault ? L" (following Windows default)" : L"");
-        SetActiveAudioOutputName(
-            outputName + (followDefault ? L" (기본 추적)" : L""));
-
-        hr = dev->Activate(__uuidof(IAudioClient), CLSCTX_INPROC_SERVER, nullptr,
-                           reinterpret_cast<void**>(&client));
-        if (FAILED(hr)) { LogHr(L"Activate(IAudioClient)", hr); break; }
-
-        WAVEFORMATEX wf = PcmOutputFormat();
-
-        WAVEFORMATEX* closest = nullptr;
-        const AUDCLNT_SHAREMODE shareMode = exclusive
-                                                 ? AUDCLNT_SHAREMODE_EXCLUSIVE
-                                                 : AUDCLNT_SHAREMODE_SHARED;
-        hr = client->IsFormatSupported(shareMode, &wf, &closest);
-        if (exclusive) {
-            if (closest) CoTaskMemFree(closest);
-            if (hr != S_OK) {
-                LogHr(L"IAudioClient::IsFormatSupported(exclusive)", hr);
-                break;
-            }
-            fwprintf(stderr,
-                     L"[audio] exclusive exact format accepted: %u Hz / "
-                     L"%u-bit PCM / %u ch\n",
-                     wf.nSamplesPerSec, wf.wBitsPerSample, wf.nChannels);
-
-            // GetMixFormat describes the Shared engine's preferred format,
-            // not this Exclusive stream.  Log it explicitly so diagnostics
-            // cannot mistake a 32-bit Shared mix format for a conversion in
-            // the active 16-bit Exclusive path.
-            WAVEFORMATEX* sharedMix = nullptr;
-            const HRESULT mixHr = client->GetMixFormat(&sharedMix);
-            if (SUCCEEDED(mixHr) && sharedMix) {
-                const wchar_t* subtype = L"unknown";
-                WORD validBits = sharedMix->wBitsPerSample;
-                if (sharedMix->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
-                    subtype = L"float";
-                } else if (sharedMix->wFormatTag == WAVE_FORMAT_PCM) {
-                    subtype = L"PCM";
-                } else if (sharedMix->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
-                           sharedMix->cbSize >=
-                               sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
-                    const auto* extensible = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(
-                        sharedMix);
-                    validBits = extensible->Samples.wValidBitsPerSample;
-                    if (extensible->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) {
-                        subtype = L"float";
-                    } else if (extensible->SubFormat == KSDATAFORMAT_SUBTYPE_PCM) {
-                        subtype = L"PCM";
-                    }
-                }
-                fwprintf(stderr,
-                         L"[audio] endpoint Shared mix format (not used by "
-                         L"Exclusive): %u Hz / %u-bit %s (%u valid) / %u ch\n",
-                         sharedMix->nSamplesPerSec, sharedMix->wBitsPerSample,
-                         subtype, validBits, sharedMix->nChannels);
-                CoTaskMemFree(sharedMix);
-            } else {
-                LogHr(L"IAudioClient::GetMixFormat(exclusive diagnostic)",
-                      mixHr);
-            }
-        } else if (FAILED(hr)) {
-            // Shared mode can still accept the requested PCM format through
-            // the Windows Audio Engine's built-in converter.
-            if (closest) CoTaskMemFree(closest);
-            LogHr(L"IAudioClient::IsFormatSupported(shared)", hr);
-            break;
-        } else if (closest) {
-            CoTaskMemFree(closest);
-        }
-
-        bool usingAudioClient3 = false;
-        UINT32 selectedSharedPeriodFrames = 0;
-        if (!exclusive) {
-            AudioClient3Support support{};
-            hr = client->QueryInterface(IID_PPV_ARGS(&client3));
-            if (SUCCEEDED(hr)) {
-                AudioClientProperties properties{};
-                properties.cbSize = sizeof(properties);
-                properties.eCategory = AudioCategory_Media;
-                hr = client3->SetClientProperties(&properties);
-            }
-            if (SUCCEEDED(hr)) {
-                hr = client3->GetSharedModeEnginePeriod(
-                    &wf, &support.defaultFrames, &support.fundamentalFrames,
-                    &support.minimumFrames, &support.maximumFrames);
-                support.supported = SUCCEEDED(hr);
-            }
-            if (support.supported) {
-                UINT32 requestedFrames = g_settings.wasapiSharedPeriodFrames;
-                if (requestedFrames == 0) {
-                    requestedFrames = static_cast<UINT32>(
-                        g_settings.wasapiBufferMs * kSampleRate / 1000);
-                }
-                selectedSharedPeriodFrames =
-                    ClosestSupportedSharedPeriod(requestedFrames, support);
-                hr = client3->InitializeSharedAudioStream(
-                    AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                    selectedSharedPeriodFrames, &wf, nullptr);
-                if (SUCCEEDED(hr)) {
-                    usingAudioClient3 = true;
-                    fwprintf(stderr,
-                             L"[audio] IAudioClient3 shared period: %u frames "
-                             L"(%.2f ms)\n",
-                             selectedSharedPeriodFrames,
-                             1000.0 * selectedSharedPeriodFrames / kSampleRate);
-                } else {
-                    LogHr(L"IAudioClient3::InitializeSharedAudioStream", hr);
-                }
-            } else {
-                fwprintf(stderr,
-                         L"[audio] IAudioClient3 unavailable for this format; "
-                         L"using classic Shared mode.\n");
-            }
-
-            if (!usingAudioClient3) {
-                // A failed Initialize call can leave an audio client unusable.
-                // Reactivate it before falling back to classic Shared mode.
-                SafeRelease(client3);
-                SafeRelease(client);
-                hr = dev->Activate(__uuidof(IAudioClient), CLSCTX_INPROC_SERVER,
-                                   nullptr,
-                                   reinterpret_cast<void**>(&client));
-                if (FAILED(hr)) {
-                    LogHr(L"Activate(IAudioClient fallback)", hr);
-                    break;
-                }
-                const REFERENCE_TIME hns =
-                    static_cast<REFERENCE_TIME>(g_settings.wasapiBufferMs) *
-                    10'000;
-                hr = client->Initialize(
-                    AUDCLNT_SHAREMODE_SHARED,
-                    AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
-                        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
-                        AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                    hns, 0, &wf, nullptr);
-                if (FAILED(hr)) {
-                    LogHr(L"IAudioClient::Initialize(shared fallback/event)",
-                          hr);
-                    break;
-                }
-                fwprintf(stderr,
-                         L"[audio] classic WASAPI Shared fallback active.\n");
-            }
+        if (state->filteredQueuedFrames < 0.0) {
+            state->filteredQueuedFrames = queuedFrames;
         } else {
-            // The diagnostic build intentionally retains the established
-            // event-driven Exclusive contract: its event period equals the
-            // requested client buffer duration.  Record the endpoint periods
-            // for comparison only; changing either parameter here would make
-            // this test a different output path.
-            REFERENCE_TIME defaultPeriod = 0;
-            REFERENCE_TIME minimumPeriod = 0;
-            const HRESULT periodHr = client->GetDevicePeriod(
-                &defaultPeriod, &minimumPeriod);
-            if (FAILED(periodHr)) {
-                LogHr(L"IAudioClient::GetDevicePeriod(exclusive)", periodHr);
-            } else {
-                fwprintf(stderr,
-                         L"[audio] exclusive endpoint period: default %.2f ms, "
-                         L"minimum %.2f ms\n",
-                         static_cast<double>(defaultPeriod) / 10'000.0,
-                         static_cast<double>(minimumPeriod) / 10'000.0);
-            }
-            REFERENCE_TIME hns = static_cast<REFERENCE_TIME>(
-                g_settings.wasapiBufferMs) * 10'000;
-            fwprintf(stderr,
-                     L"[audio] exclusive request: buffer %.2f ms, event "
-                     L"period %.2f ms (same-duration event mode)\n",
-                     static_cast<double>(hns) / 10'000.0,
-                     static_cast<double>(hns) / 10'000.0);
-            hr = client->Initialize(
-                AUDCLNT_SHAREMODE_EXCLUSIVE,
-                AUDCLNT_STREAMFLAGS_EVENTCALLBACK, hns, hns, &wf, nullptr);
-            if (hr == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
-                // Many exclusive endpoints require a period aligned to the
-                // device's native packet size. Windows exposes the aligned
-                // frame count after the first Initialize attempt; retry with
-                // that exact duration instead of treating the mode as broken.
-                UINT32 alignedFrames = 0;
-                const HRESULT alignHr = client->GetBufferSize(&alignedFrames);
-                if (SUCCEEDED(alignHr) && alignedFrames > 0) {
-                    hns = static_cast<REFERENCE_TIME>(
-                        (10'000'000.0 * alignedFrames / kSampleRate) + 0.5);
-                    fwprintf(stderr,
-                             L"[audio] WASAPI exclusive period aligned: "
-                             L"%u frames (%.2f ms)\n",
-                             alignedFrames,
-                             1000.0 * alignedFrames / kSampleRate);
-                    hr = client->Initialize(
-                        AUDCLNT_SHAREMODE_EXCLUSIVE,
-                        AUDCLNT_STREAMFLAGS_EVENTCALLBACK, hns, hns, &wf,
-                        nullptr);
-                } else {
-                    LogHr(L"WASAPI exclusive GetBufferSize(alignment)",
-                          alignHr);
-                }
-            }
-            if (FAILED(hr)) {
-                LogHr(L"IAudioClient::Initialize(exclusive/event)", hr);
-                break;
-            }
+            state->filteredQueuedFrames +=
+                (queuedFrames - state->filteredQueuedFrames) * 0.02;
         }
 
-        eventHandle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!eventHandle) {
-            fwprintf(stderr, L"Create audio wake handle failed.\n");
-            break;
-        }
-
-        hr = client->SetEventHandle(eventHandle);
-        if (FAILED(hr)) { LogHr(L"SetEventHandle", hr); break; }
-
-        hr = client->GetService(IID_PPV_ARGS(&render));
-        if (FAILED(hr)) { LogHr(L"GetService(IAudioRenderClient)", hr); break; }
-
-        UINT64 exclusiveClockFrequency = 0;
-        if (exclusive) {
-            const HRESULT clockHr = client->GetService(IID_PPV_ARGS(&clock));
-            if (SUCCEEDED(clockHr) && clock) {
-                const HRESULT frequencyHr = clock->GetFrequency(
-                    &exclusiveClockFrequency);
-                if (FAILED(frequencyHr)) {
-                    LogHr(L"IAudioClock::GetFrequency(exclusive)",
-                          frequencyHr);
-                    SafeRelease(clock);
-                    exclusiveClockFrequency = 0;
-                } else {
-                    fwprintf(stderr,
-                             L"[audio][exclusive] endpoint clock frequency: "
-                             L"%llu ticks/sec\n",
-                             static_cast<unsigned long long>(
-                                 exclusiveClockFrequency));
+        if (g_settings.driftCorrection == DriftCorrectionMode::Auto &&
+            !state->autoCorrectionActive && state->audioStarted &&
+            AudioTrackingActive()) {
+            const double deviation =
+                std::abs(state->filteredQueuedFrames - targetFrames);
+            const uint64_t nowMs = GetTickCount64();
+            if (deviation >= kAutoCorrectionEngageDeviationFrames) {
+                if (!state->autoCandidateSinceMs) {
+                    state->autoCandidateSinceMs = nowMs;
+                } else if (
+                    nowMs >= state->autoCandidateSinceMs &&
+                    nowMs - state->autoCandidateSinceMs >=
+                        kAutoCorrectionEngageHoldMs &&
+                    queuedFrames >= static_cast<double>(frames)) {
+                    state->autoCorrectionActive = true;
+                    state->driftResampler.Reset();
+                    state->correctionPpm = 0.0;
+                    fwprintf(
+                        stderr,
+                        L"[audio] auto clock-drift correction engaged "
+                        L"after sustained queue drift.\n");
                 }
             } else {
-                LogHr(L"GetService(IAudioClock exclusive)", clockHr);
+                state->autoCandidateSinceMs = 0;
             }
         }
 
-        UINT32 bufferFrames = 0;
-        hr = client->GetBufferSize(&bufferFrames);
-        if (FAILED(hr)) { LogHr(L"GetBufferSize", hr); break; }
-        g_audioActualBufferFrames.store(bufferFrames,
-                                        std::memory_order_release);
-
-        fwprintf(stderr, L"[audio] WASAPI %s buffer: %u frames (%.2f ms)\n",
-                  exclusive ? L"exclusive" : L"shared", bufferFrames,
-                  1000.0 * bufferFrames / kSampleRate);
-        if (exclusive || !usingAudioClient3) {
-            fwprintf(stderr, L"[audio] requested WASAPI buffer: %d ms\n",
-                     g_settings.wasapiBufferMs);
-        }
-
-        BYTE* p = nullptr;
-        hr = render->GetBuffer(bufferFrames, &p);
-        if (FAILED(hr)) { LogHr(L"GetBuffer(prime)", hr); break; }
-        memset(p, 0, static_cast<size_t>(bufferFrames) * wf.nBlockAlign);
-        render->ReleaseBuffer(bufferFrames, 0);
-
-        if (reinitializingEndpoint) {
-            // Capture remains live while a new WASAPI client is constructed.
-            // Drop everything accumulated during that construction immediately
-            // before Start, otherwise every switch permanently adds that setup
-            // time to the live audio delay.
-            g_ring.clear();
+        const bool correctionActive =
+            g_settings.driftCorrection == DriftCorrectionMode::Resample ||
+            state->autoCorrectionActive;
+        g_audioResamplerActive.store(
+            correctionActive, std::memory_order_release);
+        if (correctionActive) {
+            const double requestedPpm = std::clamp(
+                (state->filteredQueuedFrames - targetFrames) * 2.0,
+                -1000.0, 1000.0);
+            state->correctionPpm +=
+                (requestedPpm - state->correctionPpm) * 0.02;
+            const double ratio =
+                1.0 + state->correctionPpm / 1'000'000.0;
+            if (state->audioStarted) {
+                got = state->driftResampler.Render(output, frames, ratio);
+            }
+            g_audioResamplePpm.store(
+                static_cast<int>(std::lround(state->correctionPpm)),
+                std::memory_order_release);
+            g_audioResampledOutputFrames.fetch_add(
+                got, std::memory_order_relaxed);
+        } else {
+            if (state->audioStarted) got = g_ring.Pop(output, frames);
+            g_audioResamplePpm.store(0, std::memory_order_release);
             g_audioResamplerFrames.store(0, std::memory_order_release);
-            g_audioMinimumPreRenderFrames.store(UINT32_MAX,
-                                                std::memory_order_release);
-            fwprintf(stderr,
-                     L"[audio] endpoint switch: discarded setup backlog "
-                     L"immediately before Start.\n");
         }
-
-        hr = client->Start();
-        if (FAILED(hr)) { LogHr(L"IAudioClient::Start", hr); break; }
-
-        fwprintf(stderr, L"[audio] WASAPI %s render running.\n",
-                  exclusive ? L"exclusive" : L"shared");
-        fwprintf(stderr, L"[audio] clock-drift correction: %s\n",
-                 g_settings.driftCorrection == DriftCorrectionMode::Resample
-                     ? L"on (16-tap windowed-sinc, +/-1000 ppm)"
-                     : g_settings.driftCorrection == DriftCorrectionMode::Auto
-                           ? L"auto (observe first; latch on when sustained drift is detected)"
-                           : L"off (unaltered PCM samples)");
-
-        std::vector<int16_t> temp(static_cast<size_t>(bufferFrames) * kChannels);
-        SincDriftResampler driftResampler;
-        double filteredQueuedFrames = -1.0;
-        double correctionPpm = 0.0;
-        uint64_t autoCandidateSinceMs = 0;
-        bool autoCorrectionActive =
-            g_settings.driftCorrection == DriftCorrectionMode::Resample;
-        g_audioResamplerActive.store(autoCorrectionActive,
-                                     std::memory_order_release);
+    } else {
+        if (!state->audioStarted &&
+            g_ring.AvailableFrames() >= state->queueTargetFrames) {
+            state->audioStarted = true;
+        }
+        if (state->audioStarted) got = g_ring.Pop(output, frames);
         g_audioResamplePpm.store(0, std::memory_order_release);
-        const double initialVolumeGain = TargetAudioVolumeGain();
-        llcv::audio::StereoGain currentMix{
-            initialVolumeGain * TargetAudioChannelGain(0),
-            initialVolumeGain * TargetAudioChannelGain(1)};
-        bool audioStarted = false;
-        const UINT32 queueTargetFrames = static_cast<UINT32>(
-            g_settings.pcmQueueTargetMs * kSampleRate / 1000);
-        g_audioQueueTargetFrames.store(queueTargetFrames,
-                                       std::memory_order_release);
-
-        // This telemetry is exclusive-mode diagnostic only.  It has no
-        // bearing on the shared/ASIO hot paths and avoids per-callback text
-        // output; one compact summary is emitted per second instead.
-        uint64_t exclusiveWindowStartMs = GetTickCount64();
-        uint64_t exclusiveLastEventMs = 0;
-        uint64_t exclusiveLastClockPosition = 0;
-        uint64_t exclusiveEventCount = 0;
-        uint64_t exclusiveEventIntervalTotalMs = 0;
-        uint64_t exclusiveEventIntervalMaxMs = 0;
-        uint64_t exclusiveLateEventCount = 0;
-        uint64_t exclusiveWaitTimeoutCount = 0;
-        uint64_t exclusiveClockIntervalCount = 0;
-        uint64_t exclusiveClockIntervalTotalTicks = 0;
-        uint64_t exclusiveClockIntervalMaxTicks = 0;
-        uint64_t exclusiveLastLateLogMs = 0;
-        uint64_t exclusiveLastTimeoutLogMs = 0;
-        uint64_t exclusiveLastStarvationLogMs = 0;
-        uint64_t exclusiveRequestedFrames = 0;
-        uint64_t exclusiveWrittenFrames = 0;
-        uint64_t exclusiveMissingFrames = 0;
-        UINT32 exclusiveMinPadding = UINT32_MAX;
-        UINT32 exclusiveMaxPadding = 0;
-        const uint64_t exclusiveLateThresholdMs = static_cast<uint64_t>(
-            std::ceil(2000.0 * bufferFrames / kSampleRate)) + 2;
-
-        auto emitExclusiveDiagnostics = [&](uint64_t nowMs) {
-            if (!exclusive || nowMs < exclusiveWindowStartMs + 1000) return;
-            const double averageEventMs = exclusiveEventCount > 1
-                ? static_cast<double>(exclusiveEventIntervalTotalMs) /
-                      static_cast<double>(exclusiveEventCount - 1)
-                : 0.0;
-            const double averageClockMs = exclusiveClockIntervalCount &&
-                    exclusiveClockFrequency
-                ? 1000.0 * static_cast<double>(
-                      exclusiveClockIntervalTotalTicks) /
-                      static_cast<double>(exclusiveClockIntervalCount) /
-                      static_cast<double>(exclusiveClockFrequency)
-                : 0.0;
-            const double maximumClockMs = exclusiveClockFrequency
-                ? 1000.0 * static_cast<double>(exclusiveClockIntervalMaxTicks) /
-                      static_cast<double>(exclusiveClockFrequency)
-                : 0.0;
-            const UINT32 queueFrames = static_cast<UINT32>((std::min)(
-                g_audioRingFrames.load(std::memory_order_acquire) +
-                    driftResampler.bufferedFrames(),
-                static_cast<size_t>(UINT32_MAX)));
-            fwprintf(stderr,
-                     L"[audio][exclusive] 1s: %s=%llu, interval avg/max "
-                     L"%.2f/%llu ms, late=%llu (threshold %llu ms), "
-                     L"timeout=%llu, padding min/max=%u/%u frames, "
-                     L"write=%llu/%llu frames, missing=%llu, queue=%u frames "
-                     L"(target %u), device-clock avg/max=%.2f/%.2f ms, "
-                     L"resampler=%s %+d ppm\n",
-                     L"event",
-                     static_cast<unsigned long long>(exclusiveEventCount),
-                     averageEventMs,
-                     static_cast<unsigned long long>(exclusiveEventIntervalMaxMs),
-                     static_cast<unsigned long long>(exclusiveLateEventCount),
-                     static_cast<unsigned long long>(exclusiveLateThresholdMs),
-                     static_cast<unsigned long long>(exclusiveWaitTimeoutCount),
-                     exclusiveMinPadding == UINT32_MAX ? 0 : exclusiveMinPadding,
-                     exclusiveMaxPadding,
-                     static_cast<unsigned long long>(exclusiveWrittenFrames),
-                     static_cast<unsigned long long>(exclusiveRequestedFrames),
-                     static_cast<unsigned long long>(exclusiveMissingFrames),
-                     queueFrames, queueTargetFrames,
-                     averageClockMs, maximumClockMs,
-                     AudioResamplerActive() ? L"on" : L"off",
-                     g_audioResamplePpm.load(std::memory_order_acquire));
-            exclusiveWindowStartMs = nowMs;
-            exclusiveEventCount = 0;
-            exclusiveEventIntervalTotalMs = 0;
-            exclusiveEventIntervalMaxMs = 0;
-            exclusiveLateEventCount = 0;
-            exclusiveWaitTimeoutCount = 0;
-            exclusiveClockIntervalCount = 0;
-            exclusiveClockIntervalTotalTicks = 0;
-            exclusiveClockIntervalMaxTicks = 0;
-            exclusiveRequestedFrames = 0;
-            exclusiveWrittenFrames = 0;
-            exclusiveMissingFrames = 0;
-            exclusiveMinPadding = UINT32_MAX;
-            exclusiveMaxPadding = 0;
-        };
-        while (g_running.load()) {
-            if (followDefault && notificationRegistered &&
-                g_defaultAudioEndpointGeneration.load(
-                    std::memory_order_acquire) !=
-                    watchedDefaultGeneration) {
-                restartForDefaultChange = true;
-                fwprintf(stderr,
-                         L"[audio] Windows default output changed; "
-                         L"reinitializing WASAPI only.\n");
-                break;
-            }
-            const DWORD waitResult = WaitForSingleObject(eventHandle, 100);
-            const uint64_t eventNowMs = GetTickCount64();
-            if (waitResult != WAIT_OBJECT_0) {
-                if (exclusive && waitResult == WAIT_TIMEOUT) {
-                    ++exclusiveWaitTimeoutCount;
-                    if (!exclusiveLastTimeoutLogMs ||
-                        eventNowMs >= exclusiveLastTimeoutLogMs + 1000) {
-                    fwprintf(stderr,
-                             L"[audio][exclusive] event wait timed out "
-                             L"after 100 ms; renderer did not receive a "
-                             L"buffer-ready signal.\n");
-                        exclusiveLastTimeoutLogMs = eventNowMs;
-                    }
-                    emitExclusiveDiagnostics(eventNowMs);
-                }
-                continue;
-            }
-            if (exclusive) {
-                if (clock && exclusiveClockFrequency) {
-                    UINT64 clockPosition = 0;
-                    if (SUCCEEDED(clock->GetPosition(&clockPosition, nullptr))) {
-                        if (exclusiveLastClockPosition &&
-                            clockPosition >= exclusiveLastClockPosition) {
-                            const UINT64 clockDelta = clockPosition -
-                                exclusiveLastClockPosition;
-                            ++exclusiveClockIntervalCount;
-                            exclusiveClockIntervalTotalTicks += clockDelta;
-                            exclusiveClockIntervalMaxTicks = (std::max)(
-                                exclusiveClockIntervalMaxTicks, clockDelta);
-                        }
-                        exclusiveLastClockPosition = clockPosition;
-                    }
-                }
-                if (exclusiveLastEventMs) {
-                    const uint64_t intervalMs = eventNowMs - exclusiveLastEventMs;
-                    exclusiveEventIntervalTotalMs += intervalMs;
-                    exclusiveEventIntervalMaxMs = (std::max)(
-                        exclusiveEventIntervalMaxMs, intervalMs);
-                    if (intervalMs >= exclusiveLateThresholdMs) {
-                        ++exclusiveLateEventCount;
-                        if (!exclusiveLastLateLogMs ||
-                            eventNowMs >= exclusiveLastLateLogMs + 1000) {
-                            fwprintf(stderr,
-                                     L"[audio][exclusive] late event: %llu ms "
-                                     L"since previous signal (threshold %llu ms).\n",
-                                     static_cast<unsigned long long>(intervalMs),
-                                     static_cast<unsigned long long>(
-                                         exclusiveLateThresholdMs));
-                            exclusiveLastLateLogMs = eventNowMs;
-                        }
-                    }
-                }
-                exclusiveLastEventMs = eventNowMs;
-                ++exclusiveEventCount;
-            }
-
-            UINT32 padding = 0;
-            if (FAILED(client->GetCurrentPadding(&padding))) continue;
-            if (exclusive) {
-                exclusiveMinPadding = (std::min)(exclusiveMinPadding, padding);
-                exclusiveMaxPadding = (std::max)(exclusiveMaxPadding, padding);
-            }
-            g_audioWasapiPaddingFrames.store(padding,
-                                             std::memory_order_release);
-
-            const UINT32 writable = bufferFrames > padding ? bufferFrames - padding : 0;
-            if (!writable) continue;
-
-            BYTE* out = nullptr;
-            hr = render->GetBuffer(writable, &out);
-            if (FAILED(hr)) continue;
-
-            size_t got = 0;
-            const size_t availableBeforeRender =
-                g_ring.availableFrames() + driftResampler.bufferedFrames();
-            if (audioStarted && AudioTrackingActive()) {
-                UINT32 observed = static_cast<UINT32>((std::min)(
-                    availableBeforeRender,
-                    static_cast<size_t>(UINT32_MAX)));
-                UINT32 previousMinimum = g_audioMinimumPreRenderFrames.load(
-                    std::memory_order_relaxed);
-                while (observed < previousMinimum &&
-                       !g_audioMinimumPreRenderFrames.compare_exchange_weak(
-                           previousMinimum, observed,
-                           std::memory_order_release,
-                           std::memory_order_relaxed)) {}
-            }
-            const bool correctionConfigured =
-                g_settings.driftCorrection != DriftCorrectionMode::Off;
-            if (correctionConfigured) {
-                const double targetFrames =
-                    static_cast<double>(queueTargetFrames);
-                const double queuedFrames = static_cast<double>(
-                    g_audioRingFrames.load(std::memory_order_acquire) +
-                    static_cast<UINT32>((std::min)(
-                        driftResampler.bufferedFrames(),
-                        static_cast<size_t>(UINT32_MAX))));
-                if (!audioStarted && queuedFrames >= targetFrames) {
-                    audioStarted = true;
-                }
-                if (filteredQueuedFrames < 0.0) {
-                    filteredQueuedFrames = queuedFrames;
-                } else {
-                    filteredQueuedFrames +=
-                        (queuedFrames - filteredQueuedFrames) * 0.02;
-                }
-
-                if (g_settings.driftCorrection == DriftCorrectionMode::Auto &&
-                    !autoCorrectionActive && audioStarted &&
-                    AudioTrackingActive()) {
-                    const double deviation =
-                        std::abs(filteredQueuedFrames - targetFrames);
-                    const uint64_t nowMs = GetTickCount64();
-                    if (deviation >= kAutoCorrectionEngageDeviationFrames) {
-                        if (!autoCandidateSinceMs) {
-                            autoCandidateSinceMs = nowMs;
-                        } else if (nowMs >= autoCandidateSinceMs &&
-                                   nowMs - autoCandidateSinceMs >=
-                                       kAutoCorrectionEngageHoldMs &&
-                                   queuedFrames >=
-                                       static_cast<double>(writable)) {
-                            // SincDriftResampler starts with a short history
-                            // copied from the ring, so activation does not add
-                            // a queue-sized delay. Once active it is latched
-                            // until this WASAPI session is restarted.
-                            autoCorrectionActive = true;
-                            driftResampler.reset();
-                            correctionPpm = 0.0;
-                            fwprintf(stderr,
-                                     L"[audio] auto clock-drift correction "
-                                     L"engaged after sustained queue drift.\n");
-                        }
-                    } else {
-                        autoCandidateSinceMs = 0;
-                    }
-                }
-
-                const bool correctionActive =
-                    g_settings.driftCorrection == DriftCorrectionMode::Resample ||
-                    autoCorrectionActive;
-                g_audioResamplerActive.store(correctionActive,
-                                             std::memory_order_release);
-                if (correctionActive) {
-                    const double requestedPpm = std::clamp(
-                        (filteredQueuedFrames - targetFrames) * 2.0,
-                        -1000.0, 1000.0);
-                    correctionPpm += (requestedPpm - correctionPpm) * 0.02;
-                    const double ratio = 1.0 + correctionPpm / 1'000'000.0;
-                    if (audioStarted) {
-                        got = driftResampler.render(temp.data(), writable, ratio);
-                    }
-                    g_audioResamplePpm.store(
-                        static_cast<int>(std::lround(correctionPpm)),
-                        std::memory_order_release);
-                    g_audioResampledOutputFrames.fetch_add(
-                        got, std::memory_order_relaxed);
-                } else {
-                    if (audioStarted) {
-                        got = g_ring.pop(temp.data(), writable);
-                    }
-                    g_audioResamplePpm.store(0, std::memory_order_release);
-                    g_audioResamplerFrames.store(0, std::memory_order_release);
-                }
-            } else {
-                if (!audioStarted &&
-                    g_ring.availableFrames() >= queueTargetFrames) {
-                    audioStarted = true;
-                }
-                if (audioStarted) {
-                    got = g_ring.pop(temp.data(), writable);
-                }
-                g_audioResamplePpm.store(0, std::memory_order_release);
-                g_audioResamplerFrames.store(0, std::memory_order_release);
-                g_audioResamplerActive.store(false, std::memory_order_release);
-            }
-            const double targetVolumeGain = TargetAudioVolumeGain();
-            // Meters are deliberately dormant when the audio OSD is hidden.
-            // The default 100% path remains a direct ring-buffer-to-WASAPI
-            // copy, matching the previous low-overhead implementation.
-            const bool measurePeaks =
-                g_audioOsdVisible.load(std::memory_order_acquire);
-            const llcv::audio::MixMetrics mix =
-                llcv::audio::ProcessStereoPcm(
-                    temp.data(), got, currentMix,
-                    {targetVolumeGain * TargetAudioChannelGain(0),
-                     targetVolumeGain * TargetAudioChannelGain(1)},
-                    measurePeaks);
-            if (measurePeaks) {
-                PublishAudioPeak(g_audioPeakLeft, mix.peakLeft);
-                PublishAudioPeak(g_audioPeakRight, mix.peakRight);
-            }
-            if (mix.clipped) {
-                g_audioClipCount.fetch_add(1, std::memory_order_relaxed);
-                g_audioClipUntilMs.store(GetTickCount64() + 1500,
-                                         std::memory_order_release);
-            }
-            if (got) memcpy(out, temp.data(), got * wf.nBlockAlign);
-            if (exclusive) {
-                exclusiveRequestedFrames += writable;
-                exclusiveWrittenFrames += got;
-            }
-            if (got < writable) {
-                memset(out + got * wf.nBlockAlign, 0,
-                       (writable - static_cast<UINT32>(got)) * wf.nBlockAlign);
-                if (audioStarted && AudioTrackingActive()) {
-                    const uint64_t nowMs = GetTickCount64();
-                    const UINT32 missingFrames =
-                        writable - static_cast<UINT32>(got);
-                    if (exclusive) {
-                        exclusiveMissingFrames += missingFrames;
-                        if (!exclusiveLastStarvationLogMs ||
-                            nowMs >= exclusiveLastStarvationLogMs + 1000) {
-                            fwprintf(stderr,
-                                     L"[audio][exclusive] source starvation: "
-                                     L"needed=%u, received=%zu, missing=%u frames; "
-                                     L"queue-before=%zu frames.\n",
-                                     writable, got, missingFrames,
-                                     availableBeforeRender);
-                            exclusiveLastStarvationLogMs = nowMs;
-                        }
-                    }
-                    AudioErrorCause cause = AudioErrorCause::PcmDepletion;
-                    g_underruns++;
-                    g_audioUnderrunFrames.fetch_add(
-                        missingFrames,
-                        std::memory_order_relaxed);
-                    g_audioLastUnderrunMs.store(nowMs,
-                                                std::memory_order_release);
-                    if (AudioResamplerActive() &&
-                        availableBeforeRender >= writable) {
-                        // PCM existed for this render request, but the sinc
-                        // filter could not produce every output frame (usually
-                        // insufficient look-ahead at the lowest queue target).
-                        cause = AudioErrorCause::Resampler;
-                        g_audioResamplerUnderruns.fetch_add(
-                            1, std::memory_order_relaxed);
-                    } else {
-                        const uint64_t callbackMs =
-                            g_audioLastCaptureCallbackMs.load(
-                                std::memory_order_acquire);
-                        const UINT32 packetFrames =
-                            g_audioCapturePacketFrames.load(
-                                std::memory_order_acquire);
-                        const uint64_t lateThresholdMs = packetFrames
-                            ? 5 + (1000ull * packetFrames / kSampleRate)
-                            : 15;
-                        const uint64_t callbackNowMs = GetTickCount64();
-                        if (callbackMs &&
-                            callbackNowMs > callbackMs + lateThresholdMs) {
-                            cause = AudioErrorCause::InputLate;
-                            g_audioLatePacketUnderruns.fetch_add(
-                                1, std::memory_order_relaxed);
-                        }
-                    }
-                    RecordAudioErrorEvent(nowMs, missingFrames,
-                                          AudioErrorKind::Underrun, cause);
-                }
-            }
-            render->ReleaseBuffer(writable, 0);
-            emitExclusiveDiagnostics(eventNowMs);
-        }
-
-        client->Stop();
-    } while (false);
-
-    if (eventHandle) CloseHandle(eventHandle);
-    SafeRelease(clock);
-    SafeRelease(render);
-    SafeRelease(client3);
-    SafeRelease(client);
-    SafeRelease(dev);
-    if (en && notificationRegistered && endpointNotification) {
-        en->UnregisterEndpointNotificationCallback(endpointNotification);
+        g_audioResamplerFrames.store(0, std::memory_order_release);
+        g_audioResamplerActive.store(false, std::memory_order_release);
     }
-    if (endpointNotification) endpointNotification->Release();
-    SafeRelease(en);
-    if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
+
+    const double targetVolumeGain = TargetAudioVolumeGain();
+    const bool measurePeaks =
+        g_audioOsdVisible.load(std::memory_order_acquire);
+    const llcv::audio::MixMetrics mix = llcv::audio::ProcessStereoPcm(
+        output, got, state->currentMix,
+        {targetVolumeGain * TargetAudioChannelGain(0),
+         targetVolumeGain * TargetAudioChannelGain(1)},
+        measurePeaks);
+    if (measurePeaks) {
+        PublishAudioPeak(g_audioPeakLeft, mix.peakLeft);
+        PublishAudioPeak(g_audioPeakRight, mix.peakRight);
+    }
+    if (mix.clipped) {
+        g_audioClipCount.fetch_add(1, std::memory_order_relaxed);
+        g_audioClipUntilMs.store(
+            GetTickCount64() + 1500, std::memory_order_release);
+    }
+
+    result.writtenFrames = got;
+    result.audioStarted = state->audioStarted;
+    result.trackingActive = AudioTrackingActive();
+    if (got < frames && state->audioStarted && result.trackingActive) {
+        const UINT32 missingFrames =
+            static_cast<UINT32>(frames - got);
+        const uint64_t nowMs = GetTickCount64();
+        AudioErrorCause cause = AudioErrorCause::PcmDepletion;
+        g_underruns.fetch_add(1, std::memory_order_relaxed);
+        g_audioUnderrunFrames.fetch_add(
+            missingFrames, std::memory_order_relaxed);
+        g_audioLastUnderrunMs.store(nowMs, std::memory_order_release);
+        if (AudioResamplerActive() &&
+            result.availableBeforeRender >= frames) {
+            cause = AudioErrorCause::Resampler;
+            g_audioResamplerUnderruns.fetch_add(
+                1, std::memory_order_relaxed);
+        } else {
+            const uint64_t callbackMs =
+                g_audioLastCaptureCallbackMs.load(std::memory_order_acquire);
+            const UINT32 packetFrames =
+                g_audioCapturePacketFrames.load(std::memory_order_acquire);
+            const uint64_t lateThresholdMs = packetFrames
+                ? 5 + (1000ull * packetFrames / kSampleRate) : 15;
+            if (callbackMs && nowMs > callbackMs + lateThresholdMs) {
+                cause = AudioErrorCause::InputLate;
+                g_audioLatePacketUnderruns.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+        }
+        RecordAudioErrorEvent(
+            nowMs, missingFrames, AudioErrorKind::Underrun, cause);
+    }
+
+    result.queuedFrames = static_cast<UINT32>((std::min)(
+        g_audioRingFrames.load(std::memory_order_acquire) +
+                state->driftResampler.BufferedFrames(),
+        static_cast<size_t>(UINT32_MAX)));
+    result.queueTargetFrames = state->queueTargetFrames;
+    result.resamplerActive = AudioResamplerActive();
+    result.resamplePpm =
+        g_audioResamplePpm.load(std::memory_order_acquire);
+    return result;
+}
+
+static void OnWasapiEndpointChanged(
+    void*, const std::wstring& name, bool followsDefault) {
+    SetActiveAudioOutputName(
+        name + (followsDefault ? L" (기본 추적)" : L""));
+}
+
+static void OnWasapiBufferChanged(void*, UINT32 frames) {
+    g_audioActualBufferFrames.store(frames, std::memory_order_release);
+}
+
+static void OnWasapiPaddingChanged(void*, UINT32 frames) {
+    g_audioWasapiPaddingFrames.store(frames, std::memory_order_release);
+}
+
+static void BeforeWasapiEndpointRestart(void*) {
+    g_ring.Clear();
+    g_audioResamplerFrames.store(0, std::memory_order_release);
+    g_audioMinimumPreRenderFrames.store(
+        UINT32_MAX, std::memory_order_release);
+}
+
+static void LogWasapiHresult(
+    void*, const wchar_t* operation, HRESULT result) {
+    LogHr(operation, result);
+}
+
+static bool AudioRenderThreadWasapi(
+    AudioMode mode, bool reinitializingEndpoint) {
+    WasapiRenderState state{};
+    state.autoCorrectionActive =
+        g_settings.driftCorrection == DriftCorrectionMode::Resample;
+    state.queueTargetFrames = static_cast<UINT32>(
+        g_settings.pcmQueueTargetMs * kSampleRate / 1000);
+    const double initialVolumeGain = TargetAudioVolumeGain();
+    state.currentMix = {
+        initialVolumeGain * TargetAudioChannelGain(0),
+        initialVolumeGain * TargetAudioChannelGain(1)};
+    g_audioQueueTargetFrames.store(
+        state.queueTargetFrames, std::memory_order_release);
+    g_audioResamplerActive.store(
+        state.autoCorrectionActive, std::memory_order_release);
+    g_audioResamplePpm.store(0, std::memory_order_release);
+
+    const wchar_t* correctionDescription =
+        g_settings.driftCorrection == DriftCorrectionMode::Resample
+        ? L"on (16-tap windowed-sinc, +/-1000 ppm)"
+        : g_settings.driftCorrection == DriftCorrectionMode::Auto
+            ? L"auto (observe first; latch on when sustained drift is detected)"
+            : L"off (unaltered PCM samples)";
+    llcv::wasapi::Configuration configuration{};
+    configuration.mode = mode == AudioMode::WasapiExclusive
+        ? llcv::wasapi::Mode::Exclusive : llcv::wasapi::Mode::Shared;
+    configuration.endpointId = g_settings.audioOutputDeviceId;
+    configuration.bufferMilliseconds = g_settings.wasapiBufferMs;
+    configuration.sharedPeriodFrames =
+        g_settings.wasapiSharedPeriodFrames;
+    configuration.reinitializingEndpoint = reinitializingEndpoint;
+    configuration.correctionDescription = correctionDescription;
+
+    llcv::wasapi::Host host{};
+    host.context = &state;
+    host.running = &g_running;
+    host.fill = &FillWasapiPcm;
+    host.endpointChanged = &OnWasapiEndpointChanged;
+    host.bufferChanged = &OnWasapiBufferChanged;
+    host.paddingChanged = &OnWasapiPaddingChanged;
+    host.beforeStart = &BeforeWasapiEndpointRestart;
+    host.logHresult = &LogWasapiHresult;
+    const bool restart = llcv::wasapi::Run(configuration, host);
+
     g_audioResamplerActive.store(false, std::memory_order_release);
     g_audioResamplePpm.store(0, std::memory_order_release);
     g_audioResamplerFrames.store(0, std::memory_order_release);
-    CoUninitialize();
-    if (followDefault && notificationRegistered &&
-        g_defaultAudioEndpointGeneration.load(std::memory_order_acquire) !=
-            watchedDefaultGeneration) {
-        restartForDefaultChange = true;
-    }
-    return restartForDefaultChange;
+    return restart;
 }
+
 
 static bool AudioRenderThreadAsio() {
     std::string driverName;
@@ -3970,7 +1520,7 @@ static bool AudioRenderThreadAsio() {
     // driver periods; the resampler retains this capacity across resets.
     AsioRenderState renderState;
     renderState.autoCorrectionActive = resamplerConfigured;
-    renderState.driftResampler.prepare(32768);
+    renderState.driftResampler.Prepare(32768);
     llcv::asio::Output output(driverName, g_videoHost, &FillAsioPcm,
                               &renderState);
     if (!output.Start()) {
@@ -4034,901 +1584,53 @@ static void AudioRenderThread() {
 // external player is involved. P010 uses the separate HDR10 prototype output.
 // -----------------------------------------------------------------------------
 
-class LatestNv12Sample {
-public:
-    LatestNv12Sample(size_t expectedBytes, HANDLE readyEvent)
-        : expectedBytes_(expectedBytes), readyEvent_(readyEvent) {}
-
-    ~LatestNv12Sample() {
-        if (latest_) latest_->Release();
-    }
-
-    void push(IMediaSample* sample) {
-        if (!sample || sample->GetActualDataLength() <= 0 ||
-            (expectedBytes_ != 0 && sample->GetActualDataLength() <
-                                      static_cast<long>(expectedBytes_))) {
-            return;
-        }
-        const int64_t arrivalUs =
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-        sample->AddRef();
-        IMediaSample* replaced = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            replaced = latest_;
-            latest_ = sample;
-            latestArrivalUs_ = arrivalUs;
-        }
-        if (replaced) {
-            replaced->Release();
-            if (OsdTrackingActive()) {
-                g_videoReplacedFrames.fetch_add(1,
-                                                std::memory_order_relaxed);
-            }
-        }
-        if (OsdTrackingActive()) {
-            g_videoCapturedFrames.fetch_add(1, std::memory_order_relaxed);
-        }
-        SetEvent(readyEvent_);
-    }
-
-    IMediaSample* takeLatest(int64_t& arrivalUs) {
-        std::lock_guard<std::mutex> lock(mu_);
-        IMediaSample* sample = latest_;
-        latest_ = nullptr;
-        if (!sample) return nullptr;
-        arrivalUs = latestArrivalUs_;
-        return sample;
-    }
-
-private:
-    std::mutex mu_;
-    IMediaSample* latest_ = nullptr;
-    size_t expectedBytes_ = 0;
-    HANDLE readyEvent_ = nullptr;
-    int64_t latestArrivalUs_ = 0;
-};
-
-class VideoSampleGrabberCB final : public ISampleGrabberCB {
-public:
-    explicit VideoSampleGrabberCB(LatestNv12Sample* sampleSlot)
-        : sampleSlot_(sampleSlot) {}
-
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
-        if (!ppv) return E_POINTER;
-        if (riid == IID_IUnknown || riid == __uuidof(ISampleGrabberCB)) {
-            *ppv = static_cast<ISampleGrabberCB*>(this);
-            AddRef();
-            return S_OK;
-        }
-        *ppv = nullptr;
-        return E_NOINTERFACE;
-    }
-    STDMETHODIMP_(ULONG) AddRef() override { return ++ref_; }
-    STDMETHODIMP_(ULONG) Release() override {
-        const ULONG value = --ref_;
-        if (!value) delete this;
-        return value;
-    }
-    STDMETHODIMP SampleCB(double, IMediaSample* sample) override {
-        if (!surfaceCapabilityProbed_.exchange(true,
-                                                std::memory_order_acq_rel)) {
-            IMediaSample2Config* surfaceConfig = nullptr;
-            IUnknown* surface = nullptr;
-            const HRESULT configHr = sample->QueryInterface(
-                IID_PPV_ARGS(&surfaceConfig));
-            const HRESULT surfaceHr = SUCCEEDED(configHr)
-                ? surfaceConfig->GetSurface(&surface) : configHr;
-            fwprintf(stderr,
-                     L"[video] DirectShow VRAM sample surface: %s "
-                     L"(interface 0x%08X, surface 0x%08X)\n",
-                     SUCCEEDED(surfaceHr) && surface ? L"available"
-                                                     : L"not available",
-                     static_cast<unsigned>(configHr),
-                     static_cast<unsigned>(surfaceHr));
-            SafeRelease(surface);
-            SafeRelease(surfaceConfig);
-        }
-        if (sampleSlot_) sampleSlot_->push(sample);
-        return S_OK;
-    }
-    STDMETHODIMP BufferCB(double, BYTE*, long) override { return E_NOTIMPL; }
-
-private:
-    std::atomic<ULONG> ref_{1};
-    std::atomic<bool> surfaceCapabilityProbed_{false};
-    LatestNv12Sample* sampleSlot_ = nullptr;
-};
-
-static void DeleteMediaType(AM_MEDIA_TYPE* mediaType) {
-    if (!mediaType) return;
-    FreeMediaType(*mediaType);
-    CoTaskMemFree(mediaType);
-}
-
 // Experimental compressed compatibility path. DirectShow still owns device
 // capture and supplies the newest compressed access unit; a synchronous Media
 // Foundation decoder expands it to NV12 for the existing D3D11 renderer.
 // Keeping only the newest sample before decode prevents application-side
 // queues from accumulating when a decoder cannot keep up.
-class MediaFoundationCompressedDecoder {
-public:
-    ~MediaFoundationCompressedDecoder() { reset(); }
-
-    HRESULT initialize(VideoPixelFormat inputFormat, int width, int height,
-                       int fps, const AM_MEDIA_TYPE* captureType,
-                       const DirectShowColorMetadata* directShowColor,
-                       llcv::video_color::Override colorOverride) {
-        reset();
-        if (!IsCompressedVideoFormat(inputFormat) || width <= 0 ||
-            height <= 0 || fps <= 0) {
-            return E_INVALIDARG;
-        }
-
-        HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
-        if (FAILED(hr)) return hr;
-        mfStarted_ = true;
-        inputFormat_ = inputFormat;
-        width_ = width;
-        height_ = height;
-        colorOverride_ = colorOverride;
-        if (directShowColor && directShowColor->present) {
-            directShowColor_ = *directShowColor;
-        }
-
-        IMFMediaType* inputType = nullptr;
-        hr = MFCreateMediaType(&inputType);
-        if (SUCCEEDED(hr)) hr = inputType->SetGUID(MF_MT_MAJOR_TYPE,
-                                                    MFMediaType_Video);
-        if (SUCCEEDED(hr)) hr = inputType->SetGUID(MF_MT_SUBTYPE,
-                                                    PixelFormatSubtype(inputFormat));
-        if (SUCCEEDED(hr)) hr = MFSetAttributeSize(inputType, MF_MT_FRAME_SIZE,
-                                                    width, height);
-        if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(inputType, MF_MT_FRAME_RATE,
-                                                     fps, 1);
-        if (SUCCEEDED(hr)) hr = inputType->SetUINT32(
-            MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        if (SUCCEEDED(hr)) hr = inputType->SetUINT32(
-            MF_MT_ALL_SAMPLES_INDEPENDENT,
-            inputFormat == VideoPixelFormat::Mjpeg ? TRUE : FALSE);
-        if (SUCCEEDED(hr)) {
-            CopyDirectShowColorAttributes(directShowColor_, inputType);
-        }
-        if (SUCCEEDED(hr)) {
-            CopyMpegSequenceHeader(captureType, inputType);
-        }
-        if (FAILED(hr)) {
-            SafeRelease(inputType);
-            reset();
-            return hr;
-        }
-
-        MFT_REGISTER_TYPE_INFO inputInfo{};
-        inputInfo.guidMajorType = MFMediaType_Video;
-        inputInfo.guidSubtype = PixelFormatSubtype(inputFormat);
-        MFT_REGISTER_TYPE_INFO outputInfo{};
-        outputInfo.guidMajorType = MFMediaType_Video;
-        outputInfo.guidSubtype = MFVideoFormat_NV12;
-        IMFActivate** activations = nullptr;
-        UINT32 activationCount = 0;
-        hr = MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER,
-                       MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT |
-                           MFT_ENUM_FLAG_SORTANDFILTER,
-                       &inputInfo, &outputInfo, &activations, &activationCount);
-        if (FAILED(hr) || activationCount == 0) {
-            if (SUCCEEDED(hr)) hr = MF_E_TOPO_CODEC_NOT_FOUND;
-            SafeRelease(inputType);
-            if (activations) CoTaskMemFree(activations);
-            reset();
-            return hr;
-        }
-
-        HRESULT finalHr = MF_E_TOPO_CODEC_NOT_FOUND;
-        for (UINT32 i = 0; i < activationCount; ++i) {
-            IMFTransform* candidate = nullptr;
-            const HRESULT activateHr = activations[i]->ActivateObject(
-                IID_PPV_ARGS(&candidate));
-            if (SUCCEEDED(activateHr)) {
-                IMFAttributes* attributes = nullptr;
-                if (SUCCEEDED(candidate->QueryInterface(IID_PPV_ARGS(&attributes)))) {
-                    attributes->SetUINT32(MF_LOW_LATENCY, TRUE);
-                    SafeRelease(attributes);
-                }
-                HRESULT candidateHr = candidate->SetInputType(0, inputType, 0);
-                if (SUCCEEDED(candidateHr)) {
-                    candidateHr = SetNv12OutputType(candidate);
-                }
-                if (SUCCEEDED(candidateHr)) {
-                    candidateHr = candidate->GetOutputStreamInfo(0, &outputInfo_);
-                }
-                if (SUCCEEDED(candidateHr)) {
-                    transform_ = candidate;
-                    candidate = nullptr;
-                    UINT32 defaultStride = 0;
-                    if (outputType_) {
-                        outputType_->GetUINT32(MF_MT_DEFAULT_STRIDE,
-                                                &defaultStride);
-                    }
-                    stride_ = defaultStride
-                        ? static_cast<LONG>(defaultStride)
-                        : static_cast<LONG>(width_);
-                    bufferBytes_ = (std::max)(outputInfo_.cbSize,
-                        static_cast<DWORD>(width_) * static_cast<DWORD>(height_) *
-                            3u / 2u);
-                    transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
-                    transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
-                    fwprintf(stderr,
-                             L"[video] Media Foundation compressed decoder: %s -> NV12, "
-                             L"synchronous low-latency mode, output stride %ld.\n",
-                             PixelFormatName(inputFormat), stride_);
-                    finalHr = S_OK;
-                } else {
-                    finalHr = candidateHr;
-                }
-            } else {
-                finalHr = activateHr;
-            }
-            SafeRelease(candidate);
-            activations[i]->Release();
-        }
-        CoTaskMemFree(activations);
-        SafeRelease(inputType);
-        if (FAILED(finalHr)) reset();
-        return finalHr;
-    }
-
-    // Returns S_OK without an output frame while the decoder is waiting for
-    // enough input. When several frames become available, only the newest is
-    // returned to the caller.
-    HRESULT decode(IMediaSample* directShowSample, IMFMediaBuffer** output) {
-        if (!output) return E_POINTER;
-        *output = nullptr;
-        if (!transform_ || !directShowSample) return MF_E_NOT_INITIALIZED;
-
-        BYTE* source = nullptr;
-        const long sourceLength = directShowSample->GetActualDataLength();
-        HRESULT hr = directShowSample->GetPointer(&source);
-        if (FAILED(hr) || !source || sourceLength <= 0) {
-            return FAILED(hr) ? hr : E_FAIL;
-        }
-
-        IMFSample* inputSample = nullptr;
-        IMFMediaBuffer* inputBuffer = nullptr;
-        hr = MFCreateSample(&inputSample);
-        if (SUCCEEDED(hr)) hr = MFCreateMemoryBuffer(
-            static_cast<DWORD>(sourceLength), &inputBuffer);
-        BYTE* destination = nullptr;
-        if (SUCCEEDED(hr)) hr = inputBuffer->Lock(&destination, nullptr, nullptr);
-        if (SUCCEEDED(hr)) {
-            memcpy(destination, source, static_cast<size_t>(sourceLength));
-            inputBuffer->Unlock();
-            destination = nullptr;
-            hr = inputBuffer->SetCurrentLength(static_cast<DWORD>(sourceLength));
-        }
-        if (SUCCEEDED(hr)) hr = inputSample->AddBuffer(inputBuffer);
-        REFERENCE_TIME start = 0;
-        REFERENCE_TIME stop = 0;
-        if (SUCCEEDED(directShowSample->GetTime(&start, &stop))) {
-            inputSample->SetSampleTime(start);
-            if (stop > start) inputSample->SetSampleDuration(stop - start);
-        }
-        if (FAILED(hr)) {
-            if (destination) inputBuffer->Unlock();
-            SafeRelease(inputBuffer);
-            SafeRelease(inputSample);
-            return hr;
-        }
-
-        IMFMediaBuffer* newest = nullptr;
-        for (;;) {
-            hr = transform_->ProcessInput(0, inputSample, 0);
-            if (hr != MF_E_NOTACCEPTING) break;
-            HRESULT drainHr = PullOutput(&newest);
-            if (drainHr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
-                hr = MF_E_NOTACCEPTING;
-                break;
-            }
-            if (FAILED(drainHr)) {
-                hr = drainHr;
-                break;
-            }
-        }
-        SafeRelease(inputBuffer);
-        SafeRelease(inputSample);
-        if (FAILED(hr)) {
-            SafeRelease(newest);
-            return hr;
-        }
-
-        for (;;) {
-            HRESULT outputHr = PullOutput(&newest);
-            if (outputHr == MF_E_TRANSFORM_NEED_MORE_INPUT) break;
-            if (FAILED(outputHr)) {
-                SafeRelease(newest);
-                return outputHr;
-            }
-        }
-        *output = newest;
-        return S_OK;
-    }
-
-    LONG stride() const { return stride_; }
-    llcv::video_color::Configuration colorConfiguration() const {
-        return colorConfiguration_;
-    }
-
-    void reset() {
-        if (transform_) {
-            transform_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
-            transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
-        }
-        SafeRelease(outputType_);
-        SafeRelease(transform_);
-        outputInfo_ = {};
-        bufferBytes_ = 0;
-        stride_ = 0;
-        width_ = 0;
-        height_ = 0;
-        inputFormat_ = VideoPixelFormat::Nv12;
-        directShowColor_ = {};
-        colorOverride_ = llcv::video_color::Override::Auto;
-        colorConfiguration_ = {};
-        if (mfStarted_) {
-            MFShutdown();
-            mfStarted_ = false;
-        }
-    }
-
-private:
-    static void SetColorAttribute(IMFMediaType* destination, REFGUID key,
-                                  UINT32 value) {
-        if (destination && value != 0) destination->SetUINT32(key, value);
-    }
-
-    static void CopyDirectShowColorAttributes(
-        const DirectShowColorMetadata& metadata, IMFMediaType* destination) {
-        if (!metadata.present || !destination) return;
-        SetColorAttribute(destination, MF_MT_VIDEO_CHROMA_SITING,
-                          metadata.chromaSubsampling);
-        SetColorAttribute(destination, MF_MT_VIDEO_NOMINAL_RANGE,
-                          metadata.nominalRange);
-        SetColorAttribute(destination, MF_MT_YUV_MATRIX,
-                          metadata.transferMatrix);
-        SetColorAttribute(destination, MF_MT_VIDEO_LIGHTING,
-                          metadata.lighting);
-        SetColorAttribute(destination, MF_MT_VIDEO_PRIMARIES,
-                          metadata.primaries);
-        SetColorAttribute(destination, MF_MT_TRANSFER_FUNCTION,
-                          metadata.transferFunction);
-    }
-
-    static UINT32 ReadColorAttribute(IMFMediaType* type, REFGUID key) {
-        UINT32 value = 0;
-        if (type) type->GetUINT32(key, &value);
-        return value;
-    }
-
-    void UpdateColorConfiguration() {
-        const llcv::video_color::Metadata mf{
-            ReadColorAttribute(outputType_, MF_MT_YUV_MATRIX),
-            ReadColorAttribute(outputType_, MF_MT_VIDEO_NOMINAL_RANGE)};
-        const llcv::video_color::Metadata directShow{
-            directShowColor_.transferMatrix,
-            directShowColor_.nominalRange};
-        colorConfiguration_ = llcv::video_color::Resolve(
-            inputFormat_ == VideoPixelFormat::Mjpeg, width_, height_, mf,
-            directShow, colorOverride_);
-        fwprintf(
-            stderr,
-            L"[video] MJPEG color: %s · %s; matrix source=%s, range source=%s "
-            L"(MF matrix=%u range=%u; DirectShow matrix=%u range=%u).\n",
-            llcv::video_color::MatrixName(colorConfiguration_.matrix),
-            llcv::video_color::RangeName(colorConfiguration_.range),
-            llcv::video_color::SourceName(colorConfiguration_.matrixSource),
-            llcv::video_color::SourceName(colorConfiguration_.rangeSource),
-            mf.matrix, mf.range, directShow.matrix, directShow.range);
-    }
-
-    static void CopyMpegSequenceHeader(const AM_MEDIA_TYPE* captureType,
-                                       IMFMediaType* destination) {
-        if (!captureType || !destination ||
-            captureType->formattype != FORMAT_MPEG2Video ||
-            captureType->cbFormat < FIELD_OFFSET(MPEG2VIDEOINFO,
-                                                  dwSequenceHeader)) {
-            return;
-        }
-        const auto* info = reinterpret_cast<const MPEG2VIDEOINFO*>(
-            captureType->pbFormat);
-        const size_t available = captureType->cbFormat -
-            FIELD_OFFSET(MPEG2VIDEOINFO, dwSequenceHeader);
-        if (!info->cbSequenceHeader || info->cbSequenceHeader > available) return;
-        destination->SetBlob(MF_MT_MPEG_SEQUENCE_HEADER,
-                             reinterpret_cast<const UINT8*>(
-                                 info->dwSequenceHeader),
-                             info->cbSequenceHeader);
-    }
-
-    HRESULT SetNv12OutputType(IMFTransform* transform) {
-        SafeRelease(outputType_);
-        for (DWORD index = 0;; ++index) {
-            IMFMediaType* candidate = nullptr;
-            HRESULT hr = transform->GetOutputAvailableType(0, index, &candidate);
-            if (FAILED(hr)) return hr;
-            GUID subtype{};
-            const HRESULT subtypeHr = candidate->GetGUID(MF_MT_SUBTYPE, &subtype);
-            if (SUCCEEDED(subtypeHr) && subtype == MFVideoFormat_NV12) {
-                hr = transform->SetOutputType(0, candidate, 0);
-                if (SUCCEEDED(hr)) {
-                    IMFMediaType* current = nullptr;
-                    if (SUCCEEDED(transform->GetOutputCurrentType(0, &current)) &&
-                        current) {
-                        SafeRelease(candidate);
-                        outputType_ = current;
-                    } else {
-                        outputType_ = candidate;
-                    }
-                    UpdateColorConfiguration();
-                    return S_OK;
-                }
-            }
-            SafeRelease(candidate);
-        }
-    }
-
-    HRESULT PullOutput(IMFMediaBuffer** newest) {
-        if (!newest) return E_POINTER;
-        IMFSample* suppliedSample = nullptr;
-        MFT_OUTPUT_DATA_BUFFER output{};
-        if ((outputInfo_.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0) {
-            HRESULT hr = MFCreateSample(&suppliedSample);
-            if (SUCCEEDED(hr)) {
-                IMFMediaBuffer* suppliedBuffer = nullptr;
-                hr = MFCreateMemoryBuffer(bufferBytes_, &suppliedBuffer);
-                if (SUCCEEDED(hr)) hr = suppliedSample->AddBuffer(suppliedBuffer);
-                SafeRelease(suppliedBuffer);
-            }
-            if (FAILED(hr)) {
-                SafeRelease(suppliedSample);
-                return hr;
-            }
-            output.pSample = suppliedSample;
-        }
-        DWORD status = 0;
-        HRESULT hr = transform_->ProcessOutput(0, 1, &output, &status);
-        SafeRelease(output.pEvents);
-        if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
-            SafeRelease(output.pSample);
-            return SetNv12OutputType(transform_);
-        }
-        if (SUCCEEDED(hr) && output.pSample) {
-            IMFMediaBuffer* buffer = nullptr;
-            hr = output.pSample->ConvertToContiguousBuffer(&buffer);
-            if (SUCCEEDED(hr)) {
-                SafeRelease(*newest);
-                *newest = buffer;
-            }
-        }
-        SafeRelease(output.pSample);
-        return hr;
-    }
-
-    IMFTransform* transform_ = nullptr;
-    IMFMediaType* outputType_ = nullptr;
-    MFT_OUTPUT_STREAM_INFO outputInfo_{};
-    DWORD bufferBytes_ = 0;
-    LONG stride_ = 0;
-    int width_ = 0;
-    int height_ = 0;
-    VideoPixelFormat inputFormat_ = VideoPixelFormat::Nv12;
-    DirectShowColorMetadata directShowColor_{};
-    llcv::video_color::Override colorOverride_ =
-        llcv::video_color::Override::Auto;
-    llcv::video_color::Configuration colorConfiguration_{};
-    bool mfStarted_ = false;
-};
-
-static bool VideoFormatDetails(const AM_MEDIA_TYPE* mediaType, int& width,
-                               int& height, REFERENCE_TIME& frameDuration,
-                               DWORD& imageBytes,
-                               VideoPixelFormat* pixelFormat = nullptr) {
-    if (!mediaType || mediaType->majortype != MEDIATYPE_Video) {
-        return false;
-    }
-    const VideoPixelFormat detected =
-        VideoPixelFormatFromSubtype(mediaType->subtype);
-    if (detected == VideoPixelFormat::Auto) return false;
-    if (pixelFormat) {
-        *pixelFormat = detected;
-    }
-    const BITMAPINFOHEADER* bitmap = nullptr;
-    frameDuration = 0;
-    if (mediaType->formattype == FORMAT_VideoInfo2 &&
-        mediaType->cbFormat >= sizeof(VIDEOINFOHEADER2)) {
-        const auto* info =
-            reinterpret_cast<const VIDEOINFOHEADER2*>(mediaType->pbFormat);
-        bitmap = &info->bmiHeader;
-        frameDuration = info->AvgTimePerFrame;
-    } else if (mediaType->formattype == FORMAT_VideoInfo &&
-               mediaType->cbFormat >= sizeof(VIDEOINFOHEADER)) {
-        const auto* info =
-            reinterpret_cast<const VIDEOINFOHEADER*>(mediaType->pbFormat);
-        bitmap = &info->bmiHeader;
-        frameDuration = info->AvgTimePerFrame;
-    } else if (mediaType->formattype == FORMAT_MPEG2Video &&
-               mediaType->cbFormat >=
-                   FIELD_OFFSET(MPEG2VIDEOINFO, dwSequenceHeader)) {
-        const auto* info =
-            reinterpret_cast<const MPEG2VIDEOINFO*>(mediaType->pbFormat);
-        bitmap = &info->hdr.bmiHeader;
-        frameDuration = info->hdr.AvgTimePerFrame;
-    }
-    if (!bitmap) return false;
-    width = static_cast<int>(bitmap->biWidth);
-    height = std::abs(static_cast<int>(bitmap->biHeight));
-    imageBytes = bitmap->biSizeImage;
-    return width > 0 && height > 0;
+static void LogModuleMessage(const wchar_t* message) {
+    if (message) fwprintf(stderr, L"%s", message);
 }
 
-static void DeleteMediaType(AM_MEDIA_TYPE* mediaType);
-
-static bool ExtractDirectShowColorMetadata(
+static bool ExtractVideoColorMetadata(
     const AM_MEDIA_TYPE* mediaType, DirectShowColorMetadata& metadata) {
-    metadata = {};
-    if (!mediaType || !mediaType->pbFormat) return false;
-
-    const VIDEOINFOHEADER2* info = nullptr;
-    if (mediaType->formattype == FORMAT_VideoInfo2 &&
-        mediaType->cbFormat >= sizeof(VIDEOINFOHEADER2)) {
-        info = reinterpret_cast<const VIDEOINFOHEADER2*>(mediaType->pbFormat);
-    } else if (mediaType->formattype == FORMAT_MPEG2Video &&
-               mediaType->cbFormat >= sizeof(MPEG2VIDEOINFO)) {
-        info = &reinterpret_cast<const MPEG2VIDEOINFO*>(
-                    mediaType->pbFormat)->hdr;
-    }
-    if (!info || (info->dwControlFlags & AMCONTROL_COLORINFO_PRESENT) == 0) {
-        return false;
-    }
-
-    const DWORD flags = info->dwControlFlags;
-    metadata.present = true;
-    metadata.controlFlags = flags;
-    metadata.chromaSubsampling = DXVA_ExtractExtColorData(
-        flags, DXVA_VideoChromaSubsamplingMask,
-        DXVA_VideoChromaSubsamplingShift);
-    metadata.nominalRange = DXVA_ExtractExtColorData(
-        flags, DXVA_NominalRangeMask, DXVA_NominalRangeShift);
-    metadata.transferMatrix = DXVA_ExtractExtColorData(
-        flags, DXVA_VideoTransferMatrixMask, DXVA_VideoTransferMatrixShift);
-    metadata.lighting = DXVA_ExtractExtColorData(
-        flags, DXVA_VideoLightingMask, DXVA_VideoLightingShift);
-    metadata.primaries = DXVA_ExtractExtColorData(
-        flags, DXVA_VideoPrimariesMask, DXVA_VideoPrimariesShift);
-    metadata.transferFunction = DXVA_ExtractExtColorData(
-        flags, DXVA_VideoTransFuncMask, DXVA_VideoTransFuncShift);
-    return true;
+    return llcv::video::ExtractDirectShowColorMetadata(mediaType, metadata);
 }
 
-static void MergeDirectShowColorMetadata(
+static void MergeVideoColorMetadata(
     DirectShowColorMetadata& destination,
     const DirectShowColorMetadata& overrideValues) {
-    if (!overrideValues.present) return;
-    destination.present = true;
-    destination.controlFlags = overrideValues.controlFlags;
-    if (overrideValues.chromaSubsampling != 0) {
-        destination.chromaSubsampling = overrideValues.chromaSubsampling;
-    }
-    if (overrideValues.nominalRange != 0) {
-        destination.nominalRange = overrideValues.nominalRange;
-    }
-    if (overrideValues.transferMatrix != 0) {
-        destination.transferMatrix = overrideValues.transferMatrix;
-    }
-    if (overrideValues.lighting != 0) {
-        destination.lighting = overrideValues.lighting;
-    }
-    if (overrideValues.primaries != 0) {
-        destination.primaries = overrideValues.primaries;
-    }
-    if (overrideValues.transferFunction != 0) {
-        destination.transferFunction = overrideValues.transferFunction;
-    }
+    llcv::video::MergeDirectShowColorMetadata(destination, overrideValues);
 }
 
-static const wchar_t* DirectShowTransferName(UINT value) {
-    switch (value) {
-    case 5: return L"BT.709";
-    case 12: return L"BT.2020 constant";
-    case 13: return L"BT.2020";
-    case 15: return L"PQ/ST.2084";
-    case 16: return L"HLG";
-    default: return value == 0 ? L"unknown" : L"unrecognized";
-    }
+static void LogDirectShowColorMetadata(
+    const wchar_t* source, const DirectShowColorMetadata& metadata) {
+    llcv::video::LogDirectShowColorMetadata(
+        source, metadata, LogModuleMessage);
 }
 
-static const wchar_t* DirectShowPrimariesName(UINT value) {
-    switch (value) {
-    case 2: return L"BT.709";
-    case 9: return L"BT.2020";
-    case 11: return L"DCI-P3";
-    default: return value == 0 ? L"unknown" : L"unrecognized";
-    }
-}
-
-static void LogDirectShowColorMetadata(const wchar_t* source,
-                                       const DirectShowColorMetadata& metadata) {
-    if (!metadata.present) {
-        fwprintf(stderr, L"[video-color] DirectShow color info (%s): unavailable.\n",
-                 source ? source : L"unknown");
-        return;
-    }
-    fwprintf(stderr,
-             L"[video-color] DirectShow color info (%s): flags=0x%08X, primaries=%u (%s), "
-             L"transfer=%u (%s), matrix=%u, range=%u%s.\n",
-             source ? source : L"unknown",
-             static_cast<unsigned>(metadata.controlFlags), metadata.primaries,
-             DirectShowPrimariesName(metadata.primaries),
-             metadata.transferFunction,
-             DirectShowTransferName(metadata.transferFunction),
-             metadata.transferMatrix, metadata.nominalRange,
-             metadata.hdr10() ? L" [HDR10 candidate]" : L"");
-}
-
-static bool FindMatchingDirectShowColorMetadata(
+static bool FindMatchingVideoColorMetadata(
     IPin* videoPin, VideoPixelFormat wantedFormat, int wantedWidth,
     int wantedHeight, int wantedFps, DirectShowColorMetadata& metadata) {
-    metadata = {};
-    if (!videoPin) return false;
-    IAMStreamConfig* config = nullptr;
-    HRESULT hr = videoPin->QueryInterface(IID_PPV_ARGS(&config));
-    if (FAILED(hr)) return false;
-
-    int count = 0;
-    int capBytes = 0;
-    hr = config->GetNumberOfCapabilities(&count, &capBytes);
-    if (FAILED(hr) || capBytes < static_cast<int>(sizeof(VIDEO_STREAM_CONFIG_CAPS))) {
-        SafeRelease(config);
-        return false;
-    }
-    std::vector<BYTE> caps(static_cast<size_t>(capBytes));
-    bool found = false;
-    for (int i = 0; i < count && !found; ++i) {
-        AM_MEDIA_TYPE* candidate = nullptr;
-        if (FAILED(config->GetStreamCaps(i, &candidate, caps.data())) ||
-            !candidate) {
-            continue;
-        }
-        int width = 0;
-        int height = 0;
-        REFERENCE_TIME duration = 0;
-        DWORD bytes = 0;
-        VideoPixelFormat format = VideoPixelFormat::Auto;
-        const bool details = VideoFormatDetails(candidate, width, height,
-                                                duration, bytes, &format);
-        const int fps = duration > 0
-            ? static_cast<int>((10'000'000 + duration / 2) / duration) : 0;
-        DirectShowColorMetadata candidateMetadata{};
-        const bool hasColor = ExtractDirectShowColorMetadata(
-            candidate, candidateMetadata);
-        if (details && format == wantedFormat && width == wantedWidth &&
-            height == wantedHeight && fps == wantedFps && hasColor) {
-            metadata = candidateMetadata;
-            found = true;
-        }
-        DeleteMediaType(candidate);
-    }
-    SafeRelease(config);
-    return found;
+    return llcv::video::FindMatchingDirectShowColorMetadata(
+        videoPin, wantedFormat, wantedWidth, wantedHeight, wantedFps,
+        metadata);
 }
 
-static bool SetVideoFrameDuration(AM_MEDIA_TYPE* mediaType,
-                                  REFERENCE_TIME frameDuration) {
-    if (!mediaType || frameDuration <= 0) return false;
-    if (mediaType->formattype == FORMAT_VideoInfo2 &&
-        mediaType->cbFormat >= sizeof(VIDEOINFOHEADER2)) {
-        auto* info = reinterpret_cast<VIDEOINFOHEADER2*>(mediaType->pbFormat);
-        info->AvgTimePerFrame = frameDuration;
-        return true;
-    }
-    if (mediaType->formattype == FORMAT_VideoInfo &&
-        mediaType->cbFormat >= sizeof(VIDEOINFOHEADER)) {
-        auto* info = reinterpret_cast<VIDEOINFOHEADER*>(mediaType->pbFormat);
-        info->AvgTimePerFrame = frameDuration;
-        return true;
-    }
-    if (mediaType->formattype == FORMAT_MPEG2Video &&
-        mediaType->cbFormat >= FIELD_OFFSET(MPEG2VIDEOINFO, dwSequenceHeader)) {
-        auto* info = reinterpret_cast<MPEG2VIDEOINFO*>(mediaType->pbFormat);
-        info->hdr.AvgTimePerFrame = frameDuration;
-        return true;
-    }
-    return false;
+static HRESULT ConfigureVideoPin(
+    IPin* videoPin, int wantedWidth, int wantedHeight, int wantedFps,
+    VideoPixelFormat wantedFormat, DWORD& imageBytes, UINT32& stride,
+    int& configuredFps, VideoPixelFormat& configuredFormat) {
+    return llcv::video::ConfigureVideoPin(
+        videoPin, wantedWidth, wantedHeight, wantedFps, wantedFormat,
+        imageBytes, stride, configuredFps, configuredFormat,
+        LogModuleMessage);
 }
 
-static REFERENCE_TIME FrameDurationForRate(int fps) {
-    return fps > 0 ? (10'000'000 + fps / 2) / fps : 0;
-}
-
-static bool FrameRateAllowedByCaps(const VIDEO_STREAM_CONFIG_CAPS& caps,
-                                   int fps) {
-    const REFERENCE_TIME duration = FrameDurationForRate(fps);
-    if (duration <= 0 || caps.MinFrameInterval <= 0 ||
-        caps.MaxFrameInterval <= 0) {
-        return false;
-    }
-    const REFERENCE_TIME minimum =
-        std::min(caps.MinFrameInterval, caps.MaxFrameInterval);
-    const REFERENCE_TIME maximum =
-        std::max(caps.MinFrameInterval, caps.MaxFrameInterval);
-    return duration >= minimum && duration <= maximum;
-}
-
-static HRESULT ConfigureVideoPin(IPin* videoPin, int wantedWidth,
-                                 int wantedHeight, int wantedFps,
-                                 VideoPixelFormat wantedFormat,
-                                 DWORD& imageBytes, UINT32& stride,
-                                 int& configuredFps,
-                                 VideoPixelFormat& configuredFormat) {
-    IAMStreamConfig* config = nullptr;
-    HRESULT hr = videoPin->QueryInterface(IID_PPV_ARGS(&config));
-    if (FAILED(hr)) return hr;
-
-    int count = 0;
-    int capBytes = 0;
-    hr = config->GetNumberOfCapabilities(&count, &capBytes);
-    if (FAILED(hr) || capBytes < static_cast<int>(sizeof(VIDEO_STREAM_CONFIG_CAPS))) {
-        SafeRelease(config);
-        return FAILED(hr) ? hr : E_FAIL;
-    }
-
-    struct FormatCandidate {
-        AM_MEDIA_TYPE* mediaType = nullptr;
-        int fps = 0;
-        DWORD imageBytes = 0;
-        VideoPixelFormat format = VideoPixelFormat::Nv12;
-    };
-    std::vector<BYTE> caps(static_cast<size_t>(capBytes));
-    std::vector<FormatCandidate> candidates;
-    for (int i = 0; i < count; ++i) {
-        AM_MEDIA_TYPE* candidate = nullptr;
-        hr = config->GetStreamCaps(i, &candidate, caps.data());
-        if (FAILED(hr) || !candidate) continue;
-
-        VIDEO_STREAM_CONFIG_CAPS streamCaps{};
-        std::memcpy(&streamCaps, caps.data(), sizeof(streamCaps));
-
-        int width = 0;
-        int height = 0;
-        REFERENCE_TIME duration = 0;
-        DWORD bytes = 0;
-        VideoPixelFormat format = VideoPixelFormat::Nv12;
-        const bool details = VideoFormatDetails(candidate, width, height,
-                                                duration, bytes, &format);
-        int fps = duration > 0
-                      ? static_cast<int>((10'000'000 + duration / 2) /
-                                         duration)
-                      : 0;
-        // Compressed capture is opt-in. Auto preserves the original raw
-        // NV12/YUY2 path even when the device advertises alternatives.
-        const bool formatMatches = wantedFormat == VideoPixelFormat::Auto
-            ? IsAutoSelectableVideoFormat(format)
-            : format == wantedFormat;
-        if (details && formatMatches && width == wantedWidth &&
-            height == wantedHeight && fps > 0) {
-            // Some UVC drivers advertise only their maximum-rate media type
-            // and expose slower supported rates through the capability range.
-            // Materialize the requested rate so 30 fps configures the capture
-            // pin itself instead of receiving a faster stream and dropping it.
-            if (wantedFps == 30 && fps != wantedFps &&
-                FrameRateAllowedByCaps(streamCaps, wantedFps) &&
-                SetVideoFrameDuration(candidate,
-                                      FrameDurationForRate(wantedFps))) {
-                fps = wantedFps;
-            }
-            candidates.push_back({candidate, fps, bytes, format});
-            continue;
-        }
-        DeleteMediaType(candidate);
-    }
-
-    if (candidates.empty()) {
-        SafeRelease(config);
-        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-    }
-
-    // Prefer the requested rate. Otherwise keep the exact pixel dimensions
-    // and select the highest supported rate not exceeding the request. If the
-    // driver exposes only higher rates, select the lowest of those.
-    std::stable_sort(
-        candidates.begin(), candidates.end(),
-        [wantedFps, wantedFormat](const FormatCandidate& a,
-                                 const FormatCandidate& b) {
-            if (wantedFormat == VideoPixelFormat::Auto &&
-                a.format != b.format) {
-                const auto rank = [](VideoPixelFormat format) {
-                    switch (format) {
-                    case VideoPixelFormat::Nv12: return 0;
-                    case VideoPixelFormat::Yuy2: return 1;
-                    case VideoPixelFormat::P010: return 2;
-                    case VideoPixelFormat::Mjpeg: return 3;
-                    default: return 3;
-                    }
-                };
-                return rank(a.format) < rank(b.format);
-            }
-            if (a.fps == wantedFps || b.fps == wantedFps) {
-                return a.fps == wantedFps && b.fps != wantedFps;
-            }
-            const bool aWithin = a.fps < wantedFps;
-            const bool bWithin = b.fps < wantedFps;
-            if (aWithin != bWithin) return aWithin;
-            return aWithin ? a.fps > b.fps : a.fps < b.fps;
-        });
-
-    hr = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-    FormatCandidate* selected = nullptr;
-    for (auto& candidate : candidates) {
-        hr = config->SetFormat(candidate.mediaType);
-        if (SUCCEEDED(hr)) {
-            selected = &candidate;
-            break;
-        }
-    }
-
-    if (selected) {
-        imageBytes = selected->imageBytes;
-        configuredFps = selected->fps;
-        configuredFormat = selected->format;
-        if (!imageBytes && !IsCompressedVideoFormat(configuredFormat)) {
-            imageBytes = static_cast<DWORD>(
-                configuredFormat == VideoPixelFormat::Yuy2
-                    ? wantedWidth * wantedHeight * 2
-                    : configuredFormat == VideoPixelFormat::P010
-                        ? wantedWidth * wantedHeight * 3
-                        : wantedWidth * wantedHeight * 3 / 2);
-        }
-        const uint64_t derivedStride = configuredFormat ==
-                                                VideoPixelFormat::Yuy2
-            ? static_cast<uint64_t>(imageBytes) / wantedHeight
-            : configuredFormat == VideoPixelFormat::P010
-                ? static_cast<uint64_t>(imageBytes) * 2 /
-                      (static_cast<uint64_t>(wantedHeight) * 3)
-            : (static_cast<uint64_t>(imageBytes) * 2) /
-                  (static_cast<uint64_t>(wantedHeight) * 3);
-        const UINT32 minimumStride = configuredFormat ==
-                                             VideoPixelFormat::Yuy2
-            ? static_cast<UINT32>(wantedWidth * 2)
-            : configuredFormat == VideoPixelFormat::P010
-                ? static_cast<UINT32>(wantedWidth * 2)
-                : static_cast<UINT32>(wantedWidth);
-        stride = IsCompressedVideoFormat(configuredFormat)
-            ? 0
-            : static_cast<UINT32>(derivedStride >= minimumStride
-                                      ? derivedStride : minimumStride);
-        if (configuredFps != wantedFps) {
-            fwprintf(stderr,
-                     L"[video] requested %s %dx%d @ %d unavailable; "
-                     L"using %d fps at the exact resolution.\n",
-                     PixelFormatName(configuredFormat), wantedWidth,
-                     wantedHeight, wantedFps, configuredFps);
-        }
-    }
-    for (auto& candidate : candidates) {
-        DeleteMediaType(candidate.mediaType);
-    }
-    SafeRelease(config);
-    return hr;
-}
-
-static HRESULT GetActiveVideoPinFormat(IPin* videoPin,
-                                       AM_MEDIA_TYPE** mediaType) {
-    if (!videoPin || !mediaType) return E_POINTER;
-    *mediaType = nullptr;
-    IAMStreamConfig* config = nullptr;
-    HRESULT hr = videoPin->QueryInterface(IID_PPV_ARGS(&config));
-    if (SUCCEEDED(hr)) hr = config->GetFormat(mediaType);
-    SafeRelease(config);
-    return hr;
+static HRESULT GetActiveVideoPinFormat(
+    IPin* videoPin, AM_MEDIA_TYPE** mediaType) {
+    return llcv::video::GetActiveVideoPinFormat(videoPin, mediaType);
 }
 
 static std::vector<PixelFormatSupport> ProbePixelFormats(
@@ -4938,89 +1640,21 @@ static std::vector<PixelFormatSupport> ProbePixelFormats(
     const bool uninitialize = SUCCEEDED(initHr);
     if (initHr == RPC_E_CHANGED_MODE) initHr = S_OK;
     if (FAILED(initHr)) return result;
+
     IBaseFilter* capture = nullptr;
     IPin* videoPin = nullptr;
-    IAMStreamConfig* config = nullptr;
     HRESULT hr = FindCaptureFilter(captureDeviceId, &capture);
     if (SUCCEEDED(hr)) {
         hr = FindOutputPinByMajorType(capture, MEDIATYPE_Video, &videoPin);
     }
-    if (SUCCEEDED(hr)) hr = videoPin->QueryInterface(IID_PPV_ARGS(&config));
-    int count = 0;
-    int capBytes = 0;
-    if (SUCCEEDED(hr)) hr = config->GetNumberOfCapabilities(&count, &capBytes);
-    std::vector<BYTE> caps(capBytes > 0 ? static_cast<size_t>(capBytes) : 1);
-    for (int i = 0; SUCCEEDED(hr) && i < count; ++i) {
-        AM_MEDIA_TYPE* mediaType = nullptr;
-        if (FAILED(config->GetStreamCaps(i, &mediaType, caps.data())) ||
-            !mediaType) continue;
-        VIDEO_STREAM_CONFIG_CAPS streamCaps{};
-        if (capBytes >= static_cast<int>(sizeof(streamCaps))) {
-            std::memcpy(&streamCaps, caps.data(), sizeof(streamCaps));
-        }
-        int candidateWidth = 0;
-        int candidateHeight = 0;
-        REFERENCE_TIME duration = 0;
-        DWORD bytes = 0;
-        VideoPixelFormat format = VideoPixelFormat::Auto;
-        if (VideoFormatDetails(mediaType, candidateWidth, candidateHeight,
-                               duration, bytes, &format) &&
-            format != VideoPixelFormat::Auto &&
-            candidateWidth == width && candidateHeight == height &&
-            duration > 0) {
-            const int fps = static_cast<int>(
-                (10'000'000 + duration / 2) / duration);
-            const bool duplicate = std::any_of(
-                result.begin(), result.end(),
-                [format, fps](const PixelFormatSupport& support) {
-                    return support.format == format &&
-                           support.selectedFps == fps;
-                });
-            if (!duplicate) {
-                result.push_back({format, fps});
-            }
-
-            // A number of UVC drivers list only the fastest default media
-            // type, while VIDEO_STREAM_CONFIG_CAPS still declares 30 fps as
-            // valid. Surface that standard rate in the selector as well.
-            constexpr int kAdditionalFrameRate = 30;
-            const bool thirtyFpsDuplicate = std::any_of(
-                result.begin(), result.end(),
-                [format](const PixelFormatSupport& support) {
-                    return support.format == format &&
-                           support.selectedFps == 30;
-                });
-            if (!thirtyFpsDuplicate &&
-                FrameRateAllowedByCaps(streamCaps, kAdditionalFrameRate)) {
-                result.push_back({format, kAdditionalFrameRate});
-            }
-        }
-        DeleteMediaType(mediaType);
+    if (SUCCEEDED(hr)) {
+        result = llcv::video::ProbePixelFormats(videoPin, width, height);
     }
-    std::sort(result.begin(), result.end(),
-              [](const PixelFormatSupport& left,
-                 const PixelFormatSupport& right) {
-                  if (left.format != right.format) {
-                      const auto rank = [](VideoPixelFormat format) {
-                          switch (format) {
-                          case VideoPixelFormat::Nv12: return 0;
-                          case VideoPixelFormat::Yuy2: return 1;
-                          case VideoPixelFormat::P010: return 2;
-                          case VideoPixelFormat::Mjpeg: return 3;
-                          default: return 3;
-                          }
-                      };
-                      return rank(left.format) < rank(right.format);
-                  }
-                  return left.selectedFps > right.selectedFps;
-              });
-    SafeRelease(config);
     SafeRelease(videoPin);
     SafeRelease(capture);
     if (uninitialize) CoUninitialize();
     return result;
 }
-
 // This runs only while the settings dialog is open. It enumerates the chosen
 // DirectShow filter's advertised output pins without building or running a
 // graph, so it cannot add capture-time latency or steady-state overhead.
@@ -6169,20 +2803,21 @@ static bool AudioOnlyCaptureLoop() {
     HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
     if (mmcss) AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_HIGH);
 
-    IGraphBuilder* graph = nullptr;
-    IMediaControl* control = nullptr;
-    IMediaFilter* mediaFilter = nullptr;
-    IBaseFilter* capture = nullptr;
-    IBaseFilter* audioCapture = nullptr;
-    IPin* audioPin = nullptr;
-    IBaseFilter* audioGrabberFilter = nullptr;
-    ISampleGrabber* audioGrabber = nullptr;
-    IBaseFilter* audioNullRenderer = nullptr;
-    IPin* audioGrabberIn = nullptr;
-    IPin* audioGrabberOut = nullptr;
-    IPin* audioNullIn = nullptr;
-    SampleGrabberCB* audioCallback = nullptr;
-    AM_MEDIA_TYPE* selectedAudioType = nullptr;
+    llcv::capture::DirectShowGraphResources resources;
+    auto*& graph = resources.graph;
+    auto*& control = resources.control;
+    auto*& mediaFilter = resources.mediaFilter;
+    auto*& capture = resources.capture;
+    auto*& audioCapture = resources.audioCapture;
+    auto*& audioPin = resources.audioPin;
+    auto*& audioGrabberFilter = resources.audioGrabberFilter;
+    auto*& audioGrabber = resources.audioGrabber;
+    auto*& audioNullRenderer = resources.audioNullRenderer;
+    auto*& audioGrabberIn = resources.audioGrabberInput;
+    auto*& audioGrabberOut = resources.audioGrabberOutput;
+    auto*& audioNullIn = resources.audioNullInput;
+    auto*& audioCallback = resources.audioCallback;
+    auto*& selectedAudioType = resources.selectedAudioType;
     llcv::capture_audio::Format selectedAudioFormat{};
     bool initialized = false;
     const wchar_t* initializationStage = L"create audio-only DirectShow graph";
@@ -6234,7 +2869,7 @@ static bool AudioOnlyCaptureLoop() {
         initializationStage = L"negotiate supported capture audio format";
         llcv::capture_audio::Rejection rejection =
             llcv::capture_audio::Rejection::Malformed;
-        selectedAudioType = SelectSupportedCaptureAudioType(
+        selectedAudioType = llcv::capture_audio::SelectSupportedType(
             audioPin, selectedAudioFormat, &rejection);
         if (!selectedAudioType) {
             fwprintf(stderr, L"[audio] capture input rejected: %s\n",
@@ -6247,7 +2882,7 @@ static bool AudioOnlyCaptureLoop() {
         SuggestCaptureBuffer(audioPin, selectedAudioFormat.blockAlign);
 
         initializationStage = L"build audio-only sample path";
-        hr = CoCreateInstance(CLSID_SampleGrabber, nullptr,
+        hr = CoCreateInstance(kSampleGrabberClassId, nullptr,
                               CLSCTX_INPROC_SERVER,
                               IID_PPV_ARGS(&audioGrabberFilter));
         if (FAILED(hr)) break;
@@ -6261,11 +2896,11 @@ static bool AudioOnlyCaptureLoop() {
         if (FAILED(hr)) break;
         audioGrabber->SetOneShot(FALSE);
         audioGrabber->SetBufferSamples(FALSE);
-        audioCallback = new SampleGrabberCB(selectedAudioFormat);
+        audioCallback = CreateAudioSampleCallback(selectedAudioFormat);
         hr = audioGrabber->SetCallback(audioCallback, 0);
         if (FAILED(hr)) break;
 
-        hr = CoCreateInstance(CLSID_NullRenderer, nullptr,
+        hr = CoCreateInstance(kNullRendererClassId, nullptr,
                               CLSCTX_INPROC_SERVER,
                               IID_PPV_ARGS(&audioNullRenderer));
         if (FAILED(hr)) break;
@@ -6306,21 +2941,7 @@ static bool AudioOnlyCaptureLoop() {
             LogFilterPins(audioCapture, L"separate capture audio filter");
         }
     }
-    if (audioGrabber) audioGrabber->SetCallback(nullptr, 0);
-    if (audioCallback) audioCallback->Release();
-    SafeRelease(audioNullIn);
-    SafeRelease(audioGrabberOut);
-    SafeRelease(audioGrabberIn);
-    SafeRelease(audioNullRenderer);
-    SafeRelease(audioGrabber);
-    SafeRelease(audioGrabberFilter);
-    DeleteMediaType(selectedAudioType);
-    SafeRelease(audioPin);
-    SafeRelease(audioCapture);
-    SafeRelease(capture);
-    SafeRelease(mediaFilter);
-    SafeRelease(control);
-    SafeRelease(graph);
+    resources.Reset();
     if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
     CoUninitialize();
     return initialized;
@@ -6344,35 +2965,36 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         AvSetMmThreadPriority(videoMmcss, AVRT_PRIORITY_HIGH);
     }
 
-    IGraphBuilder* graph = nullptr;
-    IMediaControl* control = nullptr;
-    IMediaFilter* mediaFilter = nullptr;
-    IBaseFilter* capture = nullptr;
-    IBaseFilter* audioCapture = nullptr;
-    IPin* videoPin = nullptr;
-    IPin* audioPin = nullptr;
-    IBaseFilter* grabberFilter = nullptr;
-    ISampleGrabber* grabber = nullptr;
-    IBaseFilter* nullRenderer = nullptr;
-    IPin* grabberIn = nullptr;
-    IPin* grabberOut = nullptr;
-    IPin* nullIn = nullptr;
-    VideoSampleGrabberCB* callback = nullptr;
-    IBaseFilter* audioGrabberFilter = nullptr;
-    ISampleGrabber* audioGrabber = nullptr;
-    IBaseFilter* audioNullRenderer = nullptr;
-    IPin* audioGrabberIn = nullptr;
-    IPin* audioGrabberOut = nullptr;
-    IPin* audioNullIn = nullptr;
-    SampleGrabberCB* audioCallback = nullptr;
-    AM_MEDIA_TYPE* activeVideoType = nullptr;
-    AM_MEDIA_TYPE* selectedAudioType = nullptr;
+    llcv::capture::DirectShowGraphResources resources;
+    auto*& graph = resources.graph;
+    auto*& control = resources.control;
+    auto*& mediaFilter = resources.mediaFilter;
+    auto*& capture = resources.capture;
+    auto*& audioCapture = resources.audioCapture;
+    auto*& videoPin = resources.videoPin;
+    auto*& audioPin = resources.audioPin;
+    auto*& grabberFilter = resources.videoGrabberFilter;
+    auto*& grabber = resources.videoGrabber;
+    auto*& nullRenderer = resources.videoNullRenderer;
+    auto*& grabberIn = resources.videoGrabberInput;
+    auto*& grabberOut = resources.videoGrabberOutput;
+    auto*& nullIn = resources.videoNullInput;
+    auto*& callback = resources.videoCallback;
+    auto*& audioGrabberFilter = resources.audioGrabberFilter;
+    auto*& audioGrabber = resources.audioGrabber;
+    auto*& audioNullRenderer = resources.audioNullRenderer;
+    auto*& audioGrabberIn = resources.audioGrabberInput;
+    auto*& audioGrabberOut = resources.audioGrabberOutput;
+    auto*& audioNullIn = resources.audioNullInput;
+    auto*& audioCallback = resources.audioCallback;
+    auto*& activeVideoType = resources.activeVideoType;
+    auto*& selectedAudioType = resources.selectedAudioType;
     llcv::capture_audio::Format selectedAudioFormat{};
-    HANDLE frameEvent = nullptr;
+    auto*& frameEvent = resources.frameEvent;
     bool initialized = false;
     const wchar_t* initializationStage = L"create DirectShow graph";
     DirectD3D11Renderer renderer;
-    MediaFoundationCompressedDecoder compressedDecoder;
+    llcv::video::MjpegDecoder compressedDecoder;
 
     do {
         initializationStage = L"create DirectShow graph";
@@ -6422,7 +3044,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         const bool colorMetadataRelevant =
             configuredFormat == VideoPixelFormat::P010 || compressedVideo;
         bool directShowColorMetadataDetected = colorMetadataRelevant &&
-            ExtractDirectShowColorMetadata(activeVideoType,
+            ExtractVideoColorMetadata(activeVideoType,
                                            directShowColorInfo);
         if (colorMetadataRelevant && !directShowColorMetadataDetected) {
             // A few capture drivers return a plain VIDEOINFOHEADER from
@@ -6430,7 +3052,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             // matching stream-capability entry.  Check that entry before
             // falling back to the format-specific default.
             DirectShowColorMetadata capabilityColorInfo{};
-            if (FindMatchingDirectShowColorMetadata(
+            if (FindMatchingVideoColorMetadata(
                     videoPin, configuredFormat, preset.width, preset.height,
                     configuredFps, capabilityColorInfo)) {
                 directShowColorInfo = capabilityColorInfo;
@@ -6469,10 +3091,9 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         if (compressedVideo) {
             initializationStage = L"initialize Media Foundation compressed decoder";
             hr = compressedDecoder.initialize(
-                configuredFormat, preset.width, preset.height, configuredFps,
-                activeVideoType,
+                preset.width, preset.height, configuredFps, activeVideoType,
                 directShowColorMetadataDetected ? &directShowColorInfo : nullptr,
-                g_settings.mjpegColorOverride);
+                g_settings.mjpegColorOverride, LogModuleMessage);
             if (FAILED(hr)) {
                 LogHr(L"Media Foundation compressed decoder", hr);
                 break;
@@ -6491,10 +3112,13 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
 
         frameEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!frameEvent) { hr = HRESULT_FROM_WIN32(GetLastError()); break; }
-        LatestNv12Sample latest(compressedVideo ? 0 : imageBytes, frameEvent);
+        llcv::capture::LatestVideoSample latest(
+            compressedVideo ? 0 : imageBytes, frameEvent,
+            {&g_osdTrackingStartMs, &g_videoCapturedFrames,
+             &g_videoReplacedFrames});
 
         initializationStage = L"build video sample path";
-        hr = CoCreateInstance(CLSID_SampleGrabber, nullptr,
+        hr = CoCreateInstance(kSampleGrabberClassId, nullptr,
                               CLSCTX_INPROC_SERVER,
                               IID_PPV_ARGS(&grabberFilter));
         if (FAILED(hr)) break;
@@ -6512,11 +3136,11 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         if (FAILED(hr)) break;
         grabber->SetOneShot(FALSE);
         grabber->SetBufferSamples(FALSE);
-        callback = new VideoSampleGrabberCB(&latest);
+        callback = new llcv::capture::VideoSampleGrabberCallback(&latest);
         hr = grabber->SetCallback(callback, 0);
         if (FAILED(hr)) break;
 
-        hr = CoCreateInstance(CLSID_NullRenderer, nullptr,
+        hr = CoCreateInstance(kNullRendererClassId, nullptr,
                               CLSCTX_INPROC_SERVER,
                               IID_PPV_ARGS(&nullRenderer));
         if (FAILED(hr)) break;
@@ -6543,7 +3167,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             if (SUCCEEDED(connectedTypeHr)) {
                 DirectShowColorMetadata connectedColorInfo{};
                 const bool connectedColorDetected =
-                    ExtractDirectShowColorMetadata(&connectedVideoType,
+                    ExtractVideoColorMetadata(&connectedVideoType,
                                                    connectedColorInfo);
                 if (configuredFormat == VideoPixelFormat::P010 &&
                     connectedColorDetected) {
@@ -6564,7 +3188,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                 if (SUCCEEDED(hr) && compressedVideo) {
                     DirectShowColorMetadata effectiveColorInfo =
                         directShowColorInfo;
-                    MergeDirectShowColorMetadata(effectiveColorInfo,
+                    MergeVideoColorMetadata(effectiveColorInfo,
                                                  connectedColorInfo);
                     if (connectedColorDetected) {
                         LogDirectShowColorMetadata(
@@ -6575,11 +3199,12 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                     initializationStage =
                         L"confirm Media Foundation MJPEG decoder color";
                     hr = compressedDecoder.initialize(
-                        configuredFormat, preset.width, preset.height,
-                        configuredFps, &connectedVideoType,
+                        preset.width, preset.height, configuredFps,
+                        &connectedVideoType,
                         effectiveColorInfo.present ? &effectiveColorInfo
                                                    : nullptr,
-                        g_settings.mjpegColorOverride);
+                        g_settings.mjpegColorOverride,
+                        LogModuleMessage);
                     if (SUCCEEDED(hr)) {
                         const auto connectedColor =
                             compressedDecoder.colorConfiguration();
@@ -6636,7 +3261,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         initializationStage = L"negotiate supported capture audio format";
         llcv::capture_audio::Rejection audioFormatRejection =
             llcv::capture_audio::Rejection::Malformed;
-        selectedAudioType = SelectSupportedCaptureAudioType(
+        selectedAudioType = llcv::capture_audio::SelectSupportedType(
             audioPin, selectedAudioFormat, &audioFormatRejection);
         if (!selectedAudioType) {
             fwprintf(stderr, L"[audio] capture input rejected: %s\n",
@@ -6650,7 +3275,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         SuggestCaptureBuffer(audioPin, selectedAudioFormat.blockAlign);
 
         initializationStage = L"build supported PCM/float audio sample path";
-        hr = CoCreateInstance(CLSID_SampleGrabber, nullptr,
+        hr = CoCreateInstance(kSampleGrabberClassId, nullptr,
                               CLSCTX_INPROC_SERVER,
                               IID_PPV_ARGS(&audioGrabberFilter));
         if (FAILED(hr)) break;
@@ -6665,11 +3290,11 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         if (FAILED(hr)) break;
         audioGrabber->SetOneShot(FALSE);
         audioGrabber->SetBufferSamples(FALSE);
-        audioCallback = new SampleGrabberCB(selectedAudioFormat);
+        audioCallback = CreateAudioSampleCallback(selectedAudioFormat);
         hr = audioGrabber->SetCallback(audioCallback, 0);
         if (FAILED(hr)) break;
 
-        hr = CoCreateInstance(CLSID_NullRenderer, nullptr,
+        hr = CoCreateInstance(kNullRendererClassId, nullptr,
                               CLSCTX_INPROC_SERVER,
                               IID_PPV_ARGS(&audioNullRenderer));
         if (FAILED(hr)) break;
@@ -6776,7 +3401,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                 }
                 continue;
             }
-            IMediaSample* videoSample = latest.takeLatest(arrivalUs);
+            IMediaSample* videoSample = latest.TakeLatest(arrivalUs);
             if (!videoSample) continue;
             if (renderer.outputConfigurationChanged()) {
                 hr = renderer.initialize(host, preset.width, preset.height,
@@ -6885,32 +3510,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             LogFilterPins(audioCapture, L"separate capture audio filter");
         }
     }
-    if (audioGrabber) audioGrabber->SetCallback(nullptr, 0);
-    if (audioCallback) audioCallback->Release();
-    if (grabber) grabber->SetCallback(nullptr, 0);
-    if (callback) callback->Release();
-    if (frameEvent) CloseHandle(frameEvent);
-    SafeRelease(nullIn);
-    SafeRelease(audioNullIn);
-    SafeRelease(audioGrabberOut);
-    SafeRelease(audioGrabberIn);
-    SafeRelease(audioNullRenderer);
-    SafeRelease(audioGrabber);
-    SafeRelease(audioGrabberFilter);
-    SafeRelease(grabberOut);
-    SafeRelease(grabberIn);
-    SafeRelease(nullRenderer);
-    SafeRelease(grabber);
-    SafeRelease(grabberFilter);
-    DeleteMediaType(activeVideoType);
-    DeleteMediaType(selectedAudioType);
-    SafeRelease(videoPin);
-    SafeRelease(audioPin);
-    SafeRelease(audioCapture);
-    SafeRelease(capture);
-    SafeRelease(mediaFilter);
-    SafeRelease(control);
-    SafeRelease(graph);
+    resources.Reset();
     renderer.reset();
     compressedDecoder.reset();
     if (videoMmcss) AvRevertMmThreadCharacteristics(videoMmcss);
@@ -6979,14 +3579,7 @@ enum class SettingsTab : int {
     Updates = 3,
 };
 
-struct UpdateCheckResult {
-    bool success = false;
-    bool newer = false;
-    std::wstring latestTag;
-    std::wstring installerUrl;
-};
-
-static bool FetchLatestRelease(UpdateCheckResult& result);
+using UpdateCheckResult = llcv::update::CheckResult;
 
 struct SettingsDialogState {
     HWND tabControl = nullptr;
@@ -7466,7 +4059,7 @@ static void StartSettingsUpdateCheck(SettingsDialogState* state, HWND hwnd) {
     EnableWindow(state->updateNowButton, FALSE);
     state->updateCheckThread = std::thread([state, hwnd]() {
         UpdateCheckResult result;
-        FetchLatestRelease(result);
+        llcv::update::FetchLatestRelease(kAppVersionLabel, result);
         if (state->updateCheckStop.load(std::memory_order_acquire) ||
             !IsWindow(hwnd)) {
             return;
@@ -7569,11 +4162,7 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
                    L"Higher values absorb more scheduling jitter but add the same amount of audio "
                    L"latency. This is independent of the WASAPI output buffer and clock-drift correction.";
         case SettingsHelpTopic::Presentation:
-            return L"Presentation mode\n\n"
-                   L"Immediate presents the newest frame without waiting for VSync. This minimizes "
-                   L"display latency but can show tearing.\n\n"
-                   L"VSync follows the monitor refresh and reduces tearing, but may wait for the next "
-                   L"refresh interval and can have different pacing on mixed-refresh monitors.";
+            return llcv::presentation_ui::HelpText(true);
         case SettingsHelpTopic::VolumeBoost:
             return L"Volume boost above 100%\n\n"
                    L"Allows the mouse wheel to raise the app volume up to 200%. "
@@ -7621,12 +4210,7 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
                L"값을 높이면 순간적인 입력 지연을 흡수할 여유가 커지지만, 그만큼 오디오 지연이 "
                L"늘어납니다. WASAPI 출력 버퍼와 클록 드리프트 보정과는 독립적으로 조정됩니다.";
     case SettingsHelpTopic::Presentation:
-        return L"화면 표시 방식 안내\n\n"
-               L"저지연: VSync 대기 없이 최신 프레임을 즉시 표시합니다. 표시 지연을 줄이는 대신 "
-               L"화면 경계가 맞지 않을 때 찢어짐이 보일 수 있습니다.\n\n"
-               L"VSync: 모니터 주기에 맞춰 표시해 찢어짐을 줄입니다. 대신 다음 표시 주기까지 "
-               L"기다릴 수 있어 지연이 늘어날 수 있고, 주사율이 다른 모니터에서는 프레임 페이싱이 "
-               L"달라질 수 있습니다.";
+        return llcv::presentation_ui::HelpText(false);
     case SettingsHelpTopic::VolumeBoost:
         return L"100% 이상 볼륨 증폭 안내\n\n"
                L"마우스 휠로 앱 음량을 최대 200%까지 올릴 수 있게 합니다. 100%는 원본 PCM 크기이고, "
@@ -8984,9 +5568,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 static_cast<INT_PTR>(IDC_SETTINGS_PRESENTATION)),
             instance, nullptr);
         SendMessageW(state->presentationCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(UI_TEXT(L"저지연")));
+                     reinterpret_cast<LPARAM>(
+                         llcv::presentation_ui::ImmediateLabel(
+                             IsEnglishUi())));
         SendMessageW(state->presentationCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(L"VSync"));
+                     reinterpret_cast<LPARAM>(
+                         llcv::presentation_ui::VSyncLabel(
+                             IsEnglishUi())));
         SendMessageW(state->presentationCombo, CB_SETCURSEL,
                      g_settings.presentationMode == PresentationMode::VSync
                          ? 1 : 0, 0);
@@ -9289,7 +5877,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
 
         const std::wstring endpointId = SelectedAudioEndpointId(state);
         state->probeThread = std::thread([state, hwnd, endpointId]() {
-            state->probe = ProbeAudioClient3Support(endpointId);
+            state->probe =
+                llcv::audio_device::ProbeSharedModeSupport(endpointId);
             state->probeReady.store(true, std::memory_order_release);
             PostMessageW(hwnd, WM_AUDIOCLIENT3_PROBE_COMPLETE, 0, 0);
         });
@@ -9536,7 +6125,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             UpdateAudioClient3Status(state);
             const std::wstring endpointId = SelectedAudioEndpointId(state);
             state->probeThread = std::thread([state, hwnd, endpointId]() {
-                state->probe = ProbeAudioClient3Support(endpointId);
+                state->probe =
+                    llcv::audio_device::ProbeSharedModeSupport(endpointId);
                 state->probeReady.store(true, std::memory_order_release);
                 PostMessageW(hwnd, WM_AUDIOCLIENT3_PROBE_COMPLETE, 0, 0);
             });
@@ -9721,7 +6311,8 @@ static bool ShowSettingsDialog(HINSTANCE hInst,
     SettingsDialogState state{};
     state.captureDevices = EnumerateCaptureDevices();
     state.captureAudioDevices = EnumerateCaptureAudioDevices();
-    state.audioEndpoints = EnumerateAudioEndpoints();
+    state.audioEndpoints =
+        llcv::audio_device::EnumerateRenderEndpoints();
     state.asioDrivers = llcv::asio::EnumerateDrivers();
     state.asioAvailable = !state.asioDrivers.empty();
     state.exclusiveVerifiedEndpointId =
@@ -10292,118 +6883,21 @@ static void ConstrainWindowRectToVideoAspect(HWND hwnd, RECT& sizingRect,
     if (!AdjustWindowRectExForDpi(&frame, style, FALSE, exStyle, dpi)) {
         AdjustWindowRectEx(&frame, style, FALSE, exStyle);
     }
-    const int frameWidth = static_cast<int>(frame.right - frame.left);
-    const int frameHeight = static_cast<int>(frame.bottom - frame.top);
-    constexpr int kMinimumClientWidth = 320;
-    constexpr int kMinimumClientHeight = 180;
-    const int minimumOuterWidth = frameWidth + kMinimumClientWidth;
-    const int minimumOuterHeight = frameHeight + kMinimumClientHeight;
-    const int proposedWidth = (std::max)(
-        minimumOuterWidth,
-        static_cast<int>(sizingRect.right - sizingRect.left));
-    const int proposedHeight = (std::max)(
-        minimumOuterHeight,
-        static_cast<int>(sizingRect.bottom - sizingRect.top));
-
-    auto heightFromWidth = [&](int outerWidth) {
-        const int clientWidth =
-            (std::max)(kMinimumClientWidth, outerWidth - frameWidth);
-        return frameHeight + MulDiv(clientWidth, video.height, video.width);
-    };
-    auto widthFromHeight = [&](int outerHeight) {
-        const int clientHeight =
-            (std::max)(kMinimumClientHeight, outerHeight - frameHeight);
-        return frameWidth + MulDiv(clientHeight, video.width, video.height);
-    };
-
-    const bool verticalEdge =
-        sizingEdge == WMSZ_TOP || sizingEdge == WMSZ_BOTTOM;
-    const bool horizontalEdge =
-        sizingEdge == WMSZ_LEFT || sizingEdge == WMSZ_RIGHT;
-    int outerWidth = proposedWidth;
-    int outerHeight = proposedHeight;
-    if (verticalEdge) {
-        outerWidth = widthFromHeight(proposedHeight);
-    } else if (horizontalEdge) {
-        outerHeight = heightFromWidth(proposedWidth);
-    } else {
-        const int widthDrivenHeight = heightFromWidth(proposedWidth);
-        const int heightDrivenWidth = widthFromHeight(proposedHeight);
-        if (std::abs(widthDrivenHeight - proposedHeight) <=
-            std::abs(heightDrivenWidth - proposedWidth)) {
-            outerHeight = widthDrivenHeight;
-        } else {
-            outerWidth = heightDrivenWidth;
-        }
-    }
-
-    const LONG left = sizingRect.left;
-    const LONG top = sizingRect.top;
-    const LONG right = sizingRect.right;
-    const LONG bottom = sizingRect.bottom;
-    switch (sizingEdge) {
-    case WMSZ_LEFT:
-        sizingRect.left = right - outerWidth;
-        sizingRect.bottom = top + outerHeight;
-        break;
-    case WMSZ_RIGHT:
-        sizingRect.right = left + outerWidth;
-        sizingRect.bottom = top + outerHeight;
-        break;
-    case WMSZ_TOP:
-        sizingRect.top = bottom - outerHeight;
-        sizingRect.right = left + outerWidth;
-        break;
-    case WMSZ_BOTTOM:
-        sizingRect.bottom = top + outerHeight;
-        sizingRect.right = left + outerWidth;
-        break;
-    case WMSZ_TOPLEFT:
-        sizingRect.left = right - outerWidth;
-        sizingRect.top = bottom - outerHeight;
-        break;
-    case WMSZ_TOPRIGHT:
-        sizingRect.right = left + outerWidth;
-        sizingRect.top = bottom - outerHeight;
-        break;
-    case WMSZ_BOTTOMLEFT:
-        sizingRect.left = right - outerWidth;
-        sizingRect.bottom = top + outerHeight;
-        break;
-    case WMSZ_BOTTOMRIGHT:
-        sizingRect.right = left + outerWidth;
-        sizingRect.bottom = top + outerHeight;
-        break;
-    default:
-        break;
-    }
+    llcv::window_geometry::ConstrainToAspect(
+        sizingRect, sizingEdge,
+        {static_cast<int>(frame.right - frame.left),
+         static_cast<int>(frame.bottom - frame.top),
+         video.width, video.height, 320, 180});
 }
 
 static LRESULT BorderlessHitTest(HWND hwnd, LPARAM lParam) {
     RECT windowRect{};
     if (!GetWindowRect(hwnd, &windowRect)) return HTCLIENT;
     const POINT cursor{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-    if (!g_settings.pixelPerfect) {
-        const UINT dpi = GetDpiForWindow(hwnd);
-        const int grip = (std::max)(6, MulDiv(8, dpi, 96));
-        const bool left = cursor.x >= windowRect.left &&
-                          cursor.x < windowRect.left + grip;
-        const bool right = cursor.x < windowRect.right &&
-                           cursor.x >= windowRect.right - grip;
-        const bool top = cursor.y >= windowRect.top &&
-                         cursor.y < windowRect.top + grip;
-        const bool bottom = cursor.y < windowRect.bottom &&
-                            cursor.y >= windowRect.bottom - grip;
-        if (left && top) return HTTOPLEFT;
-        if (right && top) return HTTOPRIGHT;
-        if (left && bottom) return HTBOTTOMLEFT;
-        if (right && bottom) return HTBOTTOMRIGHT;
-        if (left) return HTLEFT;
-        if (right) return HTRIGHT;
-        if (top) return HTTOP;
-        if (bottom) return HTBOTTOM;
-    }
-    return HTCAPTION;
+    const UINT dpi = GetDpiForWindow(hwnd);
+    const int grip = (std::max)(6, MulDiv(8, dpi, 96));
+    return llcv::window_geometry::BorderlessHitTest(
+        windowRect, cursor, grip, !g_settings.pixelPerfect);
 }
 
 constexpr UINT_PTR kFullscreenCursorTimerId = 2;
@@ -10613,177 +7107,6 @@ static constexpr UINT WM_TOGGLE_RUNTIME_OSD = WM_APP + 91;
 static constexpr UINT WM_OPEN_SETTINGS = WM_APP + 92;
 static constexpr UINT WM_RESTORE_ONE_TO_ONE = WM_APP + 93;
 
-static std::wstring Utf8ToWide(const std::string& value) {
-    if (value.empty()) return {};
-    const int length = MultiByteToWideChar(
-        CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
-        static_cast<int>(value.size()), nullptr, 0);
-    if (length <= 0) return {};
-    std::wstring result(static_cast<size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
-                        static_cast<int>(value.size()), result.data(), length);
-    return result;
-}
-
-static bool ExtractJsonString(const std::string& json, const char* key,
-                              size_t searchFrom, std::string& value,
-                              size_t* nextPosition = nullptr) {
-    if (!key) return false;
-    const std::string marker = std::string("\"") + key + "\"";
-    const size_t markerPos = json.find(marker, searchFrom);
-    if (markerPos == std::string::npos) return false;
-    size_t cursor = json.find(':', markerPos + marker.size());
-    if (cursor == std::string::npos) return false;
-    ++cursor;
-    while (cursor < json.size() &&
-           (json[cursor] == ' ' || json[cursor] == '\t' ||
-            json[cursor] == '\r' || json[cursor] == '\n')) {
-        ++cursor;
-    }
-    if (cursor >= json.size() || json[cursor] != '"') return false;
-    ++cursor;
-    value.clear();
-    bool escaped = false;
-    for (; cursor < json.size(); ++cursor) {
-        const char ch = json[cursor];
-        if (escaped) {
-            // Release tags and GitHub asset URLs do not contain escaped
-            // unicode, but preserve the common JSON escapes safely.
-            switch (ch) {
-            case '"': value.push_back('"'); break;
-            case '\\': value.push_back('\\'); break;
-            case '/': value.push_back('/'); break;
-            case 'n': value.push_back('\n'); break;
-            case 'r': value.push_back('\r'); break;
-            case 't': value.push_back('\t'); break;
-            default: value.push_back(ch); break;
-            }
-            escaped = false;
-        } else if (ch == '\\') {
-            escaped = true;
-        } else if (ch == '"') {
-            if (nextPosition) *nextPosition = cursor + 1;
-            return true;
-        } else {
-            value.push_back(ch);
-        }
-    }
-    return false;
-}
-
-static bool IsNewerReleaseTag(const std::wstring& latestTag) {
-    auto parse = [](const std::wstring& input) {
-        std::vector<int> parts;
-        size_t index = 0;
-        while (index < input.size() &&
-               (input[index] == L'v' || input[index] == L'V' ||
-                input[index] == L' ')) {
-            ++index;
-        }
-        while (index < input.size()) {
-            while (index < input.size() && !iswdigit(input[index])) ++index;
-            if (index >= input.size()) break;
-            int value = 0;
-            while (index < input.size() && iswdigit(input[index])) {
-                value = (std::min)(value * 10 + (input[index] - L'0'), 1000000);
-                ++index;
-            }
-            parts.push_back(value);
-        }
-        return parts;
-    };
-    const auto latest = parse(latestTag);
-    const auto current = parse(kAppVersionLabel);
-    const size_t count = (std::max)(latest.size(), current.size());
-    for (size_t i = 0; i < count; ++i) {
-        const int lhs = i < latest.size() ? latest[i] : 0;
-        const int rhs = i < current.size() ? current[i] : 0;
-        if (lhs != rhs) return lhs > rhs;
-    }
-    return false;
-}
-
-static bool FetchLatestRelease(UpdateCheckResult& result) {
-    HINTERNET session = WinHttpOpen(
-        L"LowLatencyCaptureViewer/1.2.3",
-        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
-        WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) return false;
-    WinHttpSetTimeouts(session, 2500, 2500, 2500, 2500);
-    HINTERNET connection = WinHttpConnect(
-        session, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!connection) {
-        WinHttpCloseHandle(session);
-        return false;
-    }
-    HINTERNET request = WinHttpOpenRequest(
-        connection, L"GET", L"/repos/seria-aa/LowLatencyCaptureViewer/releases/latest",
-        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-        WINHTTP_FLAG_SECURE);
-    if (!request) {
-        WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
-        return false;
-    }
-    WinHttpAddRequestHeaders(
-        request, L"Accept: application/vnd.github+json\r\n",
-        static_cast<DWORD>(-1L), WINHTTP_ADDREQ_FLAG_ADD);
-    const bool sent = WinHttpSendRequest(
-        request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA,
-        0, 0, 0) && WinHttpReceiveResponse(request, nullptr);
-    if (!sent) {
-        WinHttpCloseHandle(request);
-        WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
-        return false;
-    }
-
-    std::string json;
-    for (;;) {
-        DWORD available = 0;
-        if (!WinHttpQueryDataAvailable(request, &available) || available == 0) {
-            break;
-        }
-        std::string chunk(static_cast<size_t>(available), '\0');
-        DWORD read = 0;
-        if (!WinHttpReadData(request, chunk.data(), available, &read) ||
-            read == 0) {
-            break;
-        }
-        chunk.resize(read);
-        json += chunk;
-        if (json.size() > 2 * 1024 * 1024) break;
-    }
-    WinHttpCloseHandle(request);
-    WinHttpCloseHandle(connection);
-    WinHttpCloseHandle(session);
-
-    std::string tag;
-    if (!ExtractJsonString(json, "tag_name", 0, tag)) return false;
-    result.latestTag = Utf8ToWide(tag);
-    result.success = !result.latestTag.empty();
-    if (result.latestTag.empty() || !IsNewerReleaseTag(result.latestTag)) {
-        return true;
-    }
-
-    size_t cursor = 0;
-    std::string assetUrl;
-    while (ExtractJsonString(json, "browser_download_url", cursor,
-                             assetUrl, &cursor)) {
-        if (assetUrl.find("_Setup.exe") != std::string::npos) break;
-        assetUrl.clear();
-    }
-    const std::wstring installerUrl = Utf8ToWide(assetUrl);
-    constexpr wchar_t kOfficialAssetPrefix[] =
-        L"https://github.com/seria-aa/LowLatencyCaptureViewer/releases/download/";
-    if (installerUrl.empty() || installerUrl.rfind(kOfficialAssetPrefix, 0) != 0) {
-        return true;
-    }
-    result.installerUrl = installerUrl;
-    result.newer = true;
-    return true;
-}
-
 static void StartBackgroundUpdateCheck(HWND hwnd) {
     if (!hwnd || !g_settings.checkForUpdates || g_updateCheckThread.joinable()) {
         return;
@@ -10796,7 +7119,8 @@ static void StartBackgroundUpdateCheck(HWND hwnd) {
             return;
         }
         UpdateCheckResult result;
-        if (!FetchLatestRelease(result) || !result.newer ||
+        if (!llcv::update::FetchLatestRelease(kAppVersionLabel, result) ||
+            !result.newer ||
             result.installerUrl.empty() ||
             g_updateCheckStop.load(std::memory_order_acquire) ||
             !g_running.load(std::memory_order_acquire) || !IsWindow(hwnd)) {
@@ -10832,52 +7156,6 @@ static void FormatAudioErrorAge(uint64_t lastErrorMs, uint64_t nowMs,
                    static_cast<unsigned long long>(ageSeconds / 3600),
                    static_cast<unsigned long long>((ageSeconds / 60) % 60));
     }
-}
-
-struct AudioPatternStats {
-    size_t recentEvents = 0;
-    size_t recentUnderruns = 0;
-    size_t maxConsecutiveUnderruns = 0;
-    uint64_t lastEventMs = 0;
-};
-
-static AudioPatternStats GetAudioPatternStats(uint64_t nowMs,
-                                              UINT32 packetFrames) {
-    constexpr uint64_t kPatternWindowMs = 5 * 60 * 1000;
-    const uint64_t windowStartMs = nowMs > kPatternWindowMs
-        ? nowMs - kPatternWindowMs : 0;
-    const uint64_t packetPeriodMs = packetFrames
-        ? (1000ull * packetFrames + kSampleRate - 1) / kSampleRate : 10;
-    // Two packet periods apart still belong to the same short burst. This is
-    // only used for display classification, not for underrun accounting.
-    const uint64_t burstGapMs = (std::max)(20ull, packetPeriodMs * 2);
-
-    AudioPatternStats stats;
-    size_t currentBurst = 0;
-    uint64_t previousUnderrunMs = 0;
-    std::lock_guard<std::mutex> lock(g_audioErrorHistoryMutex);
-    for (const AudioErrorEvent& event : g_audioErrorHistory) {
-        if (event.timestampMs < windowStartMs) continue;
-        ++stats.recentEvents;
-        stats.lastEventMs = (std::max)(stats.lastEventMs, event.timestampMs);
-        if (event.kind != AudioErrorKind::Underrun) {
-            currentBurst = 0;
-            previousUnderrunMs = 0;
-            continue;
-        }
-        ++stats.recentUnderruns;
-        if (previousUnderrunMs != 0 &&
-            event.timestampMs >= previousUnderrunMs &&
-            event.timestampMs - previousUnderrunMs <= burstGapMs) {
-            ++currentBurst;
-        } else {
-            currentBurst = 1;
-        }
-        stats.maxConsecutiveUnderruns =
-            (std::max)(stats.maxConsecutiveUnderruns, currentBurst);
-        previousUnderrunMs = event.timestampMs;
-    }
-    return stats;
 }
 
 static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
@@ -10979,7 +7257,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
 
     const uint64_t underrunEvents =
         g_underruns.load(std::memory_order_relaxed);
-    const uint64_t overrunEvents = g_ring.overruns();
+    const uint64_t overrunEvents = g_ring.Overruns();
     const uint64_t underrunFrames =
         g_audioUnderrunFrames.load(std::memory_order_acquire);
     const uint64_t overrunFrames =
@@ -11018,8 +7296,8 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     const int activeCorrectionPpm =
         g_audioResamplePpm.load(std::memory_order_acquire);
     const bool trackingActive = AudioTrackingActive();
-    const AudioPatternStats patternStats =
-        GetAudioPatternStats(nowMs, capturePacketFrames);
+    const AudioPatternStats patternStats = g_audioErrorHistory.Analyze(
+        nowMs, capturePacketFrames, kSampleRate);
     wchar_t patternLastText[64]{};
     FormatAudioErrorAge(patternStats.lastEventMs, nowMs, patternLastText,
                         ARRAYSIZE(patternLastText));
@@ -11798,6 +8076,23 @@ static void RelaunchWithSettings() {
     }
 }
 
+static std::wstring CommandLineOptionValue(const wchar_t* option) {
+    if (!option || !*option) return {};
+    int argumentCount = 0;
+    LPWSTR* arguments = CommandLineToArgvW(
+        GetCommandLineW(), &argumentCount);
+    if (!arguments) return {};
+    std::wstring value;
+    for (int index = 1; index + 1 < argumentCount; ++index) {
+        if (_wcsicmp(arguments[index], option) == 0) {
+            value = arguments[index + 1];
+            break;
+        }
+    }
+    LocalFree(arguments);
+    return value;
+}
+
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX commonControls{
@@ -11805,6 +8100,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     InitCommonControlsEx(&commonControls);
 
     LoadSettings();
+    const std::wstring asioSmokeDriver =
+        CommandLineOptionValue(L"--smoke-test-asio");
+    if (!asioSmokeDriver.empty()) {
+        // A smoke-only override avoids editing the user's saved output mode.
+        // g_suppressSettingsSave below keeps the selected driver ephemeral.
+        g_settings.audioMode = AudioMode::Asio;
+        g_settings.asioDriverName = asioSmokeDriver;
+        g_settings.skipStartupSettings = true;
+    }
     const bool audioOnlySmokeTest = commandLine &&
         wcsstr(commandLine, L"--smoke-test-audio-only") != nullptr;
     if (audioOnlySmokeTest) {
@@ -11822,8 +8126,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     g_suppressSettingsSave = smokeTest || exclusiveProbe;
     if (!smokeTest && !exclusiveProbe &&
         g_settings.audioMode == AudioMode::WasapiExclusive) {
-        const std::wstring endpointId = ResolveAudioEndpointId(
-            g_settings.audioOutputDeviceId);
+        const std::wstring endpointId =
+            llcv::audio_device::ResolveActiveEndpointId(
+                g_settings.audioOutputDeviceId);
         if (!HasVerifiedExclusiveEndpoint(endpointId,
                                           g_settings.wasapiBufferMs)) {
             // Never let the immediate-start path open an untested Exclusive
@@ -12244,7 +8549,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
             static_cast<unsigned long long>(
                 g_audioUnderrunFrames.load(std::memory_order_acquire)),
             static_cast<unsigned long long>(
-                g_ring.overruns()),
+                g_ring.Overruns()),
             static_cast<unsigned long long>(
                 g_audioOverrunFrames.load(std::memory_order_acquire)));
         fwprintf(stderr, L"[smoke-overlay] rendered=%llu same-swapchain=%s\n",

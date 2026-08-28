@@ -25,7 +25,7 @@ rg -n "old-version|vold-version" CMakeLists.txt src installer tools docs
 
 ## 2. Build and verify
 
-Produce a Release x64 build, pass both unit tests, and check the diff.
+Produce a Release x64 build, pass every registered test, and check the diff.
 
 ```powershell
 cmake -S . -B build-v<version>-release -G Ninja -DCMAKE_BUILD_TYPE=Release

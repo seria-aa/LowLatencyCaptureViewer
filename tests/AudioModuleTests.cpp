@@ -1,5 +1,6 @@
 #include "audio/AudioMix.h"
 #include "audio/CaptureAudioFormat.h"
+#include "audio/PcmPipeline.h"
 #include "ui/AudioOsdLayout.h"
 
 #include <cmath>
@@ -143,5 +144,51 @@ int main() {
     ok &= Check(capture_audio::Classify(pcm16Type).rejection ==
                     capture_audio::Rejection::SampleRate,
                 "non-48 kHz input must remain rejected without resampling");
+
+    struct OverrunObservation {
+        size_t dropped = 0;
+    } overrun;
+    std::atomic<UINT32> publishedFrames{0};
+    audio::PcmRing ring(
+        3, &publishedFrames,
+        [](void* context, size_t dropped) {
+            static_cast<OverrunObservation*>(context)->dropped += dropped;
+            return true;
+        },
+        &overrun);
+    const int16_t firstFrames[] = {1, -1, 2, -2, 3, -3};
+    ring.Push(firstFrames, 3);
+    int16_t popped[2]{};
+    ok &= Check(ring.Pop(popped, 1) == 1 && popped[0] == 1 &&
+                    popped[1] == -1,
+                "PCM ring must preserve stereo frame order");
+    const int16_t nextFrames[] = {4, -4, 5, -5};
+    ring.Push(nextFrames, 2);
+    int16_t remaining[6]{};
+    ok &= Check(ring.Pop(remaining, 3) == 3 && remaining[0] == 3 &&
+                    remaining[2] == 4 && remaining[4] == 5,
+                "PCM ring overflow must discard only the oldest frame");
+    ok &= Check(overrun.dropped == 1 && ring.Overruns() == 1 &&
+                    publishedFrames.load() == 0,
+                "PCM ring must publish queue depth and tracked overruns");
+
+    audio::PcmRing resampleRing(128);
+    int16_t sourceFrames[128]{};
+    for (int frame = 0; frame < 64; ++frame) {
+        sourceFrames[frame * 2] = static_cast<int16_t>(frame * 100);
+        sourceFrames[frame * 2 + 1] =
+            static_cast<int16_t>(-frame * 100);
+    }
+    resampleRing.Push(sourceFrames, 64);
+    std::atomic<UINT32> resamplerBuffered{0};
+    audio::SincDriftResampler resampler(resampleRing, &resamplerBuffered);
+    resampler.Prepare(16);
+    int16_t resampled[32]{};
+    ok &= Check(resampler.Render(resampled, 16, 1.0) == 16,
+                "drift resampler must produce a full unity-ratio block");
+    resampler.Reset();
+    ok &= Check(resampler.BufferedFrames() == 0 &&
+                    resamplerBuffered.load() == 0,
+                "drift resampler reset must clear its published queue");
     return ok ? 0 : 1;
 }

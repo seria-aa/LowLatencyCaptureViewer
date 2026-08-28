@@ -26,7 +26,7 @@ rg -n "이전버전|v이전버전" CMakeLists.txt src installer tools docs
 
 ## 2. 빌드와 검사
 
-Release x64 빌드를 만들고 두 단위 테스트와 공백 검사를 통과해야 합니다.
+Release x64 빌드를 만들고 등록된 모든 테스트와 공백 검사를 통과해야 합니다.
 
 ```powershell
 cmake -S . -B build-v<version>-release -G Ninja -DCMAKE_BUILD_TYPE=Release
