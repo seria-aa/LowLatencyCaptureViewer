@@ -91,7 +91,7 @@ repeated errors, try `25 ms (extra stability)`, then `30 ms (stability first)`.
 
 ## Log files
 
-Enable **Save diagnostic log file** in the **Help & diagnostics** tab. Logs are
+Enable **Save diagnostic log file** in the **Shortcuts & diagnostics** tab. Logs are
 written to:
 
 ```text

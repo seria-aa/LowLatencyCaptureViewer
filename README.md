@@ -103,7 +103,7 @@ while launching, or press `F2` from the viewer, to open it again.
 | Monitor briefly loses signal in Low latency mode | The graphics driver may be incompatible with the tearing presentation path. Change Presentation to **VSync**; borderless mode can remain enabled |
 | No audio | Select the audio input that belongs to the chosen video device |
 | Occasional audio breakup | Check for buffer shortage in Tab diagnostics, then raise the PCM target in 5 ms steps and test again |
-| Need more evidence | Enable logging in Help & diagnostics, reproduce the issue, then send the newest `.log` file from **Open log folder** together with screenshots of settings and Tab diagnostics |
+| Need more evidence | Enable logging in Shortcuts & diagnostics, reproduce the issue, then send the newest `.log` file from **Open log folder** together with screenshots of settings and Tab diagnostics |
 
 Settings and optional logs are stored in `%LOCALAPPDATA%\LowLatencyCaptureViewer`.
 The uninstaller can remove this user data on request.

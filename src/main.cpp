@@ -92,7 +92,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.2.4";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.5";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -236,18 +236,18 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"창", L"Window"},
         {L"오디오", L"Audio"},
         {L"영상 · 창", L"Video & window"},
-        {L"안내 · 진단", L"Guide & diagnostics"},
+        {L"단축키 · 진단", L"Shortcuts & diagnostics"},
         {L"단축키", L"Shortcuts"},
         {L"진단 · 문제 해결", L"Diagnostics & troubleshooting"},
         {L"로그 폴더 열기", L"Open logs folder"},
         {L"로그 폴더를 열지 못했습니다.", L"Could not open the logs folder."},
         {L"진단 로그", L"Diagnostic logs"},
-        {L"시작을 누르면 현재 설정으로 뷰어를 엽니다.\r\n\r\nF2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료", L"Select Start to open the viewer with the current settings.\r\n\r\nF2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit"},
-        {L"F2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료", L"F2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit"},
+        {L"시작을 누르면 현재 설정으로 뷰어를 엽니다.\r\n\r\nF2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nF11  보더리스 전체화면 켜기/끄기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료", L"Select Start to open the viewer with the current settings.\r\n\r\nF2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nF11  Toggle borderless fullscreen\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit"},
+        {L"F2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nF11  보더리스 전체화면 켜기/끄기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료", L"F2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nF11  Toggle borderless fullscreen\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit"},
         {L"문제가 생길 때만 로그 저장을 켜고 같은 문제를 재현하세요.\r\n로그는 사용자 폴더의 logs에 저장됩니다.", L"Enable log saving only when a problem occurs, then reproduce it.\r\nLogs are saved in the user-data logs folder."},
         {L"업데이트", L"Updates"},
         {L"빠른 안내", L"Quick guide"},
-        {L"이 창에서 설정을 저장한 뒤 시작할 수 있습니다.\r\n\r\nF2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료\r\n\r\n문제가 있으면 진단 로그를 켠 뒤 재현하고, 사용자 폴더의 logs 파일을 첨부해 주세요.", L"Save settings here, then start the viewer.\r\n\r\nF2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit\r\n\r\nFor a problem report, enable diagnostic logging, reproduce the issue, and attach the log from the user-data logs folder."},
+        {L"이 창에서 설정을 저장한 뒤 시작할 수 있습니다.\r\n\r\nF2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nF11  보더리스 전체화면 켜기/끄기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료\r\n\r\n문제가 있으면 진단 로그를 켠 뒤 재현하고, 사용자 폴더의 logs 파일을 첨부해 주세요.", L"Save settings here, then start the viewer.\r\n\r\nF2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nF11  Toggle borderless fullscreen\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit\r\n\r\nFor a problem report, enable diagnostic logging, reproduce the issue, and attach the log from the user-data logs folder."},
         {L"업데이트 확인", L"Update checks"},
         {L"자동 확인은 시작 후 백그라운드에서 최신 릴리스를 확인합니다. 새 버전이 있으면 공식 설치 파일 다운로드를 안내합니다.", L"Automatic checks run in the background after startup. When a new version is available, the app offers the official installer download."},
         {L"현재 버전", L"Current version"},
@@ -303,6 +303,7 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"전체화면 커서", L"Fullscreen cursor"},
         {L"자동 숨김 (권장)", L"Auto-hide (recommended)"},
         {L"항상 표시", L"Always show"},
+        {L"F11  보더리스 전체화면 켜기/끄기", L"F11  Toggle borderless fullscreen"},
         {L"진단 로그 파일 저장 (사용자 폴더)", L"Save diagnostic log (user folder)"},
         {L"진단 콘솔 창 표시", L"Show diagnostic console window"},
         {L"다음 실행부터 바로 시작", L"Start directly next time"},
@@ -3613,6 +3614,7 @@ struct SettingsDialogState {
     HWND presentationLabel = nullptr;
     HWND presentationHelp = nullptr;
     HWND fullscreenCursorLabel = nullptr;
+    HWND fullscreenCursorHint = nullptr;
     HWND scalingLabel = nullptr;
     HWND videoLabel = nullptr;
     HWND captureDeviceLabel = nullptr;
@@ -3898,6 +3900,15 @@ static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
                          windowOptionY + 144, 120, 24, dpi);
     PlaceSettingsControl(state->fullscreenCursorCombo, 630,
                          windowOptionY + 140, 255, 120, dpi);
+    PlaceSettingsControl(state->fullscreenCursorHint, 630,
+                         windowOptionY + 172, 255, 24, dpi);
+    // The combo's configured height includes its drop-down list rectangle.
+    // Keep the adjacent hint above that sibling after every relayout so a
+    // Pixel-perfect redraw cannot paint over it while the list is closed.
+    if (state->fullscreenCursorHint) {
+        SetWindowPos(state->fullscreenCursorHint, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
     // P010 and MJPEG use the same final capture-format row. Only the control
     // relevant to the selected input format is made visible.
     PlaceSettingsControl(state->forceHdr10Check, 34, 374, 360, 28, dpi);
@@ -3956,6 +3967,7 @@ static void UpdateWindowBehaviorVisibility(SettingsDialogState* state) {
     SetSettingsControlVisible(state->borderlessCheck, visible);
     SetSettingsControlVisible(state->fullscreenCursorLabel, visible);
     SetSettingsControlVisible(state->fullscreenCursorCombo, visible);
+    SetSettingsControlVisible(state->fullscreenCursorHint, visible);
     SetSettingsControlVisible(state->relativeSizeWarning,
                               visible && pixelPerfect && relativeSize);
 }
@@ -4003,7 +4015,8 @@ static void UpdateAdvancedControlVisibility(SettingsDialogState* state) {
                          state->frameRateCombo, state->videoCapabilityStatus,
                          state->pixelCheck, state->windowSnapCheck,
                          state->fullscreenCursorLabel,
-                         state->fullscreenCursorCombo}) {
+                         state->fullscreenCursorCombo,
+                         state->fullscreenCursorHint}) {
         SetSettingsControlVisible(control, video);
     }
     // This row has two mutually exclusive controls: the device picker for a
@@ -5251,7 +5264,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         if (state->tabControl) {
             const wchar_t* labels[] = {
                 UI_TEXT(L"오디오"), UI_TEXT(L"영상 · 창"),
-                UI_TEXT(L"안내 · 진단"), UI_TEXT(L"업데이트")};
+                UI_TEXT(L"단축키 · 진단"), UI_TEXT(L"업데이트")};
             for (int i = 0; i < static_cast<int>(ARRAYSIZE(labels)); ++i) {
                 TCITEMW item{};
                 item.mask = TCIF_TEXT;
@@ -5513,6 +5526,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             0, L"STATIC", UI_TEXT(
                 L"F2  설정 다시 열기\r\nF3  오디오 OSD\r\n"
                 L"F5  Pixel-perfect 크기로 맞추기\r\n"
+                L"F11  보더리스 전체화면 켜기/끄기\r\n"
                 L"Tab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료"),
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             34, 84, 400, 220, hwnd, nullptr, instance, nullptr);
@@ -5708,7 +5722,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             UI_TEXT(L"전체화면 커서"), 505, 336);
         state->fullscreenCursorCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS |
+                CBS_DROPDOWNLIST | WS_TABSTOP,
             630, 332, 255, 120, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(
                 IDC_SETTINGS_FULLSCREEN_CURSOR)),
@@ -5722,6 +5737,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                              FullscreenCursorMode::AlwaysVisible
                          ? 1 : 0,
                      0);
+        state->fullscreenCursorHint = CreateWindowExW(
+            0, L"STATIC",
+            UI_TEXT(L"F11  보더리스 전체화면 켜기/끄기"),
+            WS_CHILD | WS_VISIBLE | SS_RIGHT,
+            630, 364, 255, 24, hwnd, nullptr, instance, nullptr);
 
         state->forceHdr10Check = CreateWindowExW(
             0, L"BUTTON", UI_TEXT(

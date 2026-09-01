@@ -1,4 +1,16 @@
-Low Latency Capture Viewer v1.2.4 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.5 x64 (continued from the v0.14.2 rework)
+
+v1.2.5 shortcut guidance release
+--------------------------------
+- Renamed the Guide & diagnostics settings tab to Shortcuts & diagnostics so
+  its contents are clearer before opening it.
+- Added the missing F11 borderless-fullscreen shortcut to the settings guide.
+- Added a persistent, right-aligned F11 hint below the fullscreen-cursor
+  option in the Video & window tab.
+- Kept the F11 hint visible when Pixel-perfect changes the surrounding layout
+  by preventing the combo box's drop-down rectangle from painting over it.
+- Updated Korean and English troubleshooting documentation to use the new tab
+  name. Capture, rendering, and audio processing paths are unchanged.
 
 v1.2.4 maintainability and regression-safety release
 ---------------------------------------------------
