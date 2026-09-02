@@ -92,7 +92,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.2.5";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.5.1";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -6610,6 +6610,26 @@ static void NormalizeWindowSize(HWND hwnd, bool clampToWorkArea) {
 static HMONITOR g_relativeMoveMonitor = nullptr;
 static bool g_manualResizeInProgress = false;
 static bool g_outputResizePending = false;
+// Window-style changes synchronously emit WM_SIZE while F11/F5 is still
+// updating the outer window. Coalesce those notifications so the render
+// thread never tears down and recreates the flip-model swap chain halfway
+// through a fullscreen transition.
+static unsigned int g_outputTransitionDepth = 0;
+
+static void BeginOutputTransition() {
+    ++g_outputTransitionDepth;
+}
+
+static void EndOutputTransition(bool requestOutputUpdate) {
+    if (requestOutputUpdate) g_outputResizePending = true;
+    if (g_outputTransitionDepth > 0) --g_outputTransitionDepth;
+    if (g_outputTransitionDepth == 0 && g_outputResizePending &&
+        !g_manualResizeInProgress) {
+        g_outputResizePending = false;
+        g_outputConfigurationGeneration.fetch_add(
+            1, std::memory_order_acq_rel);
+    }
+}
 
 static void RememberRelativeScaleFromWindow(HWND hwnd) {
     if (!hwnd || !g_settings.relativeWindowSize ||
@@ -6996,6 +7016,7 @@ static LRESULT CALLBACK VideoHostSubclassProc(
 
 static void ToggleFullscreen(HWND hwnd, bool automaticStartup = false,
                              bool updateOutput = true) {
+    BeginOutputTransition();
     if (!g_fullscreen.load(std::memory_order_acquire)) {
         GetWindowRect(hwnd, &g_lastWindowedRect);
         g_haveLastWindowedRect = true;
@@ -7024,10 +7045,7 @@ static void ToggleFullscreen(HWND hwnd, bool automaticStartup = false,
                      SWP_NOZORDER | SWP_NOOWNERZORDER);
         g_autoFullscreen = false;
     }
-    if (updateOutput) {
-        g_outputConfigurationGeneration.fetch_add(
-            1, std::memory_order_acq_rel);
-    }
+    EndOutputTransition(updateOutput);
 }
 
 static bool SelectedResolutionMatchesMonitor(HMONITOR monitor) {
@@ -7097,6 +7115,7 @@ static void RestoreOneToOneWindow(HWND hwnd) {
     }
 
     if (outer.cx <= workWidth && outer.cy <= workHeight) {
+        BeginOutputTransition();
         if (g_settings.relativeWindowSize) {
             // F5 establishes this monitor's 1:1 window as the new relative
             // baseline as well, so subsequent monitor moves preserve it.
@@ -7108,8 +7127,7 @@ static void RestoreOneToOneWindow(HWND hwnd) {
         const int y = monitorInfo.rcWork.top + (workHeight - outer.cy) / 2;
         SetWindowPos(hwnd, nullptr, x, y, outer.cx, outer.cy,
                      SWP_NOZORDER | SWP_NOACTIVATE);
-        g_outputConfigurationGeneration.fetch_add(
-            1, std::memory_order_acq_rel);
+        EndOutputTransition(true);
         ShowTransientHud(TransientHudContent::OneToOne);
         fwprintf(stderr, L"[video] F5 restored 1:1 client: %d x %d.\n",
                  video.width, video.height);
@@ -7762,7 +7780,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // backbuffer matches the new client area. During an interactive
             // drag, defer this until WM_EXITSIZEMOVE; rebuilding the D3D11
             // output for every sizing tick would cause needless stalls.
-            if (g_manualResizeInProgress) {
+            if (g_manualResizeInProgress || g_outputTransitionDepth > 0) {
                 g_outputResizePending = true;
             } else {
                 g_outputConfigurationGeneration.fetch_add(

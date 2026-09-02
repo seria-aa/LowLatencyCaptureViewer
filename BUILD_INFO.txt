@@ -1,4 +1,12 @@
-Low Latency Capture Viewer v1.2.5 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.5.1 x64 (continued from the v0.14.2 rework)
+
+v1.2.5.1 F11 fullscreen transition prerelease
+------------------------------------------------
+- Coalesced synchronous window-size notifications generated during F11
+  borderless-fullscreen transitions into one D3D11 output update.
+- F5 one-to-one restoration uses the same serialized output transition path.
+- DirectShow capture and audio output remain running; no frame or audio queue
+  was added.
 
 v1.2.5 shortcut guidance release
 --------------------------------
