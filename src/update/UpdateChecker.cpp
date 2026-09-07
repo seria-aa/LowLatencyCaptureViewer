@@ -105,9 +105,13 @@ bool IsNewerReleaseTag(const std::wstring& latestTag,
     return false;
 }
 
-bool FetchLatestRelease(const wchar_t* currentVersion, CheckResult& result) {
+bool FetchLatestRelease(const wchar_t* currentVersion, CheckResult& result,
+                        const std::atomic<bool>* stop) {
     result = {};
-    if (!currentVersion || !*currentVersion) return false;
+    const auto cancelled = [stop]() {
+        return stop && stop->load(std::memory_order_acquire);
+    };
+    if (!currentVersion || !*currentVersion || cancelled()) return false;
 
     std::wstring userAgent = L"LowLatencyCaptureViewer/";
     userAgent += currentVersion[0] == L'v' || currentVersion[0] == L'V'
@@ -136,9 +140,9 @@ bool FetchLatestRelease(const wchar_t* currentVersion, CheckResult& result) {
     WinHttpAddRequestHeaders(
         request, L"Accept: application/vnd.github+json\r\n",
         static_cast<DWORD>(-1L), WINHTTP_ADDREQ_FLAG_ADD);
-    const bool sent = WinHttpSendRequest(
+    const bool sent = !cancelled() && WinHttpSendRequest(
         request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA,
-        0, 0, 0) && WinHttpReceiveResponse(request, nullptr);
+        0, 0, 0) && !cancelled() && WinHttpReceiveResponse(request, nullptr);
     if (!sent) {
         WinHttpCloseHandle(request);
         WinHttpCloseHandle(connection);
@@ -146,51 +150,77 @@ bool FetchLatestRelease(const wchar_t* currentVersion, CheckResult& result) {
         return false;
     }
 
+    DWORD statusCode = 0;
+    DWORD statusSize = sizeof(statusCode);
+    if (!WinHttpQueryHeaders(
+            request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize,
+            WINHTTP_NO_HEADER_INDEX) || statusCode != 200) {
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
     std::string json;
-    for (;;) {
+    constexpr size_t kMaximumResponseBytes = 2 * 1024 * 1024;
+    bool complete = false;
+    for (; !cancelled();) {
         DWORD available = 0;
-        if (!WinHttpQueryDataAvailable(request, &available) || available == 0) {
+        if (!WinHttpQueryDataAvailable(request, &available)) break;
+        if (available == 0) {
+            complete = true;
             break;
         }
+        if (available > kMaximumResponseBytes - json.size()) break;
         std::string chunk(static_cast<size_t>(available), '\0');
         DWORD read = 0;
-        if (!WinHttpReadData(request, chunk.data(), available, &read) ||
+        if (cancelled() ||
+            !WinHttpReadData(request, chunk.data(), available, &read) ||
             read == 0) {
             break;
         }
         chunk.resize(read);
         json += chunk;
-        if (json.size() > 2 * 1024 * 1024) break;
     }
     WinHttpCloseHandle(request);
     WinHttpCloseHandle(connection);
     WinHttpCloseHandle(session);
 
+    if (!complete || cancelled()) return false;
+
+    return ParseLatestReleaseResponse(json, currentVersion, result);
+}
+
+bool ParseLatestReleaseResponse(const std::string& json,
+                                const wchar_t* currentVersion,
+                                CheckResult& result) {
+    result = {};
+    if (!currentVersion || !*currentVersion) return false;
+
     std::string tag;
     if (!ExtractJsonString(json, "tag_name", 0, tag)) return false;
     result.latestTag = Utf8ToWide(tag);
-    result.success = !result.latestTag.empty();
-    if (result.latestTag.empty() ||
-        !IsNewerReleaseTag(result.latestTag, currentVersion)) {
+    if (result.latestTag.empty()) return false;
+    result.success = true;
+    result.newer = IsNewerReleaseTag(result.latestTag, currentVersion);
+    if (!result.newer) {
         return true;
     }
 
     size_t cursor = 0;
     std::string assetUrl;
-    while (ExtractJsonString(json, "browser_download_url", cursor,
-                             assetUrl, &cursor)) {
-        if (assetUrl.find("_Setup.exe") != std::string::npos) break;
-        assetUrl.clear();
-    }
-    const std::wstring installerUrl = Utf8ToWide(assetUrl);
     constexpr wchar_t kOfficialAssetPrefix[] =
         L"https://github.com/seria-aa/LowLatencyCaptureViewer/releases/download/";
-    if (installerUrl.empty() ||
-        installerUrl.rfind(kOfficialAssetPrefix, 0) != 0) {
-        return true;
+    while (ExtractJsonString(json, "browser_download_url", cursor,
+                             assetUrl, &cursor)) {
+        const std::wstring installerUrl = Utf8ToWide(assetUrl);
+        if (installerUrl.rfind(kOfficialAssetPrefix, 0) == 0 &&
+            installerUrl.ends_with(L"_Setup.exe")) {
+            result.installerUrl = installerUrl;
+            break;
+        }
     }
-    result.installerUrl = installerUrl;
-    result.newer = true;
     return true;
 }
 

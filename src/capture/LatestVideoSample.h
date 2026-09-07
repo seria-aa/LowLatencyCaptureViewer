@@ -1,6 +1,7 @@
 #pragma once
 
 #include "capture/SampleGrabberCompat.h"
+#include "diagnostics/LogSink.h"
 
 #include <atomic>
 #include <cstddef>
@@ -44,7 +45,8 @@ private:
 
 class VideoSampleGrabberCallback final : public ISampleGrabberCB {
 public:
-    explicit VideoSampleGrabberCallback(LatestVideoSample* sampleSlot);
+    explicit VideoSampleGrabberCallback(
+        LatestVideoSample* sampleSlot, diagnostics::LogSink log = nullptr);
 
     STDMETHODIMP QueryInterface(REFIID id, void** object) override;
     STDMETHODIMP_(ULONG) AddRef() override;
@@ -57,6 +59,7 @@ private:
     std::atomic<ULONG> references_{1};
     std::atomic<bool> surfaceCapabilityProbed_{false};
     LatestVideoSample* sampleSlot_ = nullptr;
+    diagnostics::LogSink log_ = nullptr;
 };
 
 }  // namespace llcv::capture

@@ -20,6 +20,11 @@ PcmRing::PcmRing(size_t capacityFrames,
 
 size_t PcmRing::PrepareWrite(size_t frames) {
     if (frames >= capacityFrames_) {
+        const size_t dropped = available_ + (frames - capacityFrames_);
+        if (dropped && overrunObserver_ &&
+            overrunObserver_(observerContext_, dropped)) {
+            overruns_.fetch_add(1, std::memory_order_relaxed);
+        }
         readFrame_ = 0;
         writeFrame_ = 0;
         available_ = 0;
@@ -183,12 +188,16 @@ size_t SincDriftResampler::Render(int16_t* output, size_t outputFrames,
             break;
         }
         const double fraction = samplePosition - static_cast<double>(center);
+        double weights[kHalfTaps * 2];
+        for (int tap = -kHalfTaps + 1; tap <= kHalfTaps; ++tap) {
+            weights[tap + kHalfTaps - 1] =
+                WindowedSinc(static_cast<double>(tap) - fraction);
+        }
         for (size_t channel = 0; channel < kChannels; ++channel) {
             double sum = 0.0;
             double normalization = 0.0;
             for (int tap = -kHalfTaps + 1; tap <= kHalfTaps; ++tap) {
-                const double distance = static_cast<double>(tap) - fraction;
-                const double weight = WindowedSinc(distance);
+                const double weight = weights[tap + kHalfTaps - 1];
                 const size_t index =
                     (center + static_cast<size_t>(tap + kHalfTaps - 1) -
                      static_cast<size_t>(kHalfTaps - 1)) * kChannels + channel;

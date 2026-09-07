@@ -76,7 +76,7 @@ struct AppSettings {
     int wasapiBufferMs = 20;
     uint32_t wasapiSharedPeriodFrames = 0;
     DriftCorrectionMode driftCorrection = DriftCorrectionMode::Auto;
-    int pcmQueueTargetMs = 20;
+    int pcmQueueTargetMs = 25;
     int volumePercent = 100;
     int leftVolumePercent = 100;
     int rightVolumePercent = 100;

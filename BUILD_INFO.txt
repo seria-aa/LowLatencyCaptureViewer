@@ -1,4 +1,19 @@
-Low Latency Capture Viewer v1.2.5.1 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.6 x64 (continued from the v0.14.2 rework)
+
+v1.2.6 audio stability and lifecycle hardening release
+----------------------------------------------------
+- Improved WASAPI Shared clock/queue control, starvation recovery and diagnostics.
+- Default PCM reserve is 25 ms; legacy 20 ms settings migrate once. Other saved
+  values and a later manual 20 ms selection are preserved.
+- Recovery can insert brief silence while refilling reserve after missing input;
+  it does not guarantee shorter interruptions in every fault condition.
+- Bounded audio-device recovery uses successful runtime, not failed-open duration.
+- Retained F11/F5 transition coalescing and ignored repeated F11 key-down messages.
+- Capture graph teardown now owns the latest-frame mailbox until callbacks stop.
+- Update checks and Exclusive scans own pending results across window shutdown.
+- Included the ASIO SDK license in both installer and portable packages.
+- Validation uses automated/virtual replay tests, not extended physical-device
+  listening or a guarantee of dropout-free playback on every driver.
 
 v1.2.5.1 F11 fullscreen transition prerelease
 ------------------------------------------------

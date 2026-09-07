@@ -14,6 +14,7 @@ constexpr size_t kMaximumExclusiveEndpointCacheEntries = 32;
 constexpr int kRelativeScaleUnit = 1'000'000;
 constexpr std::array<int, 6> kExclusiveBufferOptionsMs{5, 10, 15, 20, 30, 40};
 constexpr std::array<int, 5> kPcmQueueOptionsMs{10, 15, 20, 25, 30};
+constexpr int kPcmQueueDefaultsVersion = 1;
 
 std::wstring ReadString(
     const std::wstring& path, const wchar_t* section, const wchar_t* key,
@@ -116,6 +117,16 @@ void VideoDimensions(VideoPreset preset, int& width, int& height) {
 
 }  // namespace
 
+bool MigrateLegacyPcmQueueTarget(const std::wstring& path) {
+    if (ReadInt(path, L"Audio", L"PcmQueueDefaultsVersion") >= kPcmQueueDefaultsVersion ||
+        ReadInt(path, L"Audio", L"PcmQueueTargetMs", 25) != 20) return true;
+    // Write the value first: if the marker fails, retrying is harmless.
+    // Do not rewrite the entire INI or migrate any other saved setting.
+    if (!WritePrivateProfileStringW(L"Audio", L"PcmQueueTargetMs", L"25", path.c_str()))
+        return false;
+    return WritePrivateProfileStringW(L"Audio", L"PcmQueueDefaultsVersion", L"1", path.c_str()) != 0;
+}
+
 LoadResult LoadFromIni(const std::wstring& path) {
     LoadResult result{};
     AppSettings& settings = result.settings;
@@ -164,10 +175,14 @@ LoadResult LoadFromIni(const std::wstring& path) {
         settings.driftCorrection = DriftCorrectionMode::Off;
     }
     const int requestedQueueMs =
-        ReadInt(path, L"Audio", L"PcmQueueTargetMs", 20);
+        ReadInt(path, L"Audio", L"PcmQueueTargetMs", settings.pcmQueueTargetMs);
     if (std::find(kPcmQueueOptionsMs.begin(), kPcmQueueOptionsMs.end(),
                   requestedQueueMs) != kPcmQueueOptionsMs.end()) {
         settings.pcmQueueTargetMs = requestedQueueMs;
+    }
+    if (requestedQueueMs == 20 &&
+        ReadInt(path, L"Audio", L"PcmQueueDefaultsVersion") < kPcmQueueDefaultsVersion) {
+        settings.pcmQueueTargetMs = 25;
     }
 
     settings.allowVolumeBoost =
@@ -333,6 +348,7 @@ void SaveToIni(const std::wstring& path, const AppSettings& settings) {
     }
     WriteString(path, L"Audio", L"DriftCorrection", drift);
     WriteInt(path, L"Audio", L"PcmQueueTargetMs", settings.pcmQueueTargetMs);
+    WriteInt(path, L"Audio", L"PcmQueueDefaultsVersion", kPcmQueueDefaultsVersion);
     WriteInt(path, L"Audio", L"Volume", settings.volumePercent);
     WriteInt(path, L"Audio", L"LeftVolume", settings.leftVolumePercent);
     WriteInt(path, L"Audio", L"RightVolume", settings.rightVolumePercent);

@@ -27,7 +27,9 @@ Windows 10/11 x64 and a capture-device driver are required.
 3. Confirm **Capture device**, then select **Start**.
 
 The defaults are a good first test: 1080p, low-latency presentation, WASAPI
-Shared, a 20 ms PCM buffer, and automatic clock-drift correction.
+Shared, a 25 ms PCM buffer, and automatic clock-drift correction. A saved 20 ms
+PCM target from an older build is upgraded to 25 ms once on first launch; other
+saved values are preserved. You can select 20 ms again afterward.
 
 If video works but audio does not, check **Capture audio device**. USB capture
 devices can expose separate video and audio devices; in that case, choose the
@@ -57,7 +59,7 @@ source and capture device actually support.
 | Audio output mode | **WASAPI Shared** |
 | Output device | **Follow the Windows default output device** |
 | Output buffer | The value marked as recommended in settings |
-| PCM buffer target | **20 ms** |
+| PCM buffer target | **25 ms** |
 | Clock-drift correction | **Auto** |
 
 WASAPI Shared is the default mode for compatibility with other applications
@@ -67,7 +69,7 @@ the app's playback-event check. Use WASAPI Shared unless you have a specific
 reason to choose another mode.
 
 If sound occasionally breaks up, open the Tab diagnostics overlay. Raise the
-PCM target from `20` to `25` to `30 ms` only when **buffer shortage** or **resampler
+PCM target in 5 ms steps from its current value (e.g. `20 → 25 → 30 ms`) only when **buffer shortage** or **resampler
 output shortage** repeats. Leave it alone when there are no errors.
 
 ## Everyday controls

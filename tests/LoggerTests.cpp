@@ -1,4 +1,5 @@
 #include "diagnostics/Logger.h"
+#include "diagnostics/LogSink.h"
 
 #include <windows.h>
 
@@ -12,6 +13,11 @@
 #include <vector>
 
 namespace {
+llcv::diagnostics::Logger* moduleLogger = nullptr;
+FILE* moduleConsole = nullptr;
+void ModuleMessage(const wchar_t* message) {
+    moduleLogger->Print(moduleConsole, L"%s", message);
+}
 
 void Require(bool condition, const char* message) {
     if (condition) return;
@@ -151,12 +157,18 @@ int main() {
             "content sink must open");
     Require(contentLogger.Print(contentSink, L"format-marker=%d\n", 42) >= 0,
             "logger must write a regular record");
+    moduleLogger = &contentLogger;
+    moduleConsole = contentSink;
+    LogMessage(ModuleMessage, L"module-buffer=%u\n", 960u);
     contentLogger.Close();
     std::fclose(contentSink);
     bool markerFound = false;
+    bool moduleFound = false;
     for (const auto& file : ManagedFiles(temporary.path())) {
         markerFound = markerFound || ContainsAscii(file, "format-marker=42");
+        moduleFound = moduleFound || ContainsAscii(file, "module-buffer=960");
     }
     Require(markerFound, "saved UTF-8 log must retain the original message text");
+    Require(moduleFound, "module diagnostics must reach the saved UTF-8 file");
     return 0;
 }

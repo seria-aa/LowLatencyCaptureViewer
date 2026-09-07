@@ -1,4 +1,5 @@
 #include "audio/WasapiOutput.h"
+#include "audio/SharedDeadlineMonitor.h"
 
 #include "audio/AudioDeviceCapabilities.h"
 
@@ -29,8 +30,7 @@ void LogHresult(const Host& host, const wchar_t* operation, HRESULT result) {
     if (host.logHresult) {
         host.logHresult(host.context, operation, result);
     } else {
-        std::fwprintf(
-            stderr, L"%s failed: 0x%08X\n", operation,
+        diagnostics::LogMessage(host.log, L"%s failed: 0x%08X\n", operation,
             static_cast<unsigned>(result));
     }
 }
@@ -81,11 +81,13 @@ bool IsRunning(const Host& host) {
 
 }  // namespace
 
-bool Run(const Configuration& configuration, const Host& host) {
+RunResult Run(const Configuration& configuration, const Host& host,
+              uint64_t* successfulRuntimeMilliseconds) {
+    if (successfulRuntimeMilliseconds) *successfulRuntimeMilliseconds = 0;
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         LogHresult(host, L"CoInitializeEx(audio render)", hr);
-        return false;
+        return RunResult::Failed;
     }
 
     const bool exclusive = configuration.mode == Mode::Exclusive;
@@ -101,17 +103,16 @@ bool Run(const Configuration& configuration, const Host& host) {
     DefaultEndpointNotification* endpointNotification = nullptr;
     bool notificationRegistered = false;
     bool restartForDefaultChange = false;
+    bool sessionStarted = false;
     HANDLE eventHandle = nullptr;
 
     DWORD taskIndex = 0;
     HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
     if (exclusive && mmcss) {
         if (AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_CRITICAL)) {
-            std::fwprintf(
-                stderr, L"[audio][exclusive] MMCSS priority: Critical\n");
+            diagnostics::LogMessage(host.log, L"[audio][exclusive] MMCSS priority: Critical\n");
         } else {
-            std::fwprintf(
-                stderr,
+            diagnostics::LogMessage(host.log,
                 L"[audio][exclusive] MMCSS Critical priority request "
                 L"failed (error %lu); using task default.\n",
                 GetLastError());
@@ -155,8 +156,7 @@ bool Run(const Configuration& configuration, const Host& host) {
             outputName = followDefault ? L"Windows 기본 장치"
                                        : L"선택한 출력 장치";
         }
-        std::fwprintf(
-            stderr, L"[audio] output endpoint: %s%s\n", outputName.c_str(),
+        diagnostics::LogMessage(host.log, L"[audio] output endpoint: %s%s\n", outputName.c_str(),
             followDefault ? L" (following Windows default)" : L"");
         if (host.endpointChanged) {
             host.endpointChanged(host.context, outputName, followDefault);
@@ -183,8 +183,7 @@ bool Run(const Configuration& configuration, const Host& host) {
                     host, L"IAudioClient::IsFormatSupported(exclusive)", hr);
                 break;
             }
-            std::fwprintf(
-                stderr,
+            diagnostics::LogMessage(host.log,
                 L"[audio] exclusive exact format accepted: %u Hz / "
                 L"%u-bit PCM / %u ch\n",
                 format.nSamplesPerSec, format.wBitsPerSample,
@@ -215,8 +214,7 @@ bool Run(const Configuration& configuration, const Host& host) {
                         subtype = L"PCM";
                     }
                 }
-                std::fwprintf(
-                    stderr,
+                diagnostics::LogMessage(host.log,
                     L"[audio] endpoint Shared mix format (not used by "
                     L"Exclusive): %u Hz / %u-bit %s (%u valid) / %u ch\n",
                     sharedMix->nSamplesPerSec, sharedMix->wBitsPerSample,
@@ -269,8 +267,7 @@ bool Run(const Configuration& configuration, const Host& host) {
                     &format, nullptr);
                 if (SUCCEEDED(hr)) {
                     usingAudioClient3 = true;
-                    std::fwprintf(
-                        stderr,
+                    diagnostics::LogMessage(host.log,
                         L"[audio] IAudioClient3 shared period: %u frames "
                         L"(%.2f ms)\n",
                         selectedFrames,
@@ -282,8 +279,7 @@ bool Run(const Configuration& configuration, const Host& host) {
                         L"IAudioClient3::InitializeSharedAudioStream", hr);
                 }
             } else {
-                std::fwprintf(
-                    stderr,
+                diagnostics::LogMessage(host.log,
                     L"[audio] IAudioClient3 unavailable for this format; "
                     L"using classic Shared mode.\n");
             }
@@ -314,8 +310,7 @@ bool Run(const Configuration& configuration, const Host& host) {
                         hr);
                     break;
                 }
-                std::fwprintf(
-                    stderr,
+                diagnostics::LogMessage(host.log,
                     L"[audio] classic WASAPI Shared fallback active.\n");
             }
         } else {
@@ -328,8 +323,7 @@ bool Run(const Configuration& configuration, const Host& host) {
                     host, L"IAudioClient::GetDevicePeriod(exclusive)",
                     periodHr);
             } else {
-                std::fwprintf(
-                    stderr,
+                diagnostics::LogMessage(host.log,
                     L"[audio] exclusive endpoint period: default %.2f ms, "
                     L"minimum %.2f ms\n",
                     static_cast<double>(defaultPeriod) / 10'000.0,
@@ -337,8 +331,7 @@ bool Run(const Configuration& configuration, const Host& host) {
             }
             REFERENCE_TIME duration = static_cast<REFERENCE_TIME>(
                 configuration.bufferMilliseconds) * 10'000;
-            std::fwprintf(
-                stderr,
+            diagnostics::LogMessage(host.log,
                 L"[audio] exclusive request: buffer %.2f ms, event period "
                 L"%.2f ms (same-duration event mode)\n",
                 static_cast<double>(duration) / 10'000.0,
@@ -355,8 +348,7 @@ bool Run(const Configuration& configuration, const Host& host) {
                     duration = static_cast<REFERENCE_TIME>(
                         (10'000'000.0 * alignedFrames /
                          audio_device::kSampleRate) + 0.5);
-                    std::fwprintf(
-                        stderr,
+                    diagnostics::LogMessage(host.log,
                         L"[audio] WASAPI exclusive period aligned: %u "
                         L"frames (%.2f ms)\n",
                         alignedFrames,
@@ -383,7 +375,8 @@ bool Run(const Configuration& configuration, const Host& host) {
 
         eventHandle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!eventHandle) {
-            std::fwprintf(stderr, L"Create audio wake handle failed.\n");
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            LogHresult(host, L"Create audio wake handle", hr);
             break;
         }
         hr = client->SetEventHandle(eventHandle);
@@ -410,8 +403,7 @@ bool Run(const Configuration& configuration, const Host& host) {
                     SafeRelease(clock);
                     exclusiveClockFrequency = 0;
                 } else {
-                    std::fwprintf(
-                        stderr,
+                    diagnostics::LogMessage(host.log,
                         L"[audio][exclusive] endpoint clock frequency: "
                         L"%llu ticks/sec\n",
                         static_cast<unsigned long long>(
@@ -432,13 +424,11 @@ bool Run(const Configuration& configuration, const Host& host) {
         if (host.bufferChanged) {
             host.bufferChanged(host.context, bufferFrames);
         }
-        std::fwprintf(
-            stderr, L"[audio] WASAPI %s buffer: %u frames (%.2f ms)\n",
+        diagnostics::LogMessage(host.log, L"[audio] WASAPI %s buffer: %u frames (%.2f ms)\n",
             exclusive ? L"exclusive" : L"shared", bufferFrames,
             1000.0 * bufferFrames / audio_device::kSampleRate);
         if (exclusive || !usingAudioClient3) {
-            std::fwprintf(
-                stderr, L"[audio] requested WASAPI buffer: %d ms\n",
+            diagnostics::LogMessage(host.log, L"[audio] requested WASAPI buffer: %d ms\n",
                 configuration.bufferMilliseconds);
         }
 
@@ -451,30 +441,40 @@ bool Run(const Configuration& configuration, const Host& host) {
         std::memset(
             prime, 0, static_cast<size_t>(bufferFrames) *
                           format.nBlockAlign);
-        render->ReleaseBuffer(bufferFrames, 0);
+        hr = render->ReleaseBuffer(bufferFrames, 0);
+        if (FAILED(hr)) {
+            LogHresult(host, L"ReleaseBuffer(prime)", hr);
+            break;
+        }
 
         if (configuration.reinitializingEndpoint && host.beforeStart) {
             host.beforeStart(host.context);
-            std::fwprintf(
-                stderr,
+            diagnostics::LogMessage(host.log,
                 L"[audio] endpoint switch: discarded setup backlog "
                 L"immediately before Start.\n");
         }
 
+        std::vector<int16_t> temp(
+            static_cast<size_t>(bufferFrames) * audio_device::kChannels);
+        audio::SharedDeadlineMonitor deadline;
+        LARGE_INTEGER qpcFrequency{};
+        QueryPerformanceFrequency(&qpcFrequency);
+        const auto secondsNow = [&]() {
+            LARGE_INTEGER value{};
+            QueryPerformanceCounter(&value);
+            return static_cast<double>(value.QuadPart) / qpcFrequency.QuadPart;
+        };
         hr = client->Start();
         if (FAILED(hr)) {
             LogHresult(host, L"IAudioClient::Start", hr);
             break;
         }
-        std::fwprintf(
-            stderr, L"[audio] WASAPI %s render running.\n",
+        const uint64_t sessionStartMs = GetTickCount64();
+        diagnostics::LogMessage(host.log, L"[audio] WASAPI %s render running.\n",
             exclusive ? L"exclusive" : L"shared");
-        std::fwprintf(
-            stderr, L"[audio] clock-drift correction: %s\n",
+        diagnostics::LogMessage(host.log, L"[audio] clock-drift correction: %s\n",
             configuration.correctionDescription);
 
-        std::vector<int16_t> temp(
-            static_cast<size_t>(bufferFrames) * audio_device::kChannels);
         uint64_t windowStartMs = GetTickCount64();
         uint64_t lastEventMs = 0;
         uint64_t lastClockPosition = 0;
@@ -515,8 +515,7 @@ bool Run(const Configuration& configuration, const Host& host) {
                 ? 1000.0 * static_cast<double>(clockIntervalMaxTicks) /
                       static_cast<double>(exclusiveClockFrequency)
                 : 0.0;
-            std::fwprintf(
-                stderr,
+            diagnostics::LogMessage(host.log,
                 L"[audio][exclusive] 1s: event=%llu, interval avg/max "
                 L"%.2f/%llu ms, late=%llu (threshold %llu ms), "
                 L"timeout=%llu, padding min/max=%u/%u frames, "
@@ -554,13 +553,14 @@ bool Run(const Configuration& configuration, const Host& host) {
             maximumPadding = 0;
         };
 
+        sessionStarted = true;
+        uint64_t lastSignalMs = GetTickCount64();
         while (IsRunning(host)) {
             if (followDefault && notificationRegistered &&
                 defaultGeneration.load(std::memory_order_acquire) !=
                     watchedDefaultGeneration) {
                 restartForDefaultChange = true;
-                std::fwprintf(
-                    stderr,
+                diagnostics::LogMessage(host.log,
                     L"[audio] Windows default output changed; "
                     L"reinitializing WASAPI only.\n");
                 break;
@@ -568,12 +568,17 @@ bool Run(const Configuration& configuration, const Host& host) {
             const DWORD waitResult = WaitForSingleObject(eventHandle, 100);
             const uint64_t eventNowMs = GetTickCount64();
             if (waitResult != WAIT_OBJECT_0) {
+                if (waitResult == WAIT_FAILED || eventNowMs - lastSignalMs >= 2000) {
+                    hr = HRESULT_FROM_WIN32(waitResult == WAIT_FAILED
+                        ? GetLastError() : ERROR_TIMEOUT);
+                    LogHresult(host, L"WASAPI buffer-ready wait", hr);
+                    break;
+                }
                 if (exclusive && waitResult == WAIT_TIMEOUT) {
                     ++waitTimeoutCount;
                     if (!lastTimeoutLogMs ||
                         eventNowMs >= lastTimeoutLogMs + 1000) {
-                        std::fwprintf(
-                            stderr,
+                        diagnostics::LogMessage(host.log,
                             L"[audio][exclusive] event wait timed out "
                             L"after 100 ms; renderer did not receive a "
                             L"buffer-ready signal.\n");
@@ -584,6 +589,7 @@ bool Run(const Configuration& configuration, const Host& host) {
                 continue;
             }
 
+            lastSignalMs = eventNowMs;
             if (exclusive) {
                 if (clock && exclusiveClockFrequency) {
                     UINT64 position = 0;
@@ -607,8 +613,7 @@ bool Run(const Configuration& configuration, const Host& host) {
                         ++lateEventCount;
                         if (!lastLateLogMs ||
                             eventNowMs >= lastLateLogMs + 1000) {
-                            std::fwprintf(
-                                stderr,
+                            diagnostics::LogMessage(host.log,
                                 L"[audio][exclusive] late event: %llu ms "
                                 L"since previous signal (threshold %llu "
                                 L"ms).\n",
@@ -624,9 +629,17 @@ bool Run(const Configuration& configuration, const Host& host) {
             }
 
             UINT32 padding = 0;
-            if (FAILED(client->GetCurrentPadding(&padding))) continue;
+            hr = client->GetCurrentPadding(&padding);
+            if (FAILED(hr)) {
+                LogHresult(host, L"IAudioClient::GetCurrentPadding", hr);
+                break;
+            }
             if (host.paddingChanged) {
                 host.paddingChanged(host.context, padding);
+            }
+            if (!exclusive && deadline.Observe(secondsNow(), padding) &&
+                host.outputDeadlineSuspected) {
+                host.outputDeadlineSuspected(host.context, deadline.OverdueSeconds(), false);
             }
             if (exclusive) {
                 minimumPadding = (std::min)(minimumPadding, padding);
@@ -638,7 +651,10 @@ bool Run(const Configuration& configuration, const Host& host) {
 
             BYTE* output = nullptr;
             hr = render->GetBuffer(writable, &output);
-            if (FAILED(hr)) continue;
+            if (FAILED(hr)) {
+                LogHresult(host, L"IAudioRenderClient::GetBuffer", hr);
+                break;
+            }
             latestFill = host.fill
                 ? host.fill(host.context, temp.data(), writable)
                 : FillResult{};
@@ -663,8 +679,7 @@ bool Run(const Configuration& configuration, const Host& host) {
                     missingFrames += missing;
                     if (!lastStarvationLogMs ||
                         eventNowMs >= lastStarvationLogMs + 1000) {
-                        std::fwprintf(
-                            stderr,
+                        diagnostics::LogMessage(host.log,
                             L"[audio][exclusive] source starvation: "
                             L"needed=%u, received=%zu, missing=%u frames; "
                             L"queue-before=%zu frames.\n",
@@ -674,7 +689,18 @@ bool Run(const Configuration& configuration, const Host& host) {
                     }
                 }
             }
-            render->ReleaseBuffer(writable, 0);
+            hr = render->ReleaseBuffer(writable, 0);
+            if (FAILED(hr)) {
+                LogHresult(host, L"IAudioRenderClient::ReleaseBuffer", hr);
+                break;
+            }
+            if (successfulRuntimeMilliseconds) {
+                *successfulRuntimeMilliseconds = GetTickCount64() - sessionStartMs;
+            }
+            if (!exclusive && deadline.Submitted(secondsNow(), writable) &&
+                host.outputDeadlineSuspected) {
+                host.outputDeadlineSuspected(host.context, deadline.OverdueSeconds(), true);
+            }
             emitDiagnostics(eventNowMs);
         }
 
@@ -700,7 +726,12 @@ bool Run(const Configuration& configuration, const Host& host) {
             watchedDefaultGeneration) {
         restartForDefaultChange = true;
     }
-    return restartForDefaultChange;
+    if (!IsRunning(host)) return RunResult::Stopped;
+    if (restartForDefaultChange) return RunResult::EndpointChanged;
+    if (FAILED(hr) && (sessionStarted || configuration.reinitializingEndpoint ||
+        hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_RESOURCES_INVALIDATED ||
+        hr == AUDCLNT_E_SERVICE_NOT_RUNNING)) return RunResult::Retry;
+    return RunResult::Failed;
 }
 
 }  // namespace llcv::wasapi

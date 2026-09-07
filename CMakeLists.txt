@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 1.2.5.1 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 1.2.6 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -86,6 +86,55 @@ endif()
 
 include(CTest)
 if (BUILD_TESTING)
+    add_executable(LatestVideoSampleTests tests/LatestVideoSampleTests.cpp
+        src/capture/LatestVideoSample.cpp
+        src/capture/DirectShowGraphResources.cpp)
+    target_include_directories(LatestVideoSampleTests PRIVATE src)
+    target_compile_definitions(LatestVideoSampleTests PRIVATE
+        UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(LatestVideoSampleTests PRIVATE ole32 strmiids uuid)
+    set_target_properties(LatestVideoSampleTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    if (MSVC)
+        target_compile_options(LatestVideoSampleTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    endif()
+    add_test(NAME LatestVideoSampleTests COMMAND LatestVideoSampleTests)
+    set_tests_properties(LatestVideoSampleTests PROPERTIES TIMEOUT 15)
+    # Exercise application callbacks and the ASIO notification protocol without
+    # enumerating/opening hardware. This target is never installed.
+    get_target_property(audio_callback_sources LowLatencyCaptureViewer SOURCES)
+    list(FILTER audio_callback_sources EXCLUDE REGEX "src/(main.cpp|app.rc|audio/AsioOutput.cpp)$")
+    add_executable(AudioCallbackTests tests/AudioCallbackTests.cpp ${audio_callback_sources})
+    target_include_directories(AudioCallbackTests PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(AudioCallbackTests PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,COMPILE_DEFINITIONS>)
+    target_link_libraries(AudioCallbackTests PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,LINK_LIBRARIES>)
+    set_target_properties(AudioCallbackTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    if (MSVC)
+        target_compile_options(AudioCallbackTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    endif()
+    add_test(NAME AudioCallbackTests COMMAND AudioCallbackTests)
+
+    add_executable(SharedReplayTests tests/SharedReplayTests.cpp
+        ${audio_callback_sources} src/audio/AsioOutput.cpp)
+    target_include_directories(SharedReplayTests PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(SharedReplayTests PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,COMPILE_DEFINITIONS>)
+    target_link_libraries(SharedReplayTests PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,LINK_LIBRARIES>)
+    set_target_properties(SharedReplayTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    if (MSVC)
+        target_compile_options(SharedReplayTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    endif()
+    add_test(NAME SharedReplayTests COMMAND SharedReplayTests)
+    set_tests_properties(SharedReplayTests PROPERTIES TIMEOUT 180)
+    add_test(NAME SharedReplayExtended COMMAND SharedReplayTests --extended)
+    set_tests_properties(SharedReplayExtended PROPERTIES TIMEOUT 240)
+    add_test(NAME SharedReplayTarget25 COMMAND SharedReplayTests --target25)
+    set_tests_properties(SharedReplayTarget25 PROPERTIES TIMEOUT 240)
+
     add_executable(AudioModuleTests
         tests/AudioModuleTests.cpp
         src/audio/AudioMix.cpp
@@ -289,4 +338,5 @@ install(TARGETS LowLatencyCaptureViewer RUNTIME DESTINATION .)
 install(FILES LICENSE README.md README.ko.md DESIGN.txt BUILD_INFO.txt DEPENDENCIES.txt
         "실행안내.txt" GITHUB_PREP.md DESTINATION .)
 install(FILES third_party/asio/LICENSE.txt DESTINATION . RENAME ASIO-SDK-LICENSE.txt)
+install(FILES third_party/asio/HOST-LICENSE.txt DESTINATION . RENAME ASIO-HOST-LICENSE.txt)
 install(DIRECTORY docs DESTINATION .)

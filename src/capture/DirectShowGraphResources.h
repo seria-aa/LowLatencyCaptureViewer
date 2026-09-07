@@ -3,8 +3,11 @@
 #include "capture/SampleGrabberCompat.h"
 
 #include <dshow.h>
+#include <memory>
 
 namespace llcv::capture {
+
+class LatestVideoSample;
 
 // Owns every COM object and event handle used by one capture graph. Graph
 // construction remains explicit in the application, while failure paths and
@@ -13,7 +16,7 @@ class DirectShowGraphResources {
 public:
     ~DirectShowGraphResources();
 
-    DirectShowGraphResources() = default;
+    DirectShowGraphResources();
     DirectShowGraphResources(const DirectShowGraphResources&) = delete;
     DirectShowGraphResources& operator=(
         const DirectShowGraphResources&) = delete;
@@ -35,6 +38,8 @@ public:
     IPin* videoGrabberOutput = nullptr;
     IPin* videoNullInput = nullptr;
     ISampleGrabberCB* videoCallback = nullptr;
+    // Outlives registered callbacks, including partially failed graph starts.
+    std::unique_ptr<LatestVideoSample> latestVideoSample;
 
     IBaseFilter* audioGrabberFilter = nullptr;
     ISampleGrabber* audioGrabber = nullptr;

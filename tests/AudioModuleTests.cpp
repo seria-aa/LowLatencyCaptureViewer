@@ -172,6 +172,22 @@ int main() {
                     publishedFrames.load() == 0,
                 "PCM ring must publish queue depth and tracked overruns");
 
+    ring.Push(firstFrames, 3);
+    ring.Push(firstFrames, 3);
+    ok &= Check(overrun.dropped == 4 && ring.Overruns() == 2,
+                "full-capacity packet must report displaced queued audio");
+    const int16_t oversized[] = {10,-10,11,-11,12,-12,13,-13,14,-14};
+    ring.Push(oversized, 5);
+    ok &= Check(overrun.dropped == 9 && ring.Overruns() == 3,
+                "oversized packet must count both old queue and discarded input prefix");
+    ok &= Check(ring.Pop(remaining, 3) == 3 && remaining[0] == 12 &&
+                    remaining[2] == 13 && remaining[4] == 14,
+                "oversized packet must retain the newest complete frames");
+    ring.Push(firstFrames, 3);
+    ring.PushConverted(reinterpret_cast<const BYTE*>(oversized), 5, direct.format);
+    ok &= Check(overrun.dropped == 14 && ring.Overruns() == 4,
+                "converted full packets must use the same overflow accounting");
+
     audio::PcmRing resampleRing(128);
     int16_t sourceFrames[128]{};
     for (int frame = 0; frame < 64; ++frame) {
@@ -190,5 +206,39 @@ int main() {
     ok &= Check(resampler.BufferedFrames() == 0 &&
                     resamplerBuffered.load() == 0,
                 "drift resampler reset must clear its published queue");
+
+    // Golden outputs captured from the pre-optimization implementation.
+    // Exercise differing stereo samples, changing block sizes, +/-1000 ppm,
+    // and end-of-input starvation, not just a constant or unity-only signal.
+    const double ratios[] = {0.999, 1.0, 1.001};
+    const uint64_t hashes[] = {5023897314131432625ull, 4409121206642182641ull,
+                               639501298115057817ull};
+    const size_t counts[] = {80082, 80000, 79922};
+    for (size_t test = 0; test < 3; ++test) {
+        audio::PcmRing source(65536);
+        audio::SincDriftResampler optimized(source);
+        optimized.Prepare(960);
+        std::vector<int16_t> noise(40000 * 2);
+        uint32_t random = 1234567;
+        for (auto& sample : noise) {
+            random = random * 1664525u + 1013904223u;
+            sample = static_cast<int16_t>(random >> 16);
+        }
+        source.Push(noise.data(), 40000);
+        const size_t sizes[] = {1, 16, 127, 480, 960};
+        uint64_t hash = 14695981039346656037ull;
+        size_t count = 0;
+        for (size_t block = 0; block < 140; ++block) {
+            int16_t samples[1920]{};
+            const size_t got = optimized.Render(samples, sizes[block % 5], ratios[test]);
+            count += got * 2;
+            for (size_t i = 0; i < got * 2; ++i) {
+                hash ^= static_cast<uint16_t>(samples[i]);
+                hash *= 1099511628211ull;
+            }
+        }
+        ok &= Check(hash == hashes[test] && count == counts[test],
+                    "optimized resampler must preserve legacy PCM sample output");
+    }
     return ok ? 0 : 1;
 }

@@ -41,6 +41,8 @@
 #include "audio/AudioMix.h"
 #include "audio/AudioDeviceCapabilities.h"
 #include "audio/AsioOutput.h"
+#include "audio/RecoveryPolicy.h"
+#include "audio/QueueDriftController.h"
 #include "audio/CaptureAudioFormat.h"
 #include "audio/PcmPipeline.h"
 #include "audio/WasapiOutput.h"
@@ -56,6 +58,7 @@
 #include "ui/PresentationModeUi.h"
 #include "ui/WindowGeometry.h"
 #include "update/UpdateChecker.h"
+#include "update/UpdateCheckTask.h"
 #include "video/CaptureColorMetadata.h"
 #include "video/DirectShowVideoFormat.h"
 #include "video/MjpegDecoder.h"
@@ -92,7 +95,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.2.5.1";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.6";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -190,6 +193,8 @@ static const wchar_t* UiText(const wchar_t* korean) {
     static const std::unordered_map<std::wstring, std::wstring> english = {
         {L"Windows 기본 장치", L"Windows default device"},
         {L"선택 장치 없음", L"No selected device"},
+        {L"WASAPI: 출력 사용 불가 · F2로 설정 확인", L"WASAPI: output unavailable (F2 for settings)"},
+        {L"WASAPI: 출력 복구 실패 · F2로 설정 확인", L"WASAPI: recovery failed (F2 for settings)"},
         {L" (기본)", L" (default)"},
         {L"선택한 출력 장치", L"Selected output device"},
         {L" (기본 추적)", L" (following default)"},
@@ -274,8 +279,8 @@ static const wchar_t* UiText(const wchar_t* korean) {
         {L"PCM 버퍼 목표", L"PCM buffer target"},
         {L"10 ms (최저 지연)", L"10 ms (minimum latency)"},
         {L"15 ms (저지연 목표)", L"15 ms (low-latency target)"},
-        {L"20 ms (안정 권장)", L"20 ms (stable recommendation)"},
-        {L"25 ms (안정 여유)", L"25 ms (extra stability)"},
+        {L"20 ms (안정 목표)", L"20 ms (stability target)"},
+        {L"25 ms (권장 · 기본)", L"25 ms (recommended · default)"},
         {L"30 ms (안정성 우선)", L"30 ms (stability first)"},
         {L"백그라운드에서 자동 음소거", L"Mute automatically in background"},
         {L"화면 표시 방식", L"Presentation mode"},
@@ -379,7 +384,7 @@ struct ExclusiveEndpointVerification {
     std::wstring summary;
 };
 
-struct ExclusiveEndpointProbeMessage {
+struct ExclusiveEndpointProbeResult {
     size_t endpointIndex = 0;
     ExclusiveCompatibilityProbe probe;
 };
@@ -391,8 +396,7 @@ constexpr size_t kRingFrames = 48000 / 2;
 static HWND g_videoHost = nullptr;
 static bool g_suppressSettingsSave = false;
 static std::atomic<bool> g_running{true};
-static std::atomic<bool> g_updateCheckStop{false};
-static std::thread g_updateCheckThread;
+static llcv::update::UpdateCheckTask g_updateCheckTask;
 static std::atomic<bool> g_restartToSettings{false};
 static std::atomic<uint64_t> g_videoCapturedFrames{0};
 static std::atomic<uint64_t> g_videoPresentedFrames{0};
@@ -419,6 +423,14 @@ static std::atomic<uint64_t> g_audioCaptureCallbacks{0};
 static std::atomic<uint64_t> g_audioCaptureFrames{0};
 static std::atomic<uint64_t> g_audioCaptureIntervalTotalUs{0};
 static std::atomic<uint64_t> g_audioUnderrunFrames{0};
+static std::atomic<uint64_t> g_sharedDeadlineSuspicions{0};
+static std::atomic<uint64_t> g_sharedLastDeadlineMs{0};
+static std::atomic<uint64_t> g_sharedLastOverdueUs{0};
+static std::atomic<bool> g_sharedLastDeadlineDuringFill{false};
+static std::atomic<uint64_t> g_sharedRebuffers{0};
+static std::atomic<uint64_t> g_sharedRebufferSilenceFrames{0};
+static std::atomic<bool> g_sharedRebuffering{false};
+static std::atomic<bool> g_sharedCorrectionNotice{false};
 static std::atomic<uint64_t> g_audioOverrunFrames{0};
 static std::atomic<uint64_t> g_audioMonitorStartMs{0};
 static std::atomic<uint64_t> g_audioLastUnderrunMs{0};
@@ -865,7 +877,11 @@ static std::wstring AsioDriverNameWide(const std::string& name) {
 static HMONITOR SavedViewerMonitor();
 
 static void LoadSettings() {
-    MigrateLegacySettings();
+    if (!g_suppressSettingsSave) MigrateLegacySettings();
+    if (!g_suppressSettingsSave &&
+        !llcv::settings::MigrateLegacyPcmQueueTarget(SettingsPath())) {
+        fwprintf(stderr, L"[settings] PCM default migration could not be saved; using 25 ms in memory.\n");
+    }
     llcv::settings::LoadResult loaded =
         llcv::settings::LoadFromIni(SettingsPath());
     g_settings = std::move(loaded.settings);
@@ -1221,22 +1237,17 @@ static size_t FillAsioPcm(void* user, int16_t* out, size_t frames) {
         RecordAudioErrorEvent(nowMs, missing, AudioErrorKind::Underrun,
                               cause);
     }
-    const UINT32 queued = static_cast<UINT32>((std::min)(
-        g_audioRingFrames.load(std::memory_order_acquire) +
-                state->driftResampler.BufferedFrames(),
-        static_cast<size_t>(UINT32_MAX)));
-    UINT32 previous = g_audioMinimumPreRenderFrames.load(
-        std::memory_order_acquire);
-    while (queued < previous &&
-           !g_audioMinimumPreRenderFrames.compare_exchange_weak(
-               previous, queued, std::memory_order_acq_rel,
-               std::memory_order_acquire)) {
-    }
+    // The minimum is sampled before rendering, after startup/warmup, just
+    // like WASAPI. Post-render depletion is not a second minimum sample.
     return got;
 }
 
 struct WasapiRenderState {
     SincDriftResampler driftResampler{g_ring, &g_audioResamplerFrames};
+    llcv::audio::QueueDriftController queueController;
+    bool shared = true;
+    bool rebuffering = false;
+    size_t consecutiveMissingFrames = 0;
     double filteredQueuedFrames = -1.0;
     double correctionPpm = 0.0;
     uint64_t autoCandidateSinceMs = 0;
@@ -1254,6 +1265,22 @@ static llcv::wasapi::FillResult FillWasapiPcm(
 
     result.availableBeforeRender =
         g_ring.AvailableFrames() + state->driftResampler.BufferedFrames();
+    if (state->shared && state->rebuffering) {
+        // Refill the user's reserve once after substantial starvation. Keep
+        // resampler history and the learned clock rate; never grow the target.
+        const size_t restartFrames = (std::max)(
+            static_cast<size_t>(state->queueTargetFrames), frames + 16);
+        if (result.availableBeforeRender < restartFrames) {
+            g_sharedRebufferSilenceFrames.fetch_add(frames, std::memory_order_relaxed);
+            result.queuedFrames = static_cast<UINT32>(result.availableBeforeRender);
+            result.queueTargetFrames = state->queueTargetFrames;
+            result.trackingActive = AudioTrackingActive();
+            return result;
+        }
+        state->rebuffering = false;
+        state->filteredQueuedFrames = static_cast<double>(result.availableBeforeRender);
+        g_sharedRebuffering.store(false, std::memory_order_release);
+    }
     if (state->audioStarted && AudioTrackingActive()) {
         UINT32 observed = static_cast<UINT32>((std::min)(
             result.availableBeforeRender,
@@ -1284,8 +1311,10 @@ static llcv::wasapi::FillResult FillWasapiPcm(
         if (state->filteredQueuedFrames < 0.0) {
             state->filteredQueuedFrames = queuedFrames;
         } else {
+            const double seconds = (std::min)(frames / 48000.0, 0.05);
             state->filteredQueuedFrames +=
-                (queuedFrames - state->filteredQueuedFrames) * 0.02;
+                (queuedFrames - state->filteredQueuedFrames) *
+                (state->shared ? seconds / (0.5 + seconds) : 0.02);
         }
 
         if (g_settings.driftCorrection == DriftCorrectionMode::Auto &&
@@ -1294,18 +1323,30 @@ static llcv::wasapi::FillResult FillWasapiPcm(
             const double deviation =
                 std::abs(state->filteredQueuedFrames - targetFrames);
             const uint64_t nowMs = GetTickCount64();
-            if (deviation >= kAutoCorrectionEngageDeviationFrames) {
+            // Do not spend another five seconds observing once the next
+            // block is all that remains. Auto still latches on, never toggles.
+            const bool reserveAtRisk = state->shared &&
+                queuedFrames <= static_cast<double>(frames + 16) &&
+                targetFrames > static_cast<double>(frames + 16);
+            if (reserveAtRisk || deviation >= kAutoCorrectionEngageDeviationFrames) {
                 if (!state->autoCandidateSinceMs) {
                     state->autoCandidateSinceMs = nowMs;
-                } else if (
+                }
+                if ((reserveAtRisk || (
                     nowMs >= state->autoCandidateSinceMs &&
                     nowMs - state->autoCandidateSinceMs >=
-                        kAutoCorrectionEngageHoldMs &&
+                        kAutoCorrectionEngageHoldMs)) &&
                     queuedFrames >= static_cast<double>(frames)) {
                     state->autoCorrectionActive = true;
                     state->driftResampler.Reset();
                     state->correctionPpm = 0.0;
-                    fwprintf(
+                    if (reserveAtRisk) {
+                        state->filteredQueuedFrames = queuedFrames;
+                        state->queueController.BeginWithLowReserve();
+                    }
+                    if (state->shared) {
+                        g_sharedCorrectionNotice.store(true, std::memory_order_release);
+                    } else fwprintf(
                         stderr,
                         L"[audio] auto clock-drift correction engaged "
                         L"after sustained queue drift.\n");
@@ -1324,8 +1365,13 @@ static llcv::wasapi::FillResult FillWasapiPcm(
             const double requestedPpm = std::clamp(
                 (state->filteredQueuedFrames - targetFrames) * 2.0,
                 -1000.0, 1000.0);
-            state->correctionPpm +=
-                (requestedPpm - state->correctionPpm) * 0.02;
+            if (state->shared && state->audioStarted) {
+                state->correctionPpm = state->queueController.Update(
+                    state->filteredQueuedFrames, targetFrames, frames);
+            } else {
+                state->correctionPpm +=
+                    (requestedPpm - state->correctionPpm) * 0.02;
+            }
             const double ratio =
                 1.0 + state->correctionPpm / 1'000'000.0;
             if (state->audioStarted) {
@@ -1402,6 +1448,18 @@ static llcv::wasapi::FillResult FillWasapiPcm(
         }
         RecordAudioErrorEvent(
             nowMs, missingFrames, AudioErrorKind::Underrun, cause);
+        // A tiny isolated shortfall must not turn into a whole extra silent
+        // output block. Re-prime only after a full block is missing, either
+        // at once or cumulatively across consecutive short writes.
+        state->consecutiveMissingFrames += missingFrames;
+        if (state->shared && state->consecutiveMissingFrames >= frames) {
+            state->rebuffering = true;
+            state->consecutiveMissingFrames = 0;
+            g_sharedRebuffering.store(true, std::memory_order_release);
+            g_sharedRebuffers.fetch_add(1, std::memory_order_relaxed);
+        }
+    } else {
+        state->consecutiveMissingFrames = 0;
     }
 
     result.queuedFrames = static_cast<UINT32>((std::min)(
@@ -1421,12 +1479,72 @@ static void OnWasapiEndpointChanged(
         name + (followsDefault ? L" (기본 추적)" : L""));
 }
 
-static void OnWasapiBufferChanged(void*, UINT32 frames) {
+static void OnWasapiBufferChanged(void* context, UINT32 frames) {
+    if (context) {
+        static_cast<WasapiRenderState*>(context)->driftResampler.Prepare(frames);
+    }
     g_audioActualBufferFrames.store(frames, std::memory_order_release);
 }
 
 static void OnWasapiPaddingChanged(void*, UINT32 frames) {
     g_audioWasapiPaddingFrames.store(frames, std::memory_order_release);
+}
+
+static void OnSharedDeadlineSuspected(void* context, double overdueSeconds, bool duringFill) {
+    const auto* state = static_cast<WasapiRenderState*>(context);
+    if (!state || !state->audioStarted || !AudioTrackingActive()) return;
+    g_sharedLastOverdueUs.store(static_cast<uint64_t>(overdueSeconds * 1'000'000),
+                               std::memory_order_relaxed);
+    g_sharedLastDeadlineDuringFill.store(duringFill, std::memory_order_relaxed);
+    g_sharedDeadlineSuspicions.fetch_add(1, std::memory_order_relaxed);
+    g_sharedLastDeadlineMs.store(GetTickCount64(), std::memory_order_release);
+}
+
+// Called by the UI timer, never between audio GetBuffer/ReleaseBuffer.
+// Cumulative atomics coalesce events: no callback allocation, I/O or log queue.
+static void FlushSharedDiagnostics(bool force = false) {
+    static uint64_t lastLogMs = 0, previousDeadline = 0, previousRebuffer = 0;
+    static uint64_t previousUnderrun = 0;
+    static uint64_t previousOverrun = 0;
+    static uint64_t previousSilence = 0;
+    static bool previousRefilling = false;
+    const uint64_t now = GetTickCount64();
+    if (!force && now - lastLogMs < 1000) return;
+    lastLogMs = now;
+    if (g_sharedCorrectionNotice.exchange(false, std::memory_order_acq_rel)) {
+        fwprintf(stderr, L"[audio][shared] auto clock correction engaged (deferred notice).\n");
+    }
+    const uint64_t deadline = g_sharedDeadlineSuspicions.load();
+    const uint64_t rebuffer = g_sharedRebuffers.load();
+    const uint64_t underrun = g_underruns.load();
+    const uint64_t overrun = g_ring.Overruns();
+    const uint64_t silence = g_sharedRebufferSilenceFrames.load();
+    const bool refilling = g_sharedRebuffering.load();
+    if (g_settings.audioMode != AudioMode::WasapiShared) return;
+    if (deadline == previousDeadline && rebuffer == previousRebuffer &&
+        underrun == previousUnderrun && overrun == previousOverrun && silence == previousSilence &&
+        refilling == previousRefilling) return;
+    fwprintf(stderr,
+        L"[audio][shared] health: output-deadline-suspected=%llu (+%llu; not measured audio loss), "
+        L"PCM-underrun=%llu (+%llu), PCM-missing=%llu frames, PCM-overrun=%llu (+%llu), "
+        L"reprime=%llu (+%llu), "
+        L"reprime-silence=%llu frames, refilling=%s, queue=%u+%u frames (target %u), "
+        L"capture-packet=%u frames, output-padding=%u frames, correction=%+d ppm, "
+        L"last-output-overdue=%.3f ms (%s; scheduling estimate only)\n",
+        deadline, deadline - previousDeadline, underrun, underrun - previousUnderrun,
+        g_audioUnderrunFrames.load(), overrun, overrun - previousOverrun,
+        rebuffer, rebuffer - previousRebuffer,
+        silence, refilling ? L"yes" : L"no",
+        g_audioRingFrames.load(), g_audioResamplerFrames.load(), g_audioQueueTargetFrames.load(),
+        g_audioCapturePacketFrames.load(), g_audioWasapiPaddingFrames.load(), g_audioResamplePpm.load(),
+        g_sharedLastOverdueUs.load() / 1000.0,
+        g_sharedLastDeadlineDuringFill.load() ? L"fill/release" : L"wake");
+    previousDeadline = deadline;
+    previousRebuffer = rebuffer;
+    previousUnderrun = underrun;
+    previousOverrun = overrun;
+    previousSilence = silence;
+    previousRefilling = refilling;
 }
 
 static void BeforeWasapiEndpointRestart(void*) {
@@ -1441,9 +1559,12 @@ static void LogWasapiHresult(
     LogHr(operation, result);
 }
 
-static bool AudioRenderThreadWasapi(
-    AudioMode mode, bool reinitializingEndpoint) {
+static llcv::wasapi::RunResult AudioRenderThreadWasapi(
+    AudioMode mode, bool reinitializingEndpoint,
+    uint64_t* successfulRuntimeMilliseconds = nullptr) {
     WasapiRenderState state{};
+    state.shared = mode == AudioMode::WasapiShared;
+    g_sharedRebuffering.store(false, std::memory_order_release);
     state.autoCorrectionActive =
         g_settings.driftCorrection == DriftCorrectionMode::Resample;
     state.queueTargetFrames = static_cast<UINT32>(
@@ -1483,14 +1604,28 @@ static bool AudioRenderThreadWasapi(
     host.paddingChanged = &OnWasapiPaddingChanged;
     host.beforeStart = &BeforeWasapiEndpointRestart;
     host.logHresult = &LogWasapiHresult;
-    const bool restart = llcv::wasapi::Run(configuration, host);
+    host.log = &LogModuleMessage;
+    host.outputDeadlineSuspected = &OnSharedDeadlineSuspected;
+    const auto restart = llcv::wasapi::Run(
+        configuration, host, successfulRuntimeMilliseconds);
 
+    g_sharedRebuffering.store(false, std::memory_order_release);
+    g_audioActualBufferFrames.store(0, std::memory_order_release);
+    g_audioWasapiPaddingFrames.store(0, std::memory_order_release);
     g_audioResamplerActive.store(false, std::memory_order_release);
     g_audioResamplePpm.store(0, std::memory_order_release);
     g_audioResamplerFrames.store(0, std::memory_order_release);
     return restart;
 }
 
+
+static bool WaitForAudioRetry(unsigned milliseconds) {
+    const uint64_t until = GetTickCount64() + milliseconds;
+    while (g_running.load(std::memory_order_acquire) && GetTickCount64() < until) {
+        Sleep(25);
+    }
+    return g_running.load(std::memory_order_acquire);
+}
 
 static bool AudioRenderThreadAsio() {
     std::string driverName;
@@ -1529,6 +1664,7 @@ static bool AudioRenderThreadAsio() {
                  output.Error().c_str());
         return false;
     }
+    uint64_t sessionStartMs = GetTickCount64();
     g_audioActualBufferFrames.store(static_cast<UINT32>(output.BufferFrames()),
                                     std::memory_order_release);
     SetActiveAudioOutputName(L"ASIO: " + g_settings.asioDriverName);
@@ -1542,18 +1678,64 @@ static bool AudioRenderThreadAsio() {
                  : g_settings.driftCorrection == DriftCorrectionMode::Auto
                        ? L"auto (observe first; latch on when sustained drift is detected)"
                        : L"off (unaltered PCM samples)");
+    llcv::audio::RecoveryPolicy recovery;
+    bool restartFailed = false;
     while (g_running.load(std::memory_order_acquire)) {
-        Sleep(50);
+        if (!output.RestartRequested()) {
+            Sleep(50);
+            continue;
+        }
+        recovery.ObserveSuccessfulRuntime(GetTickCount64() - sessionStartMs);
+        fwprintf(stderr, L"[audio] ASIO driver requested reset/resync; reopening output.\n");
+        output.Stop();
+        g_asioAudioStarted.store(false, std::memory_order_release);
+        g_audioActualBufferFrames.store(0, std::memory_order_release);
+        bool restarted = false;
+        while (g_running.load(std::memory_order_acquire)) {
+            const unsigned delay = recovery.NextDelay();
+            if (!delay) {
+                fwprintf(stderr, L"[audio] ASIO recovery limit reached.\n");
+                restartFailed = true;
+                break;
+            }
+            if (!WaitForAudioRetry(delay)) break;
+            if (output.Start([](void* context) {
+                    auto& state = *static_cast<AsioRenderState*>(context);
+                    BeforeWasapiEndpointRestart(nullptr);
+                    state.driftResampler.Reset();
+                    state.filteredQueuedFrames = -1.0;
+                    state.correctionPpm = 0.0;
+                    state.autoCandidateSinceMs = 0;
+                    state.audioStarted = false;
+                    state.autoCorrectionActive =
+                        g_settings.driftCorrection == DriftCorrectionMode::Resample;
+                    g_audioResamplePpm.store(0, std::memory_order_release);
+                    g_audioResamplerActive.store(
+                        state.autoCorrectionActive, std::memory_order_release);
+                })) {
+                sessionStartMs = GetTickCount64();
+                g_audioActualBufferFrames.store(
+                    static_cast<UINT32>(output.BufferFrames()), std::memory_order_release);
+                fwprintf(stderr, L"[audio] ASIO recovered: %ld frames, %.0f Hz.\n",
+                         output.BufferFrames(), output.SampleRate());
+                restarted = true;
+                break;
+            }
+            fwprintf(stderr, L"[audio] ASIO recovery failed: %S\n", output.Error().c_str());
+        }
+        if (!restarted) break;
     }
     output.Stop();
     g_asioAudioStarted.store(false, std::memory_order_release);
     g_audioActualBufferFrames.store(0, std::memory_order_release);
     g_audioResamplerActive.store(false, std::memory_order_release);
     g_audioResamplePpm.store(0, std::memory_order_release);
-    return true;
+    g_audioResamplerFrames.store(0, std::memory_order_release);
+    return !restartFailed;
 }
 
 static void AudioRenderThread() {
+    bool reinitializingEndpoint = false;
     if (g_settings.audioMode == AudioMode::Asio) {
         if (AudioRenderThreadAsio()) return;
         // A broken/unavailable ASIO driver must not leave the viewer silent.
@@ -1567,14 +1749,38 @@ static void AudioRenderThread() {
         g_settings.asioDriverName.clear();
         SetActiveAudioOutputName(ConfiguredAudioEndpointName(
             g_settings.audioOutputDeviceId));
-        AudioRenderThreadWasapi(AudioMode::WasapiShared, false);
-        return;
+        reinitializingEndpoint = true;
     }
-    bool reinitializingEndpoint = false;
+    llcv::audio::RecoveryPolicy recovery;
     while (g_running.load(std::memory_order_acquire)) {
-        const bool restart = AudioRenderThreadWasapi(
-            g_settings.audioMode, reinitializingEndpoint);
-        if (!restart || !g_running.load(std::memory_order_acquire)) break;
+        uint64_t successfulRuntimeMilliseconds = 0;
+        const auto result = AudioRenderThreadWasapi(
+            g_settings.audioMode, reinitializingEndpoint,
+            &successfulRuntimeMilliseconds);
+        recovery.ObserveSuccessfulRuntime(successfulRuntimeMilliseconds);
+        if (!g_running.load(std::memory_order_acquire) ||
+            result == llcv::wasapi::RunResult::Stopped) break;
+        if (result == llcv::wasapi::RunResult::Failed) {
+            SetActiveAudioOutputName(UI_TEXT(L"WASAPI: 출력 사용 불가 · F2로 설정 확인"));
+            g_audioActualBufferFrames.store(0, std::memory_order_release);
+            break;
+        }
+        if (result == llcv::wasapi::RunResult::EndpointChanged) {
+            // A user/default-device change is not a driver failure.
+            reinitializingEndpoint = true;
+            continue;
+        }
+        const unsigned delay = recovery.NextDelay();
+        if (!delay) {
+            fwprintf(stderr, L"[audio] WASAPI recovery limit reached; reopen settings with F2.\n");
+            SetActiveAudioOutputName(UI_TEXT(L"WASAPI: 출력 복구 실패 · F2로 설정 확인"));
+            g_audioActualBufferFrames.store(0, std::memory_order_release);
+            break;
+        }
+        fwprintf(stderr, L"[audio] WASAPI restarting output after failure in %u ms.\n", delay);
+        g_audioActualBufferFrames.store(0, std::memory_order_release);
+        g_audioWasapiPaddingFrames.store(0, std::memory_order_release);
+        if (!WaitForAudioRetry(delay)) break;
         reinitializingEndpoint = true;
     }
 }
@@ -3113,10 +3319,11 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
 
         frameEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!frameEvent) { hr = HRESULT_FROM_WIN32(GetLastError()); break; }
-        llcv::capture::LatestVideoSample latest(
+        resources.latestVideoSample = std::make_unique<llcv::capture::LatestVideoSample>(
             compressedVideo ? 0 : imageBytes, frameEvent,
-            {&g_osdTrackingStartMs, &g_videoCapturedFrames,
-             &g_videoReplacedFrames});
+            llcv::capture::VideoSampleTelemetry{&g_osdTrackingStartMs, &g_videoCapturedFrames,
+              &g_videoReplacedFrames});
+        auto& latest = *resources.latestVideoSample;
 
         initializationStage = L"build video sample path";
         hr = CoCreateInstance(kSampleGrabberClassId, nullptr,
@@ -3137,7 +3344,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         if (FAILED(hr)) break;
         grabber->SetOneShot(FALSE);
         grabber->SetBufferSamples(FALSE);
-        callback = new llcv::capture::VideoSampleGrabberCallback(&latest);
+        callback = new llcv::capture::VideoSampleGrabberCallback(&latest, LogModuleMessage);
         hr = grabber->SetCallback(callback, 0);
         if (FAILED(hr)) break;
 
@@ -3663,14 +3870,14 @@ struct SettingsDialogState {
     HWND activeTooltipTarget = nullptr;
     std::vector<HFONT> uiFonts;
     std::thread probeThread;
-    std::thread updateCheckThread;
+    llcv::update::UpdateCheckTask updateCheckTask;
     std::thread exclusiveProbeThread;
     std::thread captureAudioProbeThread;
     std::atomic<bool> probeReady{false};
-    std::atomic<bool> updateCheckStop{false};
-    std::atomic<bool> updateCheckRunning{false};
     std::atomic<bool> exclusiveProbeStop{false};
     std::atomic<bool> exclusiveScanRunning{false};
+    std::mutex exclusiveProbeResultsMutex;
+    std::vector<ExclusiveEndpointProbeResult> pendingExclusiveProbeResults;
     std::atomic<bool> captureAudioProbeReady{false};
     AudioClient3Support probe{};
     InternalCaptureAudioProbe captureAudioProbe{};
@@ -4058,31 +4265,15 @@ static void SetSettingsUpdateStatus(SettingsDialogState* state,
 }
 
 static void StartSettingsUpdateCheck(SettingsDialogState* state, HWND hwnd) {
-    if (!state || !hwnd ||
-        state->updateCheckRunning.exchange(true, std::memory_order_acq_rel)) {
+    if (!state || !hwnd || state->updateCheckTask.IsRunning()) return;
+    if (!state->updateCheckTask.Start(kAppVersionLabel, [hwnd]() {
+            PostMessageW(hwnd, WM_SETTINGS_UPDATE_CHECK_COMPLETE, 0, 0);
+        })) {
+        SetSettingsUpdateStatus(state, UI_TEXT(L"업데이트를 확인하지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도하세요."));
         return;
     }
-    // A completed worker remains joinable until its result message has been
-    // handled. Join it here before starting the next manual request.
-    if (state->updateCheckThread.joinable()) {
-        state->updateCheckThread.join();
-    }
-    state->updateCheckStop.store(false, std::memory_order_release);
     SetSettingsUpdateStatus(state, UI_TEXT(L"최신 버전 확인 중…"));
     EnableWindow(state->updateNowButton, FALSE);
-    state->updateCheckThread = std::thread([state, hwnd]() {
-        UpdateCheckResult result;
-        llcv::update::FetchLatestRelease(kAppVersionLabel, result);
-        if (state->updateCheckStop.load(std::memory_order_acquire) ||
-            !IsWindow(hwnd)) {
-            return;
-        }
-        auto* message = new UpdateCheckResult(std::move(result));
-        if (!PostMessageW(hwnd, WM_SETTINGS_UPDATE_CHECK_COMPLETE, 0,
-                          reinterpret_cast<LPARAM>(message))) {
-            delete message;
-        }
-    });
 }
 
 static void TrackSettingsTooltip(HWND target, HWND tooltip, bool active) {
@@ -4170,8 +4361,8 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
         case SettingsHelpTopic::PcmQueue:
             return L"PCM buffer target\n\n"
                    L"The amount of captured audio kept inside the application before playback.\n"
-                   L"10 ms is minimum latency, 15 ms is the low-latency target, 20 ms is the stable "
-                   L"recommendation, 25 ms adds stability margin, and 30 ms prioritizes stability.\n\n"
+                   L"10 ms is minimum latency, 15 ms is the low-latency target, 20 ms is a stability "
+                   L"target, 25 ms is the recommended default, and 30 ms prioritizes stability.\n\n"
                    L"Higher values absorb more scheduling jitter but add the same amount of audio "
                    L"latency. This is independent of the WASAPI output buffer and clock-drift correction.";
         case SettingsHelpTopic::Presentation:
@@ -4218,7 +4409,7 @@ static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
     case SettingsHelpTopic::PcmQueue:
         return L"PCM 버퍼 목표 안내\n\n"
                L"캡처 오디오를 재생 전에 확보하는 프로그램 내부 대기량입니다.\n"
-               L"10ms는 최저 지연, 15ms는 저지연 목표, 20ms는 안정 권장, 25ms는 안정 여유, "
+               L"10ms는 최저 지연, 15ms는 저지연 목표, 20ms는 안정 목표, 25ms는 권장 기본값, "
                L"30ms는 안정성 우선 설정입니다.\n\n"
                L"값을 높이면 순간적인 입력 지연을 흡수할 여유가 커지지만, 그만큼 오디오 지연이 "
                L"늘어납니다. WASAPI 출력 버퍼와 클록 드리프트 보정과는 독립적으로 조정됩니다.";
@@ -4657,6 +4848,56 @@ static void UpdateExclusiveVerificationUi(SettingsDialogState* state) {
     }
 }
 
+static void QueueExclusiveEndpointProbeResult(
+    SettingsDialogState* state, ExclusiveEndpointProbeResult result) {
+    if (!state) return;
+    std::lock_guard<std::mutex> lock(state->exclusiveProbeResultsMutex);
+    state->pendingExclusiveProbeResults.push_back(std::move(result));
+}
+
+static void ConsumeExclusiveEndpointProbeResults(SettingsDialogState* state) {
+    if (!state) return;
+    std::vector<ExclusiveEndpointProbeResult> pending;
+    {
+        std::lock_guard<std::mutex> lock(state->exclusiveProbeResultsMutex);
+        pending.swap(state->pendingExclusiveProbeResults);
+    }
+    for (const auto& message : pending) {
+        if (message.endpointIndex >= state->exclusiveEndpointResults.size() ||
+            message.endpointIndex >= state->audioEndpoints.size()) {
+            continue;
+        }
+        auto& result = state->exclusiveEndpointResults[message.endpointIndex];
+        result.state = message.probe.compatible
+            ? ExclusiveEndpointState::Supported
+            : ExclusiveEndpointState::Unsupported;
+        result.recommendedBufferMs = message.probe.compatible
+            ? static_cast<int>((message.probe.requestedFrames * 1000 +
+                                kSampleRate / 2) / kSampleRate)
+            : 0;
+        result.summary = message.probe.summary;
+        ++state->exclusiveScanCompleted;
+        fwprintf(stderr,
+                 L"[audio][exclusive-scan] %s: %s | requested=%u frames "
+                 L"actual=%u frames\n",
+                 state->audioEndpoints[message.endpointIndex].name.c_str(),
+                 result.summary.c_str(), message.probe.requestedFrames,
+                 message.probe.actualBufferFrames);
+    }
+}
+
+static void CompleteExclusiveEndpointScan(SettingsDialogState* state) {
+    if (!state) return;
+    if (state->exclusiveProbeThread.joinable()) {
+        state->exclusiveProbeThread.join();
+    }
+    // The completion notification owns the transition to idle. A worker that
+    // has finished but whose notifications are still queued must not allow a
+    // new scan to replace its thread or mix old verdicts into the new scan.
+    ConsumeExclusiveEndpointProbeResults(state);
+    state->exclusiveScanRunning.store(false, std::memory_order_release);
+}
+
 static void StartExclusiveEndpointScan(SettingsDialogState* state, HWND hwnd,
                                        bool forceRestart = false) {
     if (!state || state->exclusiveScanRunning.load(std::memory_order_acquire)) {
@@ -4725,17 +4966,19 @@ static void StartExclusiveEndpointScan(SettingsDialogState* state, HWND hwnd,
                 if (state->exclusiveProbeStop.load(std::memory_order_acquire)) {
                     break;
                 }
-                auto* message = new ExclusiveEndpointProbeMessage{};
-                message->endpointIndex = i;
-                message->probe = ProbeExclusiveBufferRecommendation(
+                ExclusiveEndpointProbeResult message{};
+                message.endpointIndex = i;
+                message.probe = ProbeExclusiveBufferRecommendation(
                     endpoints[i].id, &state->exclusiveProbeStop);
+                // Results belong to the dialog state, not its message queue.
+                // Closing the HWND can discard notifications safely: the
+                // state outlives the joined worker and releases unread results.
+                QueueExclusiveEndpointProbeResult(state, std::move(message));
                 if (!PostMessageW(hwnd, WM_EXCLUSIVE_ENDPOINT_PROBE_COMPLETE,
-                                  reinterpret_cast<WPARAM>(message), 0)) {
-                    delete message;
+                                  0, 0)) {
                     break;
                 }
             }
-            state->exclusiveScanRunning.store(false, std::memory_order_release);
             PostMessageW(hwnd, WM_EXCLUSIVE_SCAN_COMPLETE, 0, 0);
         });
 }
@@ -5438,8 +5681,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         const wchar_t* queueLabels[] = {
             UI_TEXT(L"10 ms (최저 지연)"),
             UI_TEXT(L"15 ms (저지연 목표)"),
-            UI_TEXT(L"20 ms (안정 권장)"),
-            UI_TEXT(L"25 ms (안정 여유)"),
+            UI_TEXT(L"20 ms (안정 목표)"),
+            UI_TEXT(L"25 ms (권장 · 기본)"),
             UI_TEXT(L"30 ms (안정성 우선)" )};
         size_t selectedQueue = 0;
         for (size_t i = 0; i < ARRAYSIZE(kPcmQueueOptionsMs); ++i) {
@@ -5955,28 +6198,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         return 0;
 
     case WM_EXCLUSIVE_ENDPOINT_PROBE_COMPLETE: {
-        std::unique_ptr<ExclusiveEndpointProbeMessage> message(
-            reinterpret_cast<ExclusiveEndpointProbeMessage*>(wParam));
-        if (!state || !message ||
-            message->endpointIndex >= state->exclusiveEndpointResults.size()) {
-            return 0;
-        }
-        auto& result = state->exclusiveEndpointResults[message->endpointIndex];
-        result.state = message->probe.compatible
-            ? ExclusiveEndpointState::Supported
-            : ExclusiveEndpointState::Unsupported;
-        result.recommendedBufferMs = message->probe.compatible
-            ? static_cast<int>((message->probe.requestedFrames * 1000 +
-                                kSampleRate / 2) / kSampleRate)
-            : 0;
-        result.summary = message->probe.summary;
-        ++state->exclusiveScanCompleted;
-        fwprintf(stderr,
-                 L"[audio][exclusive-scan] %s: %s | requested=%u frames "
-                 L"actual=%u frames\n",
-                 state->audioEndpoints[message->endpointIndex].name.c_str(),
-                 result.summary.c_str(), message->probe.requestedFrames,
-                 message->probe.actualBufferFrames);
+        if (!state) return 0;
+        ConsumeExclusiveEndpointProbeResults(state);
         PopulateAudioOutputCombo(state);
         const int recommendedBufferMs =
             ExclusiveVerifiedBufferForSelection(state);
@@ -5991,9 +6214,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
 
     case WM_EXCLUSIVE_SCAN_COMPLETE:
         if (state) {
-            if (state->exclusiveProbeThread.joinable()) {
-                state->exclusiveProbeThread.join();
-            }
+            CompleteExclusiveEndpointScan(state);
             if (state->exclusiveProbeStop.load(std::memory_order_acquire)) {
                 // A canceled scan has no verdict for endpoints that did not
                 // reach their probe yet. Never label them as unavailable or
@@ -6022,20 +6243,22 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         return 0;
 
     case WM_SETTINGS_UPDATE_CHECK_COMPLETE: {
-        std::unique_ptr<UpdateCheckResult> result(
-            reinterpret_cast<UpdateCheckResult*>(lParam));
         if (!state) return 0;
-        state->updateCheckRunning.store(false, std::memory_order_release);
-        if (state->updateCheckThread.joinable()) {
-            state->updateCheckThread.join();
-        }
+        auto result = state->updateCheckTask.TakeResult();
+        if (!result) return 0;
         EnableWindow(state->updateNowButton, TRUE);
         if (!result || !result->success) {
             SetSettingsUpdateStatus(
                 state, UI_TEXT(L"업데이트를 확인하지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도하세요."));
             return 0;
         }
-        if (!result->newer || result->installerUrl.empty()) {
+        if (result->newer && result->installerUrl.empty()) {
+            SetSettingsUpdateStatus(state, IsEnglishUi()
+                ? L"A newer version is available, but its installer is not available yet. Try again later."
+                : L"새 버전이 있지만 설치 파일이 아직 없습니다. 잠시 후 다시 확인하세요.");
+            return 0;
+        }
+        if (!result->newer) {
             std::wstring status = UI_TEXT(L"최신 버전입니다.");
             if (!result->latestTag.empty()) {
                 wchar_t detail[160]{};
@@ -6445,10 +6668,7 @@ static bool ShowSettingsDialog(HINSTANCE hInst,
         DispatchMessageW(&msg);
     }
     if (state.probeThread.joinable()) state.probeThread.join();
-    state.updateCheckStop.store(true, std::memory_order_release);
-    if (state.updateCheckThread.joinable()) {
-        state.updateCheckThread.join();
-    }
+    state.updateCheckTask.CancelAndWait();
     state.exclusiveProbeStop.store(true, std::memory_order_release);
     if (state.exclusiveProbeThread.joinable()) {
         state.exclusiveProbeThread.join();
@@ -7146,30 +7366,10 @@ static constexpr UINT WM_OPEN_SETTINGS = WM_APP + 92;
 static constexpr UINT WM_RESTORE_ONE_TO_ONE = WM_APP + 93;
 
 static void StartBackgroundUpdateCheck(HWND hwnd) {
-    if (!hwnd || !g_settings.checkForUpdates || g_updateCheckThread.joinable()) {
-        return;
-    }
-    g_updateCheckStop.store(false, std::memory_order_release);
-    g_updateCheckThread = std::thread([hwnd]() {
-        Sleep(2000);
-        if (g_updateCheckStop.load(std::memory_order_acquire) ||
-            !g_running.load(std::memory_order_acquire) || !IsWindow(hwnd)) {
-            return;
-        }
-        UpdateCheckResult result;
-        if (!llcv::update::FetchLatestRelease(kAppVersionLabel, result) ||
-            !result.newer ||
-            result.installerUrl.empty() ||
-            g_updateCheckStop.load(std::memory_order_acquire) ||
-            !g_running.load(std::memory_order_acquire) || !IsWindow(hwnd)) {
-            return;
-        }
-        auto* message = new UpdateCheckResult(std::move(result));
-        if (!PostMessageW(hwnd, WM_UPDATE_CHECK_COMPLETE, 0,
-                          reinterpret_cast<LPARAM>(message))) {
-            delete message;
-        }
-    });
+    if (!hwnd || !g_settings.checkForUpdates || g_updateCheckTask.IsRunning()) return;
+    g_updateCheckTask.Start(kAppVersionLabel, [hwnd]() {
+        PostMessageW(hwnd, WM_UPDATE_CHECK_COMPLETE, 0, 0);
+    }, std::chrono::seconds(2));
 }
 
 static void FormatAudioErrorAge(uint64_t lastErrorMs, uint64_t nowMs,
@@ -7385,7 +7585,10 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     const wchar_t* queueDiagnosis = trackingActive
         ? UI_TEXT(L"측정 중") : UI_TEXT(L"워밍업 · 시작 5초 제외");
     if (monitorStartMs) {
-        if (underrunEvents == 0) {
+        if (overrunEvents > 0 && lastErrorAgeMs <= 10 * 60 * 1000) {
+            queueDiagnosis = IsEnglishUi() ? L"PCM queue overflow · check output timing"
+                                          : L"PCM 버퍼 넘침 · 출력 지연 확인";
+        } else if (underrunEvents == 0) {
             queueDiagnosis = g_settings.pcmQueueTargetMs ==
                                      kLowestPcmQueueMs
                 ? UI_TEXT(L"최저 지연 · 오류 없음") : UI_TEXT(L"PCM 버퍼 여유 정상");
@@ -7397,6 +7600,16 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
             queueDiagnosis = UI_TEXT(L"PCM 버퍼 있음 · 리샘플러 확인");
         } else {
             queueDiagnosis = UI_TEXT(L"캡처 패킷 지연 감지");
+        }
+    }
+
+    if (trackingActive && g_settings.audioMode == AudioMode::WasapiShared) {
+        if (g_sharedRebuffering.load(std::memory_order_acquire)) {
+            queueDiagnosis = IsEnglishUi() ? L"Refilling PCM reserve" : L"PCM 버퍼 다시 채우는 중";
+        } else if (const uint64_t late = g_sharedLastDeadlineMs.load();
+                   late && nowMs >= late && nowMs - late < 60000) {
+            queueDiagnosis = IsEnglishUi() ? L"Output delay suspected · check log"
+                                          : L"출력 지연 의심 · 로그 확인";
         }
     }
 
@@ -7843,6 +8056,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         if (wParam == 1) {
+            FlushSharedDiagnostics();
             UpdateOsdRates();
             g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
             if (g_settings.audioOnly) InvalidateRect(hwnd, nullptr, FALSE);
@@ -7973,7 +8187,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         if (wParam == VK_F11) {
-            ToggleFullscreen(hwnd);
+            // Holding F11 generates repeated WM_KEYDOWN messages. Only the
+            // first press should change window style and rebuild the output.
+            if ((lParam & (LPARAM{1} << 30)) == 0) {
+                ToggleFullscreen(hwnd);
+            }
             return 0;
         }
         if (wParam == VK_ESCAPE) {
@@ -8031,9 +8249,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
 
     case WM_UPDATE_CHECK_COMPLETE: {
-        std::unique_ptr<UpdateCheckResult> result(
-            reinterpret_cast<UpdateCheckResult*>(lParam));
-        if (!result || result->latestTag.empty() ||
+        auto result = g_updateCheckTask.TakeResult();
+        if (!result || !result->success || !result->newer || result->latestTag.empty() ||
             result->installerUrl.empty()) {
             return 0;
         }
@@ -8137,6 +8354,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         sizeof(commonControls), ICC_WIN95_CLASSES};
     InitCommonControlsEx(&commonControls);
 
+    // Diagnostic runs must suppress migrations before loading settings, not
+    // only suppress later saves after a real settings file was already changed.
+    g_suppressSettingsSave = commandLine &&
+        (wcsstr(commandLine, L"--smoke-test") != nullptr ||
+         wcsstr(commandLine, L"--exclusive-probe") != nullptr);
     LoadSettings();
     const std::wstring asioSmokeDriver =
         CommandLineOptionValue(L"--smoke-test-asio");
@@ -8532,12 +8754,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     }
 
     g_running.store(false);
-    g_updateCheckStop.store(true, std::memory_order_release);
+    g_updateCheckTask.CancelAndWait();
 
     if (renderThread.joinable()) renderThread.join();
     if (unifiedCaptureThread.joinable()) unifiedCaptureThread.join();
     if (smokeTestStopper.joinable()) smokeTestStopper.join();
-    if (g_updateCheckThread.joinable()) g_updateCheckThread.join();
     if (smokeTest) {
         fwprintf(stderr,
                  L"[smoke] captured=%llu presented=%llu replaced=%llu "
@@ -8602,6 +8823,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     const bool restartToSettings =
         !smokeTest && g_restartToSettings.exchange(false,
                                                     std::memory_order_acq_rel);
+    FlushSharedDiagnostics(true);
     CloseSavedLog();
     if (restartToSettings) RelaunchWithSettings();
     return 0;

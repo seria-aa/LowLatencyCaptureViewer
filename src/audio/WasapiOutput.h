@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include "diagnostics/LogSink.h"
 
 namespace llcv::wasapi {
 
@@ -40,6 +41,7 @@ using EndpointCallback = void (*)(
     void* context, const std::wstring& name, bool followsDefault);
 using BufferCallback = void (*)(void* context, UINT32 frames);
 using BeforeStartCallback = void (*)(void* context);
+using DeadlineCallback = void (*)(void* context, double overdueSeconds, bool duringFill);
 using HresultLogCallback = void (*)(
     void* context, const wchar_t* operation, HRESULT result);
 
@@ -51,13 +53,19 @@ struct Host {
     BufferCallback bufferChanged = nullptr;
     BufferCallback paddingChanged = nullptr;
     BeforeStartCallback beforeStart = nullptr;
+    // Nonblocking notification; the UI persists diagnostics later.
+    DeadlineCallback outputDeadlineSuspected = nullptr;
     HresultLogCallback logHresult = nullptr;
+    diagnostics::LogSink log = nullptr;
 };
 
-// Runs one event-driven WASAPI session on the calling thread. Returns true
-// only when the Windows default render endpoint changed and the caller should
-// immediately construct another session. Other exits are final for the
-// current renderer invocation.
-bool Run(const Configuration& configuration, const Host& host);
+enum class RunResult { Stopped, EndpointChanged, Retry, Failed };
+// A session releases all COM resources before returning. The owner applies
+// a bounded retry policy for Retry; the audio callback never reopens a device.
+// Optional runtime evidence spans a successful Start through the last
+// successful render iteration. Failed setup, failed API calls and cleanup
+// cannot extend it; it remains zero if no render iteration succeeds.
+RunResult Run(const Configuration& configuration, const Host& host,
+              uint64_t* successfulRuntimeMilliseconds = nullptr);
 
 }  // namespace llcv::wasapi

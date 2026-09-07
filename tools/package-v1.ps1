@@ -1,7 +1,7 @@
 param(
-    [string]$Version = "1.2.5.1",
-    [string]$BuildDir = "..\build-v1251-release",
-    [string]$OutputDir = "..\outputs\v1.2.5.1"
+    [string]$Version = "1.2.6",
+    [string]$BuildDir = "..\build-v1260-release",
+    [string]$OutputDir = "..\outputs\v1.2.6"
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +14,10 @@ $exe = Join-Path $build "LowLatencyCaptureViewer.exe"
 
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
     throw "Release executable not found: $exe"
+}
+$exeVersion = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
+if ($exeVersion -ne $Version -and $exeVersion -ne "$Version.0") {
+    throw "Version mismatch: requested $Version but executable reports $exeVersion"
 }
 
 New-Item -ItemType Directory -Force -Path $output | Out-Null
@@ -34,6 +38,10 @@ Copy-Item -LiteralPath $exe -Destination $portable
 foreach ($file in $files) {
     Copy-Item -LiteralPath (Join-Path $root $file) -Destination $portable
 }
+Copy-Item -LiteralPath (Join-Path $root "third_party\asio\LICENSE.txt") `
+    -Destination (Join-Path $portable "ASIO-SDK-LICENSE.txt")
+Copy-Item -LiteralPath (Join-Path $root "third_party\asio\HOST-LICENSE.txt") `
+    -Destination (Join-Path $portable "ASIO-HOST-LICENSE.txt")
 Copy-Item -LiteralPath (Join-Path $root "docs") -Destination $portable -Recurse
 Compress-Archive -Path (Join-Path $portable "*") -DestinationPath $zip -CompressionLevel Optimal
 Write-Host "Portable package: $zip"

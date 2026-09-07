@@ -75,8 +75,8 @@ IMediaSample* LatestVideoSample::TakeLatest(
 }
 
 VideoSampleGrabberCallback::VideoSampleGrabberCallback(
-    LatestVideoSample* sampleSlot)
-    : sampleSlot_(sampleSlot) {}
+    LatestVideoSample* sampleSlot, diagnostics::LogSink log)
+    : sampleSlot_(sampleSlot), log_(log) {}
 
 STDMETHODIMP VideoSampleGrabberCallback::QueryInterface(
     REFIID id, void** object) {
@@ -111,8 +111,8 @@ STDMETHODIMP VideoSampleGrabberCallback::SampleCB(
             IID_PPV_ARGS(&surfaceConfig));
         const HRESULT surfaceResult = SUCCEEDED(configResult)
             ? surfaceConfig->GetSurface(&surface) : configResult;
-        std::fwprintf(
-            stderr,
+        diagnostics::LogMessage(
+            log_,
             L"[video] DirectShow VRAM sample surface: %s "
             L"(interface 0x%08X, surface 0x%08X)\n",
             SUCCEEDED(surfaceResult) && surface ? L"available"

@@ -1,4 +1,5 @@
 #include "capture/DirectShowGraphResources.h"
+#include "capture/LatestVideoSample.h"
 
 namespace llcv::capture {
 namespace {
@@ -25,6 +26,8 @@ void DeleteMediaType(AM_MEDIA_TYPE*& mediaType) {
 
 }  // namespace
 
+DirectShowGraphResources::DirectShowGraphResources() = default;
+
 DirectShowGraphResources::~DirectShowGraphResources() {
     Reset();
 }
@@ -35,6 +38,7 @@ void DirectShowGraphResources::Reset() {
     SafeRelease(audioCallback);
     if (videoGrabber) videoGrabber->SetCallback(nullptr, 0);
     SafeRelease(videoCallback);
+    latestVideoSample.reset();
     if (frameEvent) {
         CloseHandle(frameEvent);
         frameEvent = nullptr;

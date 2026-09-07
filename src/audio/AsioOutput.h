@@ -30,12 +30,14 @@ public:
     Output(const Output&) = delete;
     Output& operator=(const Output&) = delete;
 
-    bool Start();
+    // Owner-thread callback after initialization, immediately before start.
+    bool Start(void (*beforeStart)(void*) = nullptr);
     void Stop();
     bool Running() const { return running_; }
     long BufferFrames() const { return bufferFrames_; }
     double SampleRate() const { return sampleRate_; }
     const std::string& Error() const { return error_; }
+    bool RestartRequested() const;
 
     // Called only by the ASIO callback trampoline.
     void ProcessBuffer(long index);
