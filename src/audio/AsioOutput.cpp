@@ -1,6 +1,7 @@
 #include "AsioOutput.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -17,14 +18,17 @@ namespace {
 
 Output* g_activeOutput = nullptr;
 std::mutex g_outputMutex;
+// Driver callbacks only publish a request. The owner stops and reopens the
+// driver outside the realtime callback, where allocation/COM calls are safe.
+std::atomic<bool> g_acceptRequests{false};
+std::atomic<bool> g_restartRequested{false};
 
 long AsioMessage(long selector, long value, void*, double*) {
     switch (selector) {
     case kAsioSelectorSupported:
         return value == kAsioResetRequest || value == kAsioResyncRequest ||
                        value == kAsioLatenciesChanged ||
-                       value == kAsioEngineVersion ||
-                       value == kAsioSupportsTimeInfo
+                       value == kAsioEngineVersion
                    ? 1L
                    : 0L;
     case kAsioEngineVersion:
@@ -32,13 +36,20 @@ long AsioMessage(long selector, long value, void*, double*) {
     case kAsioResetRequest:
     case kAsioResyncRequest:
     case kAsioLatenciesChanged:
+        if (!g_acceptRequests.load(std::memory_order_acquire)) return 0L;
+        g_restartRequested.store(true, std::memory_order_release);
         return 1L;
     default:
         return 0L;
     }
 }
 
-void AsioSampleRateChanged(ASIOSampleRate) {}
+void AsioSampleRateChanged(ASIOSampleRate rate) {
+    if (g_acceptRequests.load(std::memory_order_acquire) &&
+        (!std::isfinite(rate) || std::abs(rate - 48000.0) > 0.5)) {
+        g_restartRequested.store(true, std::memory_order_release);
+    }
+}
 
 void AsioBufferSwitch(long index, ASIOBool) {
     Output* output = nullptr;
@@ -76,8 +87,8 @@ struct Output::Impl {
         if (!callback || !buffersCreated || index < 0 || index > 1) return;
         int16_t* scratch = scratchBuffer.data();
         const std::size_t frames = static_cast<std::size_t>(bufferFrames);
-        if (scratchBuffer.size() < frames * 2) scratchBuffer.resize(frames * 2);
-        const std::size_t got = callback(user, scratch, frames);
+        const std::size_t got = g_restartRequested.load(std::memory_order_acquire)
+            ? 0 : callback(user, scratch, frames);
         if (got < frames) {
             std::memset(scratch + got * 2, 0,
                         (frames - got) * 2 * sizeof(int16_t));
@@ -169,8 +180,10 @@ void Output::ProcessBuffer(long index) {
     if (impl_) impl_->Switch(index);
 }
 
-bool Output::Start() {
+bool Output::Start(void (*beforeStart)(void*)) {
     if (!impl_ || impl_->driverIndex < 0) return false;
+    error_.clear();
+    g_restartRequested.store(false, std::memory_order_release);
     if (impl_->drivers.asioOpenDriver(
             impl_->driverIndex, reinterpret_cast<void**>(&impl_->driver)) !=
         0) {
@@ -268,10 +281,12 @@ bool Output::Start() {
     }
     impl_->sampleType = impl_->channels[0].type;
     impl_->scratchBuffer.resize(static_cast<std::size_t>(preferred) * 2);
+    if (beforeStart) beforeStart(impl_->user);
     {
         std::lock_guard<std::mutex> lock(g_outputMutex);
         g_activeOutput = this;
     }
+    g_acceptRequests.store(true, std::memory_order_release);
     if (impl_->driver->start() != ASE_OK) {
         error_ = "ASIO start failed";
         Stop();
@@ -286,6 +301,7 @@ bool Output::Start() {
 
 void Output::Stop() {
     if (!impl_) return;
+    g_acceptRequests.store(false, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(g_outputMutex);
         if (g_activeOutput == this) g_activeOutput = nullptr;
@@ -299,6 +315,10 @@ void Output::Stop() {
         impl_->driver = nullptr;
     }
     running_ = false;
+}
+
+bool Output::RestartRequested() const {
+    return g_restartRequested.load(std::memory_order_acquire);
 }
 
 }  // namespace llcv::asio

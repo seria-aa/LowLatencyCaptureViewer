@@ -39,6 +39,21 @@ int32_t ReadInteger(const BYTE* source, uint16_t containerBits) noexcept {
     return raw;
 }
 
+void DeleteMediaType(AM_MEDIA_TYPE*& mediaType) noexcept {
+    if (!mediaType) return;
+    if (mediaType->cbFormat != 0) {
+        CoTaskMemFree(mediaType->pbFormat);
+        mediaType->cbFormat = 0;
+        mediaType->pbFormat = nullptr;
+    }
+    if (mediaType->pUnk) {
+        mediaType->pUnk->Release();
+        mediaType->pUnk = nullptr;
+    }
+    CoTaskMemFree(mediaType);
+    mediaType = nullptr;
+}
+
 }  // namespace
 
 Classification Classify(const AM_MEDIA_TYPE& mediaType) noexcept {
@@ -110,6 +125,97 @@ Classification Classify(const AM_MEDIA_TYPE& mediaType) noexcept {
                      wave.wBitsPerSample, validBits, wave.nChannels,
                      wave.nBlockAlign};
     return result;
+}
+
+AM_MEDIA_TYPE* SelectSupportedType(
+    IPin* audioPin, Format& selectedFormat, Rejection* rejection) {
+    if (rejection) *rejection = Rejection::Malformed;
+    if (!audioPin) return nullptr;
+
+    IEnumMediaTypes* types = nullptr;
+    if (FAILED(audioPin->EnumMediaTypes(&types)) || !types) return nullptr;
+
+    AM_MEDIA_TYPE* fallback = nullptr;
+    Format fallbackFormat{};
+    Rejection firstRejection = Rejection::Malformed;
+    AM_MEDIA_TYPE* type = nullptr;
+    while (types->Next(1, &type, nullptr) == S_OK) {
+        const auto classification = Classify(*type);
+        if (classification.supported) {
+            if (classification.format.path == Path::Direct16BitStereo) {
+                DeleteMediaType(fallback);
+                selectedFormat = classification.format;
+                types->Release();
+                return type;
+            }
+            if (!fallback) {
+                fallback = type;
+                fallbackFormat = classification.format;
+                type = nullptr;
+            }
+        } else if (firstRejection == Rejection::Malformed ||
+                   classification.rejection == Rejection::SampleRate) {
+            firstRejection = classification.rejection;
+        }
+        DeleteMediaType(type);
+    }
+    types->Release();
+    if (fallback) {
+        selectedFormat = fallbackFormat;
+    } else if (rejection) {
+        *rejection = firstRejection;
+    }
+    return fallback;
+}
+
+HRESULT SuggestCaptureBuffer(IPin* audioPin, WORD blockAlign,
+                             int sampleRate, int bufferMs,
+                             LONG* suggestedBytes) noexcept {
+    if (suggestedBytes) *suggestedBytes = 0;
+    if (!audioPin || blockAlign == 0 || sampleRate <= 0 || bufferMs <= 0) {
+        return E_INVALIDARG;
+    }
+
+    IAMBufferNegotiation* negotiation = nullptr;
+    HRESULT result = audioPin->QueryInterface(IID_PPV_ARGS(&negotiation));
+    if (FAILED(result)) return result;
+
+    ALLOCATOR_PROPERTIES properties{};
+    properties.cBuffers = 4;
+    properties.cbBuffer = (sampleRate * blockAlign * bufferMs) / 1000;
+    properties.cbAlign = 1;
+    result = negotiation->SuggestAllocatorProperties(&properties);
+    negotiation->Release();
+    if (suggestedBytes) *suggestedBytes = properties.cbBuffer;
+    return result;
+}
+
+AllocatorInfo QueryConnectedAllocator(IPin* inputPin,
+                                      WORD blockAlign) noexcept {
+    AllocatorInfo info{};
+    if (!inputPin || blockAlign == 0) {
+        info.result = E_INVALIDARG;
+        return info;
+    }
+
+    IMemInputPin* memoryInput = nullptr;
+    IMemAllocator* allocator = nullptr;
+    ALLOCATOR_PROPERTIES properties{};
+    info.result = inputPin->QueryInterface(IID_PPV_ARGS(&memoryInput));
+    if (SUCCEEDED(info.result)) {
+        info.result = memoryInput->GetAllocator(&allocator);
+    }
+    if (SUCCEEDED(info.result)) {
+        info.result = allocator->GetProperties(&properties);
+    }
+    if (SUCCEEDED(info.result)) {
+        info.bufferCount = properties.cBuffers;
+        info.bufferBytes = properties.cbBuffer;
+        info.framesPerBuffer = properties.cbBuffer / blockAlign;
+    }
+    if (allocator) allocator->Release();
+    if (memoryInput) memoryInput->Release();
+    return info;
 }
 
 int16_t ConvertSample(const BYTE* source, const Format& format) noexcept {

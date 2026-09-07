@@ -1,4 +1,54 @@
-Low Latency Capture Viewer v1.2.3 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.6 x64 (continued from the v0.14.2 rework)
+
+v1.2.6 audio stability and lifecycle hardening release
+----------------------------------------------------
+- Improved WASAPI Shared clock/queue control, starvation recovery and diagnostics.
+- Default PCM reserve is 25 ms; legacy 20 ms settings migrate once. Other saved
+  values and a later manual 20 ms selection are preserved.
+- Recovery can insert brief silence while refilling reserve after missing input;
+  it does not guarantee shorter interruptions in every fault condition.
+- Bounded audio-device recovery uses successful runtime, not failed-open duration.
+- Retained F11/F5 transition coalescing and ignored repeated F11 key-down messages.
+- Capture graph teardown now owns the latest-frame mailbox until callbacks stop.
+- Update checks and Exclusive scans own pending results across window shutdown.
+- Included the ASIO SDK license in both installer and portable packages.
+- Validation uses automated/virtual replay tests, not extended physical-device
+  listening or a guarantee of dropout-free playback on every driver.
+
+v1.2.5.1 F11 fullscreen transition prerelease
+------------------------------------------------
+- Coalesced synchronous window-size notifications generated during F11
+  borderless-fullscreen transitions into one D3D11 output update.
+- F5 one-to-one restoration uses the same serialized output transition path.
+- DirectShow capture and audio output remain running; no frame or audio queue
+  was added.
+
+v1.2.5 shortcut guidance release
+--------------------------------
+- Renamed the Guide & diagnostics settings tab to Shortcuts & diagnostics so
+  its contents are clearer before opening it.
+- Added the missing F11 borderless-fullscreen shortcut to the settings guide.
+- Added a persistent, right-aligned F11 hint below the fullscreen-cursor
+  option in the Video & window tab.
+- Kept the F11 hint visible when Pixel-perfect changes the surrounding layout
+  by preventing the combo box's drop-down rectangle from painting over it.
+- Updated Korean and English troubleshooting documentation to use the new tab
+  name. Capture, rendering, and audio processing paths are unchanged.
+
+v1.2.4 maintainability and regression-safety release
+---------------------------------------------------
+- Split device discovery, capture callbacks, PCM buffering/resampling,
+  settings, update checks, window geometry, diagnostics, and video-format
+  handling into focused modules while preserving the existing runtime paths.
+- Added focused regression tests for audio device capabilities, PCM buffering,
+  DirectShow devices and formats, settings persistence, update comparison,
+  window geometry, and audio error-pattern analysis.
+- ASIO shutdown callbacks no longer count a final partial buffer as a runtime
+  underrun after the application has begun closing.
+- The troubleshooting guide now recommends VSync compatibility mode when the
+  immediate tearing path causes intermittent monitor signal loss.
+- Shared, ASIO, NV12, YUY2, MJPEG, and P010 behavior remains unchanged apart
+  from the shutdown diagnostic correction.
 
 v1.2.3 MJPEG automatic color interpretation
 ---------------------------------------------

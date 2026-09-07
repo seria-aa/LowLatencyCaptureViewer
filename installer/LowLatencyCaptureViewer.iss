@@ -1,12 +1,14 @@
-; Low Latency Capture Viewer v1.2.3
+; Low Latency Capture Viewer v1.2.6
 ; Build this script with Inno Setup 7 from the installer directory.
 
 #define MyAppName "Low Latency Capture Viewer"
-#define MyAppVersion "1.2.3"
+#define MyAppVersion "1.2.6"
 #define MyAppPublisher "seria-aa"
 #define MyAppURL "https://github.com/seria-aa/LowLatencyCaptureViewer"
 #define MyAppExeName "LowLatencyCaptureViewer.exe"
-#define BuildDir "..\build-v1230-release"
+#ifndef BuildDir
+#define BuildDir "..\build-v1260-release"
+#endif
 
 [Setup]
 AppId={{A5B2F8BB-6F68-4A2F-BD8A-9AF2A3AA1000}
@@ -22,8 +24,8 @@ DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
-OutputDir=..\..\outputs\v1.2.3
-OutputBaseFilename=LowLatencyCaptureViewer_v1.2.3_Setup
+OutputDir=..\..\outputs\v1.2.6
+OutputBaseFilename=LowLatencyCaptureViewer_v1.2.6_Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -31,7 +33,7 @@ CloseApplications=yes
 SetupIconFile=..\assets\LowLatencyCaptureViewer.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Uninstallable=yes
-VersionInfoVersion=1.2.3
+VersionInfoVersion=1.2.6.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName}
 VersionInfoCopyright=Copyright (C) 2026 seria-aa
@@ -52,6 +54,8 @@ Source: "{#BuildDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.ko.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\third_party\asio\LICENSE.txt"; DestDir: "{app}"; DestName: "ASIO-SDK-LICENSE.txt"; Flags: ignoreversion
+Source: "..\third_party\asio\HOST-LICENSE.txt"; DestDir: "{app}"; DestName: "ASIO-HOST-LICENSE.txt"; Flags: ignoreversion
 Source: "..\실행안내.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\DEPENDENCIES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs createallsubdirs

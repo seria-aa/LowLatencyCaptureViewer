@@ -83,8 +83,11 @@ These controls affect different parts of the path:
 - **Clock-drift correction** changes the long-run sample-rate relationship; it
   does not replace either buffer setting.
 
-New installations start with a 20 ms PCM target. Once a system is stable, try
-15 ms or 10 ms only when lower latency matters more than scheduling headroom;
+New installations start with a 25 ms PCM target. Only legacy saved 20 ms targets
+are upgraded to 25 ms once on first launch; other values are preserved. Choosing
+20 ms afterward is respected on subsequent launches.
+Once a system is stable, try `25 → 20 → 15 → 10 ms` only when lower latency
+matters more than scheduling headroom;
 raise a too-small target back to 15, 20, 25, or 30 ms when underruns repeat. A
 larger target improves scheduling tolerance but adds the same amount of audio
 queueing. A single occasional underrun is not necessarily audible or a reason

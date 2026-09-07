@@ -27,7 +27,9 @@ Windows 10/11 x64 and a capture-device driver are required.
 3. Confirm **Capture device**, then select **Start**.
 
 The defaults are a good first test: 1080p, low-latency presentation, WASAPI
-Shared, a 20 ms PCM buffer, and automatic clock-drift correction.
+Shared, a 25 ms PCM buffer, and automatic clock-drift correction. A saved 20 ms
+PCM target from an older build is upgraded to 25 ms once on first launch; other
+saved values are preserved. You can select 20 ms again afterward.
 
 If video works but audio does not, check **Capture audio device**. USB capture
 devices can expose separate video and audio devices; in that case, choose the
@@ -43,7 +45,7 @@ automatically,” no separate selection is needed.
 | Capture resolution | **1920 × 1080**; change it to match the source and capture device |
 | Pixel format | **Auto (NV12 preferred)** |
 | Frame rate | **Auto**, or the source's actual output rate |
-| Presentation | **Low latency**; choose VSync for tearing or intermittent monitor signal loss |
+| Presentation | **Immediate (minimum latency)**; choose **VSync (compatibility)** for tearing or intermittent monitor signal loss |
 | Pixel-perfect | On for exact 1:1 output; off for a freely resizable window |
 
 A 120 fps capture mode does not create extra visual information when the game
@@ -57,7 +59,7 @@ source and capture device actually support.
 | Audio output mode | **WASAPI Shared** |
 | Output device | **Follow the Windows default output device** |
 | Output buffer | The value marked as recommended in settings |
-| PCM buffer target | **20 ms** |
+| PCM buffer target | **25 ms** |
 | Clock-drift correction | **Auto** |
 
 WASAPI Shared is the default mode for compatibility with other applications
@@ -67,7 +69,7 @@ the app's playback-event check. Use WASAPI Shared unless you have a specific
 reason to choose another mode.
 
 If sound occasionally breaks up, open the Tab diagnostics overlay. Raise the
-PCM target from `20` to `25` to `30 ms` only when **buffer shortage** or **resampler
+PCM target in 5 ms steps from its current value (e.g. `20 → 25 → 30 ms`) only when **buffer shortage** or **resampler
 output shortage** repeats. Leave it alone when there are no errors.
 
 ## Everyday controls
@@ -103,7 +105,7 @@ while launching, or press `F2` from the viewer, to open it again.
 | Monitor briefly loses signal in Low latency mode | The graphics driver may be incompatible with the tearing presentation path. Change Presentation to **VSync**; borderless mode can remain enabled |
 | No audio | Select the audio input that belongs to the chosen video device |
 | Occasional audio breakup | Check for buffer shortage in Tab diagnostics, then raise the PCM target in 5 ms steps and test again |
-| Need more evidence | Enable logging in Help & diagnostics, reproduce the issue, then send the newest `.log` file from **Open log folder** together with screenshots of settings and Tab diagnostics |
+| Need more evidence | Enable logging in Shortcuts & diagnostics, reproduce the issue, then send the newest `.log` file from **Open log folder** together with screenshots of settings and Tab diagnostics |
 
 Settings and optional logs are stored in `%LOCALAPPDATA%\LowLatencyCaptureViewer`.
 The uninstaller can remove this user data on request.
