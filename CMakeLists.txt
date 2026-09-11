@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 1.2.6 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 1.2.7 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,6 +24,9 @@ add_executable(LowLatencyCaptureViewer
     src/settings/SettingsStore.cpp
     src/ui/AudioOsdLayout.cpp
     src/ui/PresentationModeUi.cpp
+    src/ui/SettingsView.cpp
+    src/ui/SettingsDialogControls.cpp
+    src/ui/UiText.cpp
     src/ui/WindowGeometry.cpp
     src/update/UpdateChecker.cpp
     src/video/DirectShowVideoFormat.cpp
@@ -86,6 +89,28 @@ endif()
 
 include(CTest)
 if (BUILD_TESTING)
+    add_executable(OutputTransitionStateTests tests/OutputTransitionStateTests.cpp)
+    target_include_directories(OutputTransitionStateTests PRIVATE src)
+    set_target_properties(OutputTransitionStateTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_test(NAME OutputTransitionStateTests COMMAND OutputTransitionStateTests)
+
+    add_executable(SettingsViewTests tests/SettingsViewTests.cpp
+        src/ui/SettingsView.cpp src/ui/PresentationModeUi.cpp
+        src/ui/SettingsDialogControls.cpp src/ui/UiText.cpp)
+    target_include_directories(SettingsViewTests PRIVATE src)
+    target_compile_definitions(SettingsViewTests PRIVATE
+        UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
+        WINVER=0x0A00 _WIN32_WINNT=0x0A00)
+    target_link_libraries(SettingsViewTests PRIVATE comctl32)
+    set_target_properties(SettingsViewTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    if (MSVC)
+        target_compile_options(OutputTransitionStateTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+        target_compile_options(SettingsViewTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    endif()
+    add_test(NAME SettingsViewTests COMMAND SettingsViewTests)
+    # Native control creation is substantially slower than pure geometry tests,
+    # especially when other replay tests run concurrently on CI.
+    set_tests_properties(SettingsViewTests PROPERTIES TIMEOUT 120)
     add_executable(LatestVideoSampleTests tests/LatestVideoSampleTests.cpp
         src/capture/LatestVideoSample.cpp
         src/capture/DirectShowGraphResources.cpp)
@@ -115,6 +140,21 @@ if (BUILD_TESTING)
         target_compile_options(AudioCallbackTests PRIVATE /W4 /EHsc /permissive- /utf-8)
     endif()
     add_test(NAME AudioCallbackTests COMMAND AudioCallbackTests)
+
+    add_executable(MonitorMoveTests tests/MonitorMoveTests.cpp
+        ${audio_callback_sources} src/audio/AsioOutput.cpp)
+    target_include_directories(MonitorMoveTests PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(MonitorMoveTests PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,COMPILE_DEFINITIONS>)
+    target_link_libraries(MonitorMoveTests PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,LINK_LIBRARIES>)
+    set_target_properties(MonitorMoveTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    if (MSVC)
+        target_compile_options(MonitorMoveTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    endif()
+    add_test(NAME MonitorMoveTests COMMAND MonitorMoveTests)
+    set_tests_properties(MonitorMoveTests PROPERTIES TIMEOUT 30)
 
     add_executable(SharedReplayTests tests/SharedReplayTests.cpp
         ${audio_callback_sources} src/audio/AsioOutput.cpp)
@@ -332,6 +372,15 @@ if (BUILD_TESTING)
             /W4 /EHsc /permissive- /utf-8)
     endif()
     add_test(NAME AudioErrorHistoryTests COMMAND AudioErrorHistoryTests)
+
+    # Keep the formerly failing driver/transition cases in normal regression runs.
+    add_test(NAME VideoFormatFaults COMMAND DirectShowVideoFormatTests --faults)
+    add_test(NAME VideoTransitionFaults COMMAND AudioCallbackTests --transition-faults)
+    add_test(NAME VideoLayoutStress COMMAND DirectShowVideoFormatTests --stress)
+    add_test(NAME VideoMailboxStress COMMAND LatestVideoSampleTests --stress)
+    add_test(NAME VideoTransitionStress COMMAND AudioCallbackTests --transition-stress)
+    set_tests_properties(VideoFormatFaults VideoTransitionFaults VideoLayoutStress
+        VideoMailboxStress VideoTransitionStress PROPERTIES TIMEOUT 30)
 endif()
 
 install(TARGETS LowLatencyCaptureViewer RUNTIME DESTINATION .)

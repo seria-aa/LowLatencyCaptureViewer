@@ -45,6 +45,13 @@ HRESULT ConfigureVideoPin(
     LogCallback logCallback);
 HRESULT GetActiveVideoPinFormat(IPin* videoPin, AM_MEDIA_TYPE** mediaType);
 std::vector<PixelFormatSupport> ProbePixelFormats(
-    IPin* videoPin, int width, int height);
+    IPin* videoPin, int width, int height, HRESULT* queryStatus = nullptr,
+    LogCallback logCallback = nullptr);
+
+// Startup-only validation. Outputs change only after a complete valid layout.
+// fps supplies the negotiated fallback when the media type omits frame timing.
+HRESULT ValidateVideoLayout(const AM_MEDIA_TYPE* mediaType,
+    int expectedWidth, int expectedHeight, VideoPixelFormat expectedFormat,
+    DWORD& imageBytes, UINT32& stride, int& fps);
 
 }  // namespace llcv::video

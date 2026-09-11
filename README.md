@@ -45,7 +45,8 @@ automatically,” no separate selection is needed.
 | Capture resolution | **1920 × 1080**; change it to match the source and capture device |
 | Pixel format | **Auto (NV12 preferred)** |
 | Frame rate | **Auto**, or the source's actual output rate |
-| Presentation | **Immediate (minimum latency)**; choose **VSync (compatibility)** for tearing or intermittent monitor signal loss |
+| Presentation | **Immediate (minimum latency)**; **VSync (reduced tearing)** waits for refresh. **Compatibility (Blt + VSync)** uses an alternative output path, may add latency/GPU load, and does not support HDR10 |
+| Display monitor | **Auto (restore last position)**; select a monitor to choose the startup location. A missing monitor falls back to the primary display; moving the window afterward is still allowed |
 | Pixel-perfect | On for exact 1:1 output; off for a freely resizable window |
 
 A 120 fps capture mode does not create extra visual information when the game

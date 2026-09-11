@@ -56,6 +56,11 @@
 #include "settings/SettingsStore.h"
 #include "ui/AudioOsdLayout.h"
 #include "ui/PresentationModeUi.h"
+#include "ui/SettingsView.h"
+#include "ui/SettingsDialogControls.h"
+#include "ui/UiText.h"
+#include "video/OutputTransitionState.h"
+#include "video/PresentationPolicy.h"
 #include "ui/WindowGeometry.h"
 #include "update/UpdateChecker.h"
 #include "update/UpdateCheckTask.h"
@@ -95,7 +100,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.2.6";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.7";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -155,13 +160,7 @@ struct InternalCaptureAudioProbe {
 
 using DirectShowColorMetadata = llcv::video::CaptureColorMetadata;
 
-struct VideoPresetInfo {
-    VideoPreset preset;
-    int width;
-    int height;
-    int framerate;
-    const wchar_t* label;
-};
+using llcv::settings::VideoPresetInfo;
 
 static constexpr VideoPresetInfo kVideoPresets[] = {
     {VideoPreset::R1920x1080, 1920, 1080, 120, L"1920 x 1080"},
@@ -186,187 +185,7 @@ static bool IsEnglishUi() {
 }
 
 static const wchar_t* UiText(const wchar_t* korean) {
-    if (!korean || !IsEnglishUi()) return korean;
-    // The map is intentionally keyed by the existing Korean source strings.
-    // This keeps settings files backward-compatible and lets the UI switch
-    // language without a second executable or a runtime translation service.
-    static const std::unordered_map<std::wstring, std::wstring> english = {
-        {L"Windows 기본 장치", L"Windows default device"},
-        {L"선택 장치 없음", L"No selected device"},
-        {L"WASAPI: 출력 사용 불가 · F2로 설정 확인", L"WASAPI: output unavailable (F2 for settings)"},
-        {L"WASAPI: 출력 복구 실패 · F2로 설정 확인", L"WASAPI: recovery failed (F2 for settings)"},
-        {L" (기본)", L" (default)"},
-        {L"선택한 출력 장치", L"Selected output device"},
-        {L" (기본 추적)", L" (following default)"},
-        {L"음량  %d%%", L"Volume  %d%%"},
-        {L"클리핑 없음", L"No clipping"},
-        {L"클리핑 감지 중 (%llu회)", L"Clipping active (%llu events)"},
-        {L"클리핑 기록 (%llu회)", L"Clipping recorded (%llu events)"},
-        {L"%.2f ms (권장)", L"%.2f ms (recommended)"},
-        {L"%.2f ms (최저)", L"%.2f ms (minimum)"},
-        {L"%d ms (권장)", L"%d ms (recommended)"},
-        {L"Shared 저지연 지원 확인 중…", L"Checking Shared low-latency support…"},
-        {L"Shared 저지연 · %.2f~%.2f ms · 검사 %.1f ms", L"Shared low latency · %.2f~%.2f ms · probe %.1f ms"},
-        {L"Shared 기본 모드 · 저지연 API 미지원", L"Shared basic mode · low-latency API unavailable"},
-        {L"지원 모드 없음: 다른 장치 또는 해상도를 선택하세요.", L"No supported mode: choose another device or resolution."},
-        {L"자동 인식: ", L"Detected: "},
-        {L"지원 프레임 없음", L"No supported frame rate"},
-        {L"자동 선택 (권장 프레임)", L"Auto select (recommended frame rate)"},
-        {L"지원 포맷 없음", L"No supported format"},
-        {L"자동 선택 (NV12 우선 · 권장)", L"Auto select (NV12 first · recommended)"},
-        {L"P010 10-bit HDR10 (실험적)", L"P010 10-bit HDR10 (experimental)"},
-        {L"P010 HDR10 강제 (메타데이터 없을 때 · 실험적)", L"Force P010 HDR10 (when metadata is missing · experimental)"},
-        {L"MJPEG (실험적 압축 호환)", L"MJPEG (experimental compressed compatibility)"},
-        {L"MJPEG 색상 해석", L"MJPEG color interpretation"},
-        {L"자동 (권장)", L"Auto (recommended)"},
-        {L"오디오 출력 모드", L"Audio output mode"},
-        {L"WASAPI Shared (호환성 우선 · 권장)", L"WASAPI Shared (compatibility · recommended)"},
-        {L"WASAPI Exclusive (지연 최소화 · 장치 독점)", L"WASAPI Exclusive (minimum latency · exclusive device)"},
-        {L"ASIO (지연 최소화 · 드라이버 필요 · 실험적)", L"ASIO (minimum latency · driver required · experimental)"},
-        {L"오디오 출력 장치", L"Audio output device"},
-        {L"WASAPI 출력 장치", L"WASAPI output device"},
-        {L"ASIO 출력 드라이버", L"ASIO output driver"},
-        {L"Windows 기본 출력 장치 따라가기 (권장)", L"Follow Windows default output (recommended)"},
-        {L" (현재 기본)", L" (current default)"},
-        {L"오디오 출력 버퍼", L"Audio output buffer"},
-        {L"ASIO 드라이버 선호 버퍼 (드라이버 설정 사용)", L"ASIO driver preferred buffer (driver setting)"},
-        {L"ASIO 출력 · 드라이버 기본 버퍼 사용 · 앱 클록 보정 가능", L"ASIO output · driver buffer · app clock correction available"},
-        {L"볼륨 HUD 위치", L"Volume HUD position"},
-        {L"100% 이상 볼륨 증폭 허용 (최대 200%)", L"Allow volume boost above 100% (up to 200%)"},
-        {L"출력", L"Output"},
-        {L"재생 · 편의", L"Playback & convenience"},
-        {L"동기화 · 안정성", L"Sync & stability"},
-        {L"캡처", L"Capture"},
-        {L"영상", L"Video"},
-        {L"창", L"Window"},
-        {L"오디오", L"Audio"},
-        {L"영상 · 창", L"Video & window"},
-        {L"단축키 · 진단", L"Shortcuts & diagnostics"},
-        {L"단축키", L"Shortcuts"},
-        {L"진단 · 문제 해결", L"Diagnostics & troubleshooting"},
-        {L"로그 폴더 열기", L"Open logs folder"},
-        {L"로그 폴더를 열지 못했습니다.", L"Could not open the logs folder."},
-        {L"진단 로그", L"Diagnostic logs"},
-        {L"시작을 누르면 현재 설정으로 뷰어를 엽니다.\r\n\r\nF2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nF11  보더리스 전체화면 켜기/끄기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료", L"Select Start to open the viewer with the current settings.\r\n\r\nF2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nF11  Toggle borderless fullscreen\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit"},
-        {L"F2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nF11  보더리스 전체화면 켜기/끄기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료", L"F2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nF11  Toggle borderless fullscreen\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit"},
-        {L"문제가 생길 때만 로그 저장을 켜고 같은 문제를 재현하세요.\r\n로그는 사용자 폴더의 logs에 저장됩니다.", L"Enable log saving only when a problem occurs, then reproduce it.\r\nLogs are saved in the user-data logs folder."},
-        {L"업데이트", L"Updates"},
-        {L"빠른 안내", L"Quick guide"},
-        {L"이 창에서 설정을 저장한 뒤 시작할 수 있습니다.\r\n\r\nF2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nF11  보더리스 전체화면 켜기/끄기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료\r\n\r\n문제가 있으면 진단 로그를 켠 뒤 재현하고, 사용자 폴더의 logs 파일을 첨부해 주세요.", L"Save settings here, then start the viewer.\r\n\r\nF2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nF11  Toggle borderless fullscreen\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit\r\n\r\nFor a problem report, enable diagnostic logging, reproduce the issue, and attach the log from the user-data logs folder."},
-        {L"업데이트 확인", L"Update checks"},
-        {L"자동 확인은 시작 후 백그라운드에서 최신 릴리스를 확인합니다. 새 버전이 있으면 공식 설치 파일 다운로드를 안내합니다.", L"Automatic checks run in the background after startup. When a new version is available, the app offers the official installer download."},
-        {L"현재 버전", L"Current version"},
-        {L"최신 버전 확인", L"Check for updates now"},
-        {L"최신 버전 확인 중…", L"Checking for updates…"},
-        {L"최신 버전입니다.", L"You are up to date."},
-        {L"최신 버전: %s", L"Latest version: %s"},
-        {L"새 버전 %s을(를) 찾았습니다. 공식 설치 파일을 다운로드하시겠습니까?", L"Version %s is available. Download the official installer?"},
-        {L"업데이트를 확인하지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도하세요.", L"Could not check for updates. Check your internet connection and try again."},
-        {L"▸ 고급 설정", L"▸ Advanced settings"},
-        {L"⌄ 고급 설정 숨기기", L"⌄ Hide advanced settings"},
-        {L"내부 오디오 확인 중…", L"Checking built-in audio…"},
-        {L"영상 장치 내부 오디오 감지됨 · 자동 사용", L"Built-in audio detected · using automatically"},
-        {L"별도 캡처 오디오 장치 선택", L"Select a separate capture audio device"},
-        {L"내부 오디오 확인 불가 · 자동 선택", L"Built-in audio unavailable · automatic selection"},
-        {L"좌측 상단 (기본)", L"Top-left (default)"},
-        {L"우측 상단", L"Top-right"},
-        {L"좌측 하단", L"Bottom-left"},
-        {L"우측 하단", L"Bottom-right"},
-        {L"클록 드리프트 보정", L"Clock-drift correction"},
-        {L"끔 (원본 PCM · 음질 우선)", L"Off (unaltered PCM · quality first)"},
-        {L"자동 (권장 · 필요 시 보정)", L"Auto (recommended · correct only when needed)"},
-        {L"켬 (항상 리샘플링)", L"On (always resample)"},
-        {L"PCM 버퍼 목표", L"PCM buffer target"},
-        {L"10 ms (최저 지연)", L"10 ms (minimum latency)"},
-        {L"15 ms (저지연 목표)", L"15 ms (low-latency target)"},
-        {L"20 ms (안정 목표)", L"20 ms (stability target)"},
-        {L"25 ms (권장 · 기본)", L"25 ms (recommended · default)"},
-        {L"30 ms (안정성 우선)", L"30 ms (stability first)"},
-        {L"백그라운드에서 자동 음소거", L"Mute automatically in background"},
-        {L"화면 표시 방식", L"Presentation mode"},
-        {L"저지연", L"Immediate"},
-        {L"화면 확대 방식", L"Scaling mode"},
-        {L"부드럽게", L"Smooth"},
-        {L"선명하게", L"Sharp"},
-        {L"캡처 장치", L"Capture device"},
-        {L"자동 선택 (GC573 우선 · 권장)", L"Auto select (GC573 first · recommended)"},
-        {L"캡처 오디오 장치", L"Capture audio device"},
-        {L"오디오 only 모드", L"Audio-only mode"},
-        {L"오디오 only: 영상 형식 확인 안 함", L"Audio-only: video mode is not checked"},
-        {L"자동 선택 (영상 장치 오디오 우선 · 권장)", L"Auto select (video-device audio first · recommended)"},
-        {L"같은 캡처 장치 오디오를 우선 사용하고, 없으면 이름이 일치하는 별도 입력을 찾습니다.", L"Uses audio on the video device first, then finds a separately exposed matching input."},
-        {L" (실험적)", L" (experimental)"},
-        {L"캡처 해상도", L"Capture resolution"},
-        {L"픽셀 포맷", L"Pixel format"},
-        {L"프레임", L"Frame rate"},
-        {L"지원 모드 확인 중...", L"Checking supported modes..."},
-        {L"Pixel-perfect (1:1 · 창 크기 고정)", L"Pixel-perfect (1:1 · fixed window size)"},
-        {L"모니터 이동 시 상대적 창 크기 유지 (독립 옵션)", L"Keep relative window size when moving monitors (independent)"},
-        {L"※ Pixel-perfect와 함께 켜면 모니터 이동 시 1:1이 깨질 수 있습니다.", L"※ With Pixel-perfect, moving monitors may break 1:1 scaling."},
-        {L"제목 표시줄 숨기기 (borderless 창)", L"Hide title bar (borderless window)"},
-        {L"창을 모니터 가장자리에 스냅 (권장)", L"Snap window to monitor edges (recommended)"},
-        {L"전체화면 커서", L"Fullscreen cursor"},
-        {L"자동 숨김 (권장)", L"Auto-hide (recommended)"},
-        {L"항상 표시", L"Always show"},
-        {L"F11  보더리스 전체화면 켜기/끄기", L"F11  Toggle borderless fullscreen"},
-        {L"진단 로그 파일 저장 (사용자 폴더)", L"Save diagnostic log (user folder)"},
-        {L"진단 콘솔 창 표시", L"Show diagnostic console window"},
-        {L"다음 실행부터 바로 시작", L"Start directly next time"},
-        {L"저장된 설정으로 바로 실행 · Shift 실행 또는 F2로 설정 열기", L"Starts with saved settings · hold Shift at launch or press F2 for settings"},
-        {L"업데이트 자동 확인 (시작 후 백그라운드)", L"Check for updates automatically (in background after startup)"},
-        {L"새 버전이 있습니다. 공식 설치 파일을 다운로드하시겠습니까?", L"A new version is available. Open the official installer download?"},
-        {L"업데이트 확인", L"Update check"},
-        {L"업데이트를 확인할 수 없습니다.", L"Could not check for updates."},
-        {L"언어 / Language", L"Language"},
-        {L"Low Latency Capture Viewer 설정", L"Low Latency Capture Viewer Settings"},
-        {L"시작", L"Start"},
-        {L"취소", L"Cancel"},
-        {L"없음", L"None"},
-        {L"방금", L"just now"},
-        {L"%llu초 전", L"%llu seconds ago"},
-        {L"%llu분 %llu초 전", L"%llu minutes %llu seconds ago"},
-        {L"%llu시간 %llu분 전", L"%llu hours %llu minutes ago"},
-        {L"측정 대기 중", L"Waiting for measurement"},
-        {L"측정 중", L"Measuring"},
-        {L"워밍업 · 시작 5초 제외", L"Warm-up · first 5 seconds excluded"},
-        {L"리샘플러 출력 부족 감지", L"Resampler output shortage detected"},
-        {L"리샘플러 보정 한계 접근", L"Resampler correction limit approaching"},
-        {L"리샘플러 정상 작동", L"Resampler operating normally"},
-        {L"보정 작동 · 오류 원인 아래 확인", L"Correction active · see error cause below"},
-        {L"안정 · 보정 불필요", L"Stable · correction unnecessary"},
-        {L"관찰 중", L"Observing"},
-        {L"초기 오류 · 더 관찰", L"Initial error · observe longer"},
-        {L"현재 안정 · 경과 관찰", L"Currently stable · continue observing"},
-        {L"입력 지터 · 보정보다 대기량", L"Input jitter · increase buffering before correction"},
-        {L"반복 불균형 · 보정 권장", L"Repeated imbalance · correction recommended"},
-        {L"드문 오류 · 끔 유지 가능", L"Rare errors · Off can be kept"},
-        {L"최저 지연 · 오류 없음", L"Minimum latency · no errors"},
-        {L"PCM 버퍼 여유 정상", L"PCM buffer headroom normal"},
-        {L"현재 안정 · 과거 오류 있음", L"Currently stable · previous errors"},
-        {L"PCM 버퍼 부족 가능", L"Possible PCM buffer shortage"},
-        {L"PCM 버퍼 있음 · 리샘플러 확인", L"PCM buffer available · check resampler"},
-        {L"캡처 패킷 지연 감지", L"Capture packet delay detected"},
-        {L"간헐적", L"Intermittent"},
-        {L"연속", L"Burst"},
-        {L"오류 패턴", L"Error pattern"},
-        {L"자동 관찰 중 · 원본 PCM", L"Auto observing · original PCM"},
-        {L"자동 · 보정 작동", L"Auto · correction active"},
-        {L"자동 · 관찰 중", L"Auto · observing"},
-        {L"켬 · 리샘플러 사용", L"On · resampler active"},
-        {L"끔 · 원본 PCM", L"Off · original PCM"},
-        {L"백그라운드 음소거 중", L"Background mute active"},
-        {L"PCM 연산 우회", L"PCM processing bypassed"},
-        {L"음소거", L"Muted"},
-        {L"PCM 감쇠 적용", L"PCM attenuation applied"},
-        {L"PCM 증폭 적용", L"PCM boost applied"},
-        {L"자동 리샘플링", L"Automatic resampling"},
-        {L"끔 (원본 PCM)", L"Off (unaltered PCM)"},
-        {L"Pixel-perfect 시작 · Monitor-relative 이동", L"Pixel-perfect start · monitor-relative move"},
-        {L"Pixel-perfect (고정 크기)", L"Pixel-perfect (fixed size)"},
-        {L"Scaled (비율 고정)", L"Scaled (fixed aspect ratio)"},
-    };
-    const auto it = english.find(korean);
-    return it == english.end() ? korean : it->second.c_str();
+    return llcv::ui_text::Translate(korean, IsEnglishUi());
 }
 
 #define UI_TEXT(text) UiText(text)
@@ -1840,13 +1659,23 @@ static HRESULT GetActiveVideoPinFormat(
     return llcv::video::GetActiveVideoPinFormat(videoPin, mediaType);
 }
 
+#ifdef LLCV_GPU_DIAGNOSTICS
+// Hardware-free settings integration tests; absent from production builds.
+static std::vector<PixelFormatSupport> (*g_testVideoCapabilityProbe)(
+    const std::wstring&, int, int, HRESULT*) = nullptr;
+#endif
 static std::vector<PixelFormatSupport> ProbePixelFormats(
-    const std::wstring& captureDeviceId, int width, int height) {
+    const std::wstring& captureDeviceId, int width, int height, HRESULT* queryStatus = nullptr) {
+    if (queryStatus) *queryStatus = S_OK;
+#ifdef LLCV_GPU_DIAGNOSTICS
+    if (g_testVideoCapabilityProbe)
+        return g_testVideoCapabilityProbe(captureDeviceId, width, height, queryStatus);
+#endif
     std::vector<PixelFormatSupport> result;
     HRESULT initHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool uninitialize = SUCCEEDED(initHr);
     if (initHr == RPC_E_CHANGED_MODE) initHr = S_OK;
-    if (FAILED(initHr)) return result;
+    if (FAILED(initHr)) { if (queryStatus) *queryStatus = initHr; return result; }
 
     IBaseFilter* capture = nullptr;
     IPin* videoPin = nullptr;
@@ -1855,7 +1684,10 @@ static std::vector<PixelFormatSupport> ProbePixelFormats(
         hr = FindOutputPinByMajorType(capture, MEDIATYPE_Video, &videoPin);
     }
     if (SUCCEEDED(hr)) {
-        result = llcv::video::ProbePixelFormats(videoPin, width, height);
+        result = llcv::video::ProbePixelFormats(videoPin, width, height, queryStatus, LogModuleMessage);
+    } else {
+        if (queryStatus) *queryStatus = hr;
+        LogHr(L"Video capability device/pin query", hr);
     }
     SafeRelease(videoPin);
     SafeRelease(capture);
@@ -1910,8 +1742,7 @@ static void UpdateConfiguredVideoTitle(HWND videoHost, int configuredFps) {
             : g_settings.audioMode == AudioMode::Asio ? L"ASIO"
                                                        : L"WASAPI Shared";
     const wchar_t* presentationLabel =
-        g_settings.presentationMode == PresentationMode::VSync
-            ? L"VSync" : L"Immediate";
+        llcv::presentation::ModeName(g_settings.presentationMode);
     const auto configuredFormat = static_cast<VideoPixelFormat>(
         g_activePixelFormat.load(std::memory_order_acquire));
     wchar_t title[512]{};
@@ -2007,6 +1838,11 @@ struct DirectD3D11Renderer {
     uint64_t nextOcclusionTestMs = 0;
     DXGI_FORMAT inputFormat = DXGI_FORMAT_NV12;
     bool hdrOutput = false;
+#ifdef LLCV_GPU_DIAGNOSTICS
+    double diagnosticVideoUs = 0;
+    double diagnosticOverlayUs = 0;
+    double diagnosticPresentUs = 0;
+#endif
     llcv::video_color::Configuration sdrColor{};
 
     void reset() {
@@ -2103,6 +1939,12 @@ struct DirectD3D11Renderer {
                        bool hdrInputMetadataAvailable = false,
                        llcv::video_color::Configuration color = {}) {
         reset();
+        if (llcv::presentation::IsCompatibility(g_settings.presentationMode) &&
+            pixelFormat == VideoPixelFormat::P010 && hdrInputMetadataAvailable) {
+            fwprintf(stderr, L"[video] HDR10 is not supported by Blt compatibility output; "
+                             L"select Immediate or VSync (Flip).\n");
+            return DXGI_ERROR_UNSUPPORTED;
+        }
         sdrColor = color;
         g_activeVideoColorMatrix.store(static_cast<int>(sdrColor.matrix),
                                        std::memory_order_release);
@@ -2128,6 +1970,9 @@ struct DirectD3D11Renderer {
         outputConfigurationGeneration = configurationGeneration;
         UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT |
                      D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+#ifdef LLCV_GPU_DIAGNOSTICS
+        flags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
         D3D_FEATURE_LEVEL featureLevel{};
         HRESULT hr = D3D11CreateDevice(
             nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, nullptr, 0,
@@ -2178,22 +2023,27 @@ struct DirectD3D11Renderer {
         }
         SafeRelease(factory5);
 
-        DXGI_SWAP_CHAIN_DESC1 swapDesc{};
-        swapDesc.Width = outputWidth;
-        swapDesc.Height = outputHeight;
-        swapDesc.Format = hdrOutput ? DXGI_FORMAT_R10G10B10A2_UNORM
-                                    : DXGI_FORMAT_B8G8R8A8_UNORM;
-        swapDesc.SampleDesc.Count = 1;
-        swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        swapDesc.BufferCount = 2;
-        swapDesc.Scaling = DXGI_SCALING_STRETCH;
-        swapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-        swapDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-        swapDesc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
-        if (allowTearing) swapDesc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        if (llcv::presentation::IsCompatibility(g_settings.presentationMode)) {
+            allowTearing = false;
+        }
+        const auto swapDesc = llcv::presentation::Description(
+            g_settings.presentationMode, outputWidth, outputHeight,
+            hdrOutput, allowTearing);
         hr = factory->CreateSwapChainForHwnd(device, hwnd, &swapDesc, nullptr,
                                              nullptr, &swapChain);
         factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+        DXGI_ADAPTER_DESC adapterDesc{};
+        adapter->GetDesc(&adapterDesc);
+        fwprintf(stderr,
+                 L"[video-output] create: app=%s path=%s size=%ux%u "
+                 L"fullscreen=%d generation=%llu flags=0x%X result=0x%08X "
+                 L"gpu=%s uptime=%llu ms\n",
+                 kAppVersionLabel,
+                 llcv::presentation::PathName(g_settings.presentationMode),
+                 outputWidth, outputHeight, g_fullscreen.load() ? 1 : 0,
+                 static_cast<unsigned long long>(configurationGeneration),
+                 swapDesc.Flags, static_cast<unsigned>(hr), adapterDesc.Description,
+                 static_cast<unsigned long long>(GetTickCount64()));
         SafeRelease(factory);
         SafeRelease(adapter);
         SafeRelease(dxgiDevice);
@@ -2240,7 +2090,8 @@ struct DirectD3D11Renderer {
         }
 
         IDXGISwapChain2* swapChain2 = nullptr;
-        if (SUCCEEDED(swapChain->QueryInterface(IID_PPV_ARGS(&swapChain2)))) {
+        if ((swapDesc.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) &&
+            SUCCEEDED(swapChain->QueryInterface(IID_PPV_ARGS(&swapChain2)))) {
             hr = swapChain2->SetMaximumFrameLatency(1);
             SafeRelease(swapChain2);
             if (FAILED(hr)) return hr;
@@ -2964,17 +2815,34 @@ struct DirectD3D11Renderer {
             const float black[4]{0.0f, 0.0f, 0.0f, 1.0f};
             context->ClearRenderTargetView(backBufferRenderTarget, black);
         }
+#ifdef LLCV_GPU_DIAGNOSTICS
+        const auto diagnosticStart = std::chrono::steady_clock::now();
+#endif
         HRESULT hr = videoContext->VideoProcessorBlt(
             processor, outputView, 0, 1, &stream);
+#ifdef LLCV_GPU_DIAGNOSTICS
+        const auto diagnosticVideoEnd = std::chrono::steady_clock::now();
+        diagnosticVideoUs = std::chrono::duration<double, std::micro>(
+            diagnosticVideoEnd - diagnosticStart).count();
+#endif
         if (FAILED(hr)) return hr;
         hr = drawOverlayQuads();
+#ifdef LLCV_GPU_DIAGNOSTICS
+        const auto diagnosticOverlayEnd = std::chrono::steady_clock::now();
+        diagnosticOverlayUs = std::chrono::duration<double, std::micro>(
+            diagnosticOverlayEnd - diagnosticVideoEnd).count();
+#endif
         if (FAILED(hr)) return hr;
         const bool vsync =
-            g_settings.presentationMode == PresentationMode::VSync;
+            llcv::presentation::UsesVSync(g_settings.presentationMode);
         const UINT syncInterval = vsync ? 1u : 0u;
         const UINT flags = !vsync && allowTearing
                                ? DXGI_PRESENT_ALLOW_TEARING : 0u;
         hr = swapChain->Present(syncInterval, flags);
+#ifdef LLCV_GPU_DIAGNOSTICS
+        diagnosticPresentUs = std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - diagnosticOverlayEnd).count();
+#endif
         if (hr == DXGI_STATUS_OCCLUDED) {
             occluded = true;
             if (!occlusionLogged) {
@@ -3154,6 +3022,27 @@ static bool AudioOnlyCaptureLoop() {
     return initialized;
 }
 
+// Input arrival is independent of successful presentation (e.g. an occluded window).
+static bool StartupInputWaitExpired(
+    bool receivedAnyFrame, std::chrono::steady_clock::time_point now,
+    std::chrono::steady_clock::time_point deadline) {
+    return !receivedAnyFrame && now >= deadline;
+}
+
+static HRESULT ValidateCaptureLayout(const wchar_t* stage, const AM_MEDIA_TYPE* media,
+    int width, int height, VideoPixelFormat format, DWORD& bytes, UINT32& stride, int& fps) {
+    int actualWidth = 0, actualHeight = 0;
+    REFERENCE_TIME duration = 0;
+    DWORD actualBytes = 0;
+    VideoPixelFormat actualFormat = VideoPixelFormat::Auto;
+    const bool parsed = llcv::video::VideoFormatDetails(media, actualWidth, actualHeight,
+        duration, actualBytes, &actualFormat);
+    fwprintf(stderr, L"[video-layout] %s parsed=%d actual=%s %dx%d duration=%lld bytes=%lu expected=%s %dx%d\n",
+        stage, parsed ? 1 : 0, PixelFormatName(actualFormat), actualWidth, actualHeight,
+        duration, actualBytes, PixelFormatName(format), width, height);
+    return llcv::video::ValidateVideoLayout(media, width, height, format, bytes, stride, fps);
+}
+
 static bool UnifiedCaptureRenderLoop(HWND host) {
     const auto& preset = CurrentVideoPreset();
     g_captureFailureHr.store(S_OK, std::memory_order_release);
@@ -3241,6 +3130,10 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         initializationStage = L"read active video capture format";
         hr = GetActiveVideoPinFormat(videoPin, &activeVideoType);
         if (FAILED(hr) || !activeVideoType) break;
+        initializationStage = L"validate active video layout";
+        hr = ValidateCaptureLayout(L"active", activeVideoType, preset.width, preset.height,
+            configuredFormat, imageBytes, stride, configuredFps);
+        if (FAILED(hr)) break;
         const bool compressedVideo = IsCompressedVideoFormat(configuredFormat);
         const VideoPixelFormat rendererInputFormat = compressedVideo
             ? VideoPixelFormat::Nv12 : configuredFormat;
@@ -3319,11 +3212,6 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
 
         frameEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!frameEvent) { hr = HRESULT_FROM_WIN32(GetLastError()); break; }
-        resources.latestVideoSample = std::make_unique<llcv::capture::LatestVideoSample>(
-            compressedVideo ? 0 : imageBytes, frameEvent,
-            llcv::capture::VideoSampleTelemetry{&g_osdTrackingStartMs, &g_videoCapturedFrames,
-              &g_videoReplacedFrames});
-        auto& latest = *resources.latestVideoSample;
 
         initializationStage = L"build video sample path";
         hr = CoCreateInstance(kSampleGrabberClassId, nullptr,
@@ -3344,9 +3232,6 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         if (FAILED(hr)) break;
         grabber->SetOneShot(FALSE);
         grabber->SetBufferSamples(FALSE);
-        callback = new llcv::capture::VideoSampleGrabberCallback(&latest, LogModuleMessage);
-        hr = grabber->SetCallback(callback, 0);
-        if (FAILED(hr)) break;
 
         hr = CoCreateInstance(kNullRendererClassId, nullptr,
                               CLSCTX_INPROC_SERVER,
@@ -3434,6 +3319,33 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         }
         if (FAILED(hr = graph->ConnectDirect(grabberOut, nullIn,
                                              nullptr))) break;
+        // The connected type, not the advertised type, defines the raw upload.
+        initializationStage = L"validate connected video layout";
+        AM_MEDIA_TYPE connectedLayout{};
+        hr = grabber->GetConnectedMediaType(&connectedLayout);
+        const int previousFps = configuredFps;
+        if (SUCCEEDED(hr)) hr = ValidateCaptureLayout(L"connected", &connectedLayout,
+            preset.width, preset.height, configuredFormat, imageBytes, stride, configuredFps);
+        FreeMediaType(connectedLayout);
+        if (FAILED(hr)) break;
+        if (configuredFps != previousFps) {
+            hr = renderer.initialize(host, preset.width, preset.height, configuredFps,
+                                     rendererInputFormat, hdrInputMetadataAvailable, sdrColor);
+            if (FAILED(hr)) break;
+        }
+        g_videoConfiguredFps.store(configuredFps, std::memory_order_release);
+        UpdateConfiguredVideoTitle(host, configuredFps);
+        fwprintf(stderr, L"[video] connected layout verified: %s %dx%d @ %d stride=%u bytes=%lu\n",
+                 PixelFormatName(configuredFormat), preset.width, preset.height,
+                 configuredFps, stride, imageBytes);
+        resources.latestVideoSample = std::make_unique<llcv::capture::LatestVideoSample>(
+            compressedVideo ? 0 : imageBytes, frameEvent,
+            llcv::capture::VideoSampleTelemetry{&g_osdTrackingStartMs, &g_videoCapturedFrames,
+              &g_videoReplacedFrames});
+        auto& latest = *resources.latestVideoSample;
+        callback = new llcv::capture::VideoSampleGrabberCallback(&latest);
+        hr = grabber->SetCallback(callback, 0);
+        if (FAILED(hr)) break;
         // Prefer an audio pin on the selected video filter. Many USB UVC
         // capture devices instead expose their capture audio as a separate
         // DirectShow audio-input filter, which is added to this same graph.
@@ -3537,8 +3449,8 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                  preset.height, configuredFps,
                  llcv::capture_audio::Describe(selectedAudioFormat).c_str(),
                  stride, imageBytes,
-                 g_settings.presentationMode == PresentationMode::VSync
-                     ? L"VSync" : tearingActive ? L"Tearing" : L"Immediate");
+                 tearingActive ? L"Tearing"
+                     : llcv::presentation::ModeName(g_settings.presentationMode));
         fwprintf(stderr,
                  L"[video] upload ring: %u %s GPU surfaces; update: %s\n",
                  DirectD3D11Renderer::kUploadSurfaceCount,
@@ -3592,25 +3504,41 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         };
 
         int64_t arrivalUs = 0;
+        bool receivedAnyFrame = false;
         bool presentedAnyFrame = false;
-        const auto firstFrameDeadline =
-            std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        const auto firstFrameStart = std::chrono::steady_clock::now();
+        const auto firstFrameDeadline = firstFrameStart + std::chrono::seconds(10);
+        initializationStage = L"wait for first valid capture frame";
         while (g_running.load()) {
-            if (WaitForSingleObject(frameEvent, 100) != WAIT_OBJECT_0) {
-                if (!presentedAnyFrame &&
-                    std::chrono::steady_clock::now() >= firstFrameDeadline) {
+            const DWORD frameWait = WaitForSingleObject(frameEvent, 100);
+            if (frameWait == WAIT_FAILED) {
+                hr = HRESULT_FROM_WIN32(GetLastError());
+                initialized = false;
+                break;
+            }
+            // Drain once even on timeout: publication can race the wait result.
+            IMediaSample* videoSample = latest.TakeLatest(arrivalUs);
+            if (!videoSample) {
+                if (StartupInputWaitExpired(receivedAnyFrame,
+                        std::chrono::steady_clock::now(), firstFrameDeadline)) {
                     fwprintf(stderr,
-                             L"[video] direct path received no %s frame "
-                             L"within 3 seconds.\n",
-                             PixelFormatName(configuredFormat));
+                             L"[video] no valid %s input within 10 seconds; rejected samples=%llu expected bytes=%lu.\n",
+                             PixelFormatName(configuredFormat),
+                             static_cast<unsigned long long>(latest.RejectedSamples()), imageBytes);
                     hr = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
                     initialized = false;
                     break;
                 }
                 continue;
             }
-            IMediaSample* videoSample = latest.TakeLatest(arrivalUs);
-            if (!videoSample) continue;
+            if (!receivedAnyFrame) {
+                receivedAnyFrame = true;
+                initializationStage = L"process and present capture frames";
+                fwprintf(stderr, L"[video] first valid input after %lld ms; rejected samples=%llu\n",
+                    static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - firstFrameStart).count()),
+                    static_cast<unsigned long long>(latest.RejectedSamples()));
+            }
             if (renderer.outputConfigurationChanged()) {
                 hr = renderer.initialize(host, preset.width, preset.height,
                                          configuredFps,
@@ -3702,7 +3630,12 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                                                  std::memory_order_relaxed);
             }
             g_directVideoActive.store(true, std::memory_order_release);
-            presentedAnyFrame = true;
+            if (!presentedAnyFrame) {
+                presentedAnyFrame = true;
+                fwprintf(stderr, L"[video] first successful presentation after %lld ms\n",
+                    static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - firstFrameStart).count()));
+            }
         }
         control->Stop();
     } while (false);
@@ -3730,47 +3663,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
 // Startup settings dialog
 // -----------------------------------------------------------------------------
 
-constexpr int IDC_SETTINGS_AUDIO = 2001;
-constexpr int IDC_SETTINGS_VIDEO = 2002;
-constexpr int IDC_SETTINGS_PIXEL = 2003;
-constexpr int IDC_SETTINGS_START = 2004;
-constexpr int IDC_SETTINGS_CANCEL = 2005;
-constexpr int IDC_SETTINGS_BUFFER = 2006;
-constexpr int IDC_SETTINGS_BORDERLESS = 2007;
-constexpr int IDC_SETTINGS_AUDIO_STATUS = 2008;
-constexpr int IDC_SETTINGS_PRESENTATION = 2009;
-constexpr int IDC_SETTINGS_VOLUME_HUD = 2010;
-constexpr int IDC_SETTINGS_DRIFT = 2011;
-constexpr int IDC_SETTINGS_WINDOW_SNAP = 2012;
-constexpr int IDC_SETTINGS_RELATIVE_SIZE = 2013;
-constexpr int IDC_SETTINGS_DRIFT_HELP = 2014;
-constexpr int IDC_SETTINGS_PCM_QUEUE = 2015;
-constexpr int IDC_SETTINGS_AUDIO_OUTPUT = 2016;
-constexpr int IDC_SETTINGS_CAPTURE_DEVICE = 2017;
-constexpr int IDC_SETTINGS_PIXEL_FORMAT = 2018;
-constexpr int IDC_SETTINGS_SAVE_LOG = 2019;
-constexpr int IDC_SETTINGS_FRAME_RATE = 2020;
-constexpr int IDC_SETTINGS_MUTE_BACKGROUND = 2021;
-constexpr int IDC_SETTINGS_PRESENTATION_HELP = 2022;
-constexpr int IDC_SETTINGS_PCM_QUEUE_HELP = 2023;
-constexpr int IDC_SETTINGS_LANGUAGE = 2024;
-constexpr int IDC_SETTINGS_SHOW_CONSOLE = 2025;
-constexpr int IDC_SETTINGS_CAPTURE_AUDIO_DEVICE = 2026;
-constexpr int IDC_SETTINGS_SCALING = 2027;
-constexpr int IDC_SETTINGS_SKIP_STARTUP = 2028;
-constexpr int IDC_SETTINGS_VOLUME_BOOST = 2029;
-constexpr int IDC_SETTINGS_VOLUME_BOOST_HELP = 2030;
-constexpr int IDC_SETTINGS_AUDIO_ONLY = 2032;
-constexpr int IDC_SETTINGS_FORCE_HDR10 = 2033;
-constexpr int IDC_SETTINGS_FORCE_HDR10_HELP = 2034;
-constexpr int IDC_SETTINGS_UPDATE_CHECK = 2035;
-constexpr int IDC_SETTINGS_EXCLUSIVE_TEST = 2036;
-constexpr int IDC_SETTINGS_TAB = 2037;
-constexpr int IDC_SETTINGS_UPDATE_NOW = 2038;
-constexpr int IDC_SETTINGS_OPEN_LOG_FOLDER = 2039;
-constexpr int IDC_SETTINGS_FULLSCREEN_CURSOR = 2040;
-constexpr int IDC_SETTINGS_MJPEG_COLOR = 2041;
-constexpr int IDC_SETTINGS_MJPEG_COLOR_HELP = 2042;
+using namespace llcv::settings_ui::control_id;
 constexpr UINT WM_AUDIOCLIENT3_PROBE_COMPLETE = WM_APP + 73;
 constexpr UINT WM_SETTINGS_TOOLTIP_SHOW = WM_APP + 74;
 constexpr UINT WM_SETTINGS_TOOLTIP_HIDE = WM_APP + 75;
@@ -3780,95 +3673,26 @@ constexpr UINT WM_SETTINGS_UPDATE_CHECK_COMPLETE = WM_APP + 78;
 constexpr UINT WM_EXCLUSIVE_ENDPOINT_PROBE_COMPLETE = WM_APP + 79;
 constexpr UINT WM_EXCLUSIVE_SCAN_COMPLETE = WM_APP + 80;
 
-enum class SettingsTab : int {
-    Audio = 0,
-    VideoWindow = 1,
-    GuideDiagnostics = 2,
-    Updates = 3,
-};
+using llcv::settings_ui::SettingsPixels;
+using llcv::settings_ui::SettingsClientHeightDip;
+using llcv::settings_ui::SettingsDialogOuterSize;
+using llcv::settings_ui::PlaceSettingsControl;
+using llcv::settings_ui::ApplySettingsFont;
+using llcv::settings_ui::LayoutSettingsControls;
+using llcv::settings_ui::SetSettingsControlVisible;
+using llcv::settings_ui::UpdateScalingControlVisibility;
+using llcv::settings_ui::UpdateWindowBehaviorVisibility;
+using llcv::settings_ui::TrackSettingsTooltip;
+using llcv::settings_ui::AddSettingsTooltip;
+using llcv::settings_ui::IsSettingsHelpControl;
+using llcv::settings_ui::SettingsTab;
+using llcv::settings_ui::SettingsHelpTopic;
+using llcv::settings_ui::kSettingsClientWidthDip;
 
 using UpdateCheckResult = llcv::update::CheckResult;
 
-struct SettingsDialogState {
-    HWND tabControl = nullptr;
-    HWND guideText = nullptr;
-    HWND guideShortcutsTitle = nullptr;
-    HWND guideDiagnosticsTitle = nullptr;
-    HWND guideDiagnosticsText = nullptr;
-    HWND guideLogFolderButton = nullptr;
-    HWND updateTitle = nullptr;
-    HWND updateText = nullptr;
-    HWND updateNowButton = nullptr;
-    HWND updateStatus = nullptr;
-    HWND audioOutputSection = nullptr;
-    HWND audioPlaybackSection = nullptr;
-    HWND audioStabilitySection = nullptr;
-    HWND videoCaptureSection = nullptr;
-    HWND videoDisplaySection = nullptr;
-    HWND videoWindowSection = nullptr;
-    HWND languageLabel = nullptr;
-    HWND languageCombo = nullptr;
-    HWND audioLabel = nullptr;
-    HWND bufferLabel = nullptr;
-    HWND audioOutputLabel = nullptr;
-    HWND volumeHudLabel = nullptr;
-    HWND volumeBoostCheck = nullptr;
-    HWND volumeBoostHelp = nullptr;
-    HWND driftLabel = nullptr;
-    HWND driftHelp = nullptr;
-    HWND pcmQueueLabel = nullptr;
-    HWND pcmQueueHelp = nullptr;
-    HWND presentationLabel = nullptr;
-    HWND presentationHelp = nullptr;
-    HWND fullscreenCursorLabel = nullptr;
-    HWND fullscreenCursorHint = nullptr;
-    HWND scalingLabel = nullptr;
-    HWND videoLabel = nullptr;
-    HWND captureDeviceLabel = nullptr;
-    HWND captureAudioDeviceLabel = nullptr;
-    HWND captureAudioStatus = nullptr;
-    HWND pixelFormatLabel = nullptr;
-    HWND frameRateLabel = nullptr;
-    HWND videoCapabilityStatus = nullptr;
-    HWND audioCombo = nullptr;
-    HWND bufferCombo = nullptr;
-    HWND audioOutputCombo = nullptr;
-    HWND volumeHudCombo = nullptr;
-    HWND muteBackgroundCheck = nullptr;
-    HWND audioOnlyCheck = nullptr;
-    HWND forceHdr10Check = nullptr;
-    HWND forceHdr10Help = nullptr;
-    HWND mjpegColorLabel = nullptr;
-    HWND mjpegColorCombo = nullptr;
-    HWND mjpegColorHelp = nullptr;
-    HWND driftCombo = nullptr;
-    HWND pcmQueueCombo = nullptr;
-    HWND audioStatus = nullptr;
-    HWND exclusiveTestButton = nullptr;
-    HWND presentationCombo = nullptr;
-    HWND fullscreenCursorCombo = nullptr;
-    HWND scalingCombo = nullptr;
-    HWND videoCombo = nullptr;
-    HWND captureDeviceCombo = nullptr;
-    HWND captureAudioDeviceCombo = nullptr;
-    HWND pixelFormatCombo = nullptr;
-    HWND frameRateCombo = nullptr;
-    HWND pixelCheck = nullptr;
-    HWND relativeSizeCheck = nullptr;
-    HWND relativeSizeWarning = nullptr;
-    HWND borderlessCheck = nullptr;
-    HWND windowSnapCheck = nullptr;
-    HWND saveLogCheck = nullptr;
-    HWND showConsoleCheck = nullptr;
-    HWND skipStartupCheck = nullptr;
-    HWND skipStartupHint = nullptr;
-    HWND checkForUpdatesCheck = nullptr;
-    HWND versionWatermark = nullptr;
-    HWND startButton = nullptr;
-    HWND cancelButton = nullptr;
-    HWND tooltipWindow = nullptr;
-    HWND activeTooltipTarget = nullptr;
-    std::vector<HFONT> uiFonts;
+struct SettingsDialogState : llcv::settings_ui::SettingsControls {
+    std::vector<llcv::display::MonitorChoice> displayMonitors;
     std::thread probeThread;
     llcv::update::UpdateCheckTask updateCheckTask;
     std::thread exclusiveProbeThread;
@@ -3888,6 +3712,7 @@ struct SettingsDialogState {
     std::vector<ExclusiveEndpointVerification> exclusiveEndpointResults;
     std::vector<llcv::asio::DriverInfo> asioDrivers;
     std::vector<PixelFormatSupport> pixelFormats;
+    HRESULT videoCapabilityQueryStatus = S_OK;
     VideoPreset initialVideoPreset = VideoPreset::R1920x1080;
     HMONITOR viewerMonitor = nullptr;
     UINT32 selectedSharedPeriodFrames = 0;
@@ -3897,365 +3722,19 @@ struct SettingsDialogState {
     int exclusiveVerifiedBufferMs = 0;
     bool bufferItemsAreSharedFrames = false;
     bool asioAvailable = false;
-    SettingsTab activeTab = SettingsTab::Audio;
     bool accepted = false;
 };
-
-static int SettingsPixels(int dips, UINT dpi) {
-    return MulDiv(dips, dpi ? dpi : USER_DEFAULT_SCREEN_DPI,
-                  USER_DEFAULT_SCREEN_DPI);
-}
-
-static constexpr int kSettingsClientWidthDip = 950;
-static constexpr int kSettingsTabbedClientHeightDip = 630;
-
-static int SettingsClientHeightDip(const SettingsDialogState* state) {
-    (void)state;
-    return kSettingsTabbedClientHeightDip;
-}
-
-static SIZE SettingsDialogOuterSize(HWND hwnd, UINT dpi,
-                                    const SettingsDialogState* state) {
-    RECT rect{0, 0, SettingsPixels(kSettingsClientWidthDip, dpi),
-              SettingsPixels(SettingsClientHeightDip(state), dpi)};
-    const DWORD style =
-        static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
-    const DWORD exStyle =
-        static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
-    if (!AdjustWindowRectExForDpi(&rect, style, FALSE, exStyle, dpi)) {
-        AdjustWindowRectEx(&rect, style, FALSE, exStyle);
-    }
-    return SIZE{rect.right - rect.left, rect.bottom - rect.top};
-}
-
-static void PlaceSettingsControl(HWND control, int x, int y, int width,
-                                 int height, UINT dpi) {
-    if (!control) return;
-    SetWindowPos(control, nullptr, SettingsPixels(x, dpi),
-                 SettingsPixels(y, dpi), SettingsPixels(width, dpi),
-                 SettingsPixels(height, dpi),
-                 SWP_NOZORDER | SWP_NOACTIVATE);
-}
-
-static BOOL CALLBACK SetSettingsChildFont(HWND child, LPARAM fontValue) {
-    SendMessageW(child, WM_SETFONT, static_cast<WPARAM>(fontValue), FALSE);
-    return TRUE;
-}
-
-static void ApplySettingsFont(SettingsDialogState* state, HWND hwnd,
-                              UINT dpi) {
-    if (!state || !hwnd) return;
-    HFONT font = CreateFontW(
-        -MulDiv(9, dpi ? dpi : USER_DEFAULT_SCREEN_DPI, 72),
-        0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    if (!font) return;
-    state->uiFonts.push_back(font);
-    EnumChildWindows(hwnd, SetSettingsChildFont,
-                     reinterpret_cast<LPARAM>(font));
-
-    // Section labels are deliberately subtle, but bold enough to make the
-    // vertically grouped audio controls scannable at a glance.
-    HFONT sectionFont = CreateFontW(
-        -MulDiv(9, dpi ? dpi : USER_DEFAULT_SCREEN_DPI, 72),
-        0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    if (!sectionFont) return;
-    state->uiFonts.push_back(sectionFont);
-    for (HWND control : {state->audioOutputSection,
-                         state->audioPlaybackSection,
-                         state->audioStabilitySection,
-                         state->videoCaptureSection,
-                         state->videoDisplaySection,
-                         state->videoWindowSection,
-                         state->guideShortcutsTitle,
-                         state->guideDiagnosticsTitle}) {
-        if (control) {
-            SendMessageW(control, WM_SETFONT,
-                         reinterpret_cast<WPARAM>(sectionFont), FALSE);
-        }
-    }
-
-}
-
-// Checkbox captions vary substantially between Korean and English.  Measure
-// the actual current UI font so a neighbouring help button stays attached to
-// its option at every DPI instead of relying on a fragile hard-coded x value.
-static int SettingsCheckboxWidthDip(HWND checkbox, UINT dpi) {
-    if (!checkbox) return 250;
-    wchar_t text[512]{};
-    GetWindowTextW(checkbox, text, ARRAYSIZE(text));
-    HDC hdc = GetDC(checkbox);
-    if (!hdc) return 250;
-    const HFONT font = reinterpret_cast<HFONT>(
-        SendMessageW(checkbox, WM_GETFONT, 0, 0));
-    const HGDIOBJ oldFont = font ? SelectObject(hdc, font) : nullptr;
-    SIZE size{};
-    GetTextExtentPoint32W(hdc, text, static_cast<int>(wcslen(text)), &size);
-    if (oldFont) SelectObject(hdc, oldFont);
-    ReleaseDC(checkbox, hdc);
-    const int textWidthDip = MulDiv(
-        size.cx, USER_DEFAULT_SCREEN_DPI,
-        dpi ? dpi : USER_DEFAULT_SCREEN_DPI);
-    // Checkbox glyph plus caption.  Keeping the HWND no wider than this is
-    // important: a wide checkbox would overlap a nearby help button and
-    // steal its clicks even when the button looks visually separate.
-    return std::min(18 + textWidthDip, 430);
-}
-
-static void LayoutSettingsControls(SettingsDialogState* state, UINT dpi) {
-    if (!state) return;
-    // The dialog is deliberately tabbed rather than expanded vertically. This
-    // keeps the startup view small while leaving every setting reachable.
-    PlaceSettingsControl(state->tabControl, 24, 16, 901, 31, dpi);
-
-    // Global preferences remain fixed below every tab, especially direct-start.
-    // Leave a clear visual break after the PCM-buffer group. Language and
-    // quick-start are application preferences, not audio-tuning controls.
-    PlaceSettingsControl(state->languageLabel, 24, 500, 160, 24, dpi);
-    PlaceSettingsControl(state->languageCombo, 195, 496, 280, 120, dpi);
-    PlaceSettingsControl(state->skipStartupCheck, 24, 540, 451, 28, dpi);
-    PlaceSettingsControl(state->skipStartupHint, 44, 568, 500, 22, dpi);
-    PlaceSettingsControl(state->versionWatermark, 24, 602, 260, 20, dpi);
-    PlaceSettingsControl(state->startButton, 745, 568, 80, 30, dpi);
-    PlaceSettingsControl(state->cancelButton, 835, 568, 80, 30, dpi);
-
-    // Audio tab: output choice first, then everyday playback controls, then
-    // the latency/stability controls that usually only need adjustment after
-    // diagnostics report a problem.
-    PlaceSettingsControl(state->audioOutputSection, 34, 58, 200, 20, dpi);
-    PlaceSettingsControl(state->audioLabel, 34, 80, 160, 24, dpi);
-    PlaceSettingsControl(state->audioCombo, 205, 76, 360, 120, dpi);
-    // Exclusive endpoint verification configures the selected output mode,
-    // so keep its explicit recheck action beside that mode instead of making
-    // it look like a generic status-row operation.
-    // Match the visible combobox field (rather than its dropdown height) so
-    // the recheck action reads as part of the output-mode row.
-    PlaceSettingsControl(state->exclusiveTestButton, 575, 76, 185, 22, dpi);
-    PlaceSettingsControl(state->audioOutputLabel, 34, 116, 160, 24, dpi);
-    PlaceSettingsControl(state->audioOutputCombo, 205, 112, 680, 220, dpi);
-    PlaceSettingsControl(state->bufferLabel, 34, 152, 160, 24, dpi);
-    PlaceSettingsControl(state->bufferCombo, 205, 148, 280, 180, dpi);
-    PlaceSettingsControl(state->audioStatus, 34, 188, 580, 24, dpi);
-    PlaceSettingsControl(state->audioPlaybackSection, 34, 222, 250, 20, dpi);
-    PlaceSettingsControl(state->volumeHudLabel, 34, 246, 160, 24, dpi);
-    PlaceSettingsControl(state->volumeHudCombo, 205, 242, 280, 160, dpi);
-    const int volumeBoostWidth = SettingsCheckboxWidthDip(
-        state->volumeBoostCheck, dpi);
-    PlaceSettingsControl(state->volumeBoostCheck, 34, 282, volumeBoostWidth,
-                         28, dpi);
-    PlaceSettingsControl(state->volumeBoostHelp,
-                         34 + volumeBoostWidth + 10,
-                         284, 24, 24, dpi);
-    PlaceSettingsControl(state->muteBackgroundCheck, 34, 318, 500, 28, dpi);
-    PlaceSettingsControl(state->audioOnlyCheck, 34, 354, 500, 28, dpi);
-    PlaceSettingsControl(state->audioStabilitySection, 34, 392, 250, 20, dpi);
-    PlaceSettingsControl(state->driftLabel, 34, 416, 160, 24, dpi);
-    PlaceSettingsControl(state->driftHelp, 170, 412, 24, 24, dpi);
-    PlaceSettingsControl(state->driftCombo, 205, 412, 360, 120, dpi);
-    PlaceSettingsControl(state->pcmQueueLabel, 34, 452, 160, 24, dpi);
-    PlaceSettingsControl(state->pcmQueueHelp, 170, 448, 24, 24, dpi);
-    PlaceSettingsControl(state->pcmQueueCombo, 205, 448, 280, 140, dpi);
-
-    // Video & window tab: capture format on the left; how it is shown and
-    // how the viewer window behaves on the right. HDR stays last because it
-    // is an experimental override rather than a normal display choice.
-    // Leave a real breathing gap below each section heading.  The previous
-    // first-row placement was inherited from the no-heading layout and made
-    // headings read like part of the option label.
-    PlaceSettingsControl(state->captureDeviceLabel, 34, 84, 140, 24, dpi);
-    PlaceSettingsControl(state->videoCaptureSection, 34, 58, 140, 20, dpi);
-    PlaceSettingsControl(state->captureDeviceCombo, 190, 80, 270, 220, dpi);
-    PlaceSettingsControl(state->captureAudioDeviceLabel, 34, 124, 140, 24, dpi);
-    PlaceSettingsControl(state->captureAudioDeviceCombo, 190, 120, 270, 220, dpi);
-    PlaceSettingsControl(state->captureAudioStatus, 190, 124, 300, 24, dpi);
-    PlaceSettingsControl(state->videoLabel, 34, 164, 140, 24, dpi);
-    PlaceSettingsControl(state->videoCombo, 190, 160, 270, 120, dpi);
-    PlaceSettingsControl(state->pixelFormatLabel, 34, 204, 140, 24, dpi);
-    PlaceSettingsControl(state->pixelFormatCombo, 190, 200, 270, 160, dpi);
-    PlaceSettingsControl(state->frameRateLabel, 34, 244, 140, 24, dpi);
-    PlaceSettingsControl(state->frameRateCombo, 190, 240, 270, 200, dpi);
-    PlaceSettingsControl(state->videoCapabilityStatus, 34, 278, 430, 90, dpi);
-    PlaceSettingsControl(state->presentationLabel, 505, 84, 95, 24, dpi);
-    PlaceSettingsControl(state->videoDisplaySection, 505, 58, 140, 20, dpi);
-    PlaceSettingsControl(state->presentationHelp, 604, 80, 24, 24, dpi);
-    PlaceSettingsControl(state->presentationCombo, 630, 80, 255, 120, dpi);
-    PlaceSettingsControl(state->pixelCheck, 505, 120, 380, 28, dpi);
-    PlaceSettingsControl(state->scalingLabel, 505, 160, 120, 24, dpi);
-    PlaceSettingsControl(state->scalingCombo, 630, 156, 255, 120, dpi);
-    // The controls from here onward affect the viewer window itself rather
-    // than captured video format or rendering policy.  When Pixel-perfect is
-    // enabled the scaling row is hidden, so pull this section up by one grid
-    // row instead of leaving an arbitrary empty gap.
-    const bool pixelPerfect = state->pixelCheck &&
-        SendMessageW(state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    const int windowSectionY = pixelPerfect ? 168 : 204;
-    const int windowOptionY = windowSectionY + 24;
-    PlaceSettingsControl(state->videoWindowSection, 505, windowSectionY,
-                         140, 20, dpi);
-    PlaceSettingsControl(state->relativeSizeCheck, 505, windowOptionY,
-                         400, 28, dpi);
-    PlaceSettingsControl(state->relativeSizeWarning, 525, windowOptionY + 28,
-                         370, 28, dpi);
-    PlaceSettingsControl(state->borderlessCheck, 505, windowOptionY + 68,
-                         400, 28, dpi);
-    PlaceSettingsControl(state->windowSnapCheck, 505, windowOptionY + 104,
-                         400, 28, dpi);
-    PlaceSettingsControl(state->fullscreenCursorLabel, 505,
-                         windowOptionY + 144, 120, 24, dpi);
-    PlaceSettingsControl(state->fullscreenCursorCombo, 630,
-                         windowOptionY + 140, 255, 120, dpi);
-    PlaceSettingsControl(state->fullscreenCursorHint, 630,
-                         windowOptionY + 172, 255, 24, dpi);
-    // The combo's configured height includes its drop-down list rectangle.
-    // Keep the adjacent hint above that sibling after every relayout so a
-    // Pixel-perfect redraw cannot paint over it while the list is closed.
-    if (state->fullscreenCursorHint) {
-        SetWindowPos(state->fullscreenCursorHint, HWND_TOP, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    }
-    // P010 and MJPEG use the same final capture-format row. Only the control
-    // relevant to the selected input format is made visible.
-    PlaceSettingsControl(state->forceHdr10Check, 34, 374, 360, 28, dpi);
-    PlaceSettingsControl(state->forceHdr10Help, 402, 370, 24, 24, dpi);
-    PlaceSettingsControl(state->mjpegColorLabel, 34, 374, 140, 24, dpi);
-    PlaceSettingsControl(state->mjpegColorCombo, 190, 370, 240, 150, dpi);
-    PlaceSettingsControl(state->mjpegColorHelp, 438, 370, 24, 24, dpi);
-
-    // Guide and update tabs.
-    PlaceSettingsControl(state->guideShortcutsTitle, 34, 58, 280, 20, dpi);
-    PlaceSettingsControl(state->guideText, 34, 84, 400, 220, dpi);
-    PlaceSettingsControl(state->guideDiagnosticsTitle, 505, 58, 320, 20, dpi);
-    PlaceSettingsControl(state->guideDiagnosticsText, 505, 84, 360, 70, dpi);
-    PlaceSettingsControl(state->saveLogCheck, 505, 170, 360, 28, dpi);
-    PlaceSettingsControl(state->showConsoleCheck, 505, 206, 360, 28, dpi);
-    PlaceSettingsControl(state->guideLogFolderButton, 505, 248, 165, 26, dpi);
-    PlaceSettingsControl(state->updateTitle, 34, 76, 400, 24, dpi);
-    PlaceSettingsControl(state->updateText, 34, 110, 760, 64, dpi);
-    PlaceSettingsControl(state->checkForUpdatesCheck, 34, 190, 500, 28, dpi);
-    PlaceSettingsControl(state->updateNowButton, 34, 230, 185, 30, dpi);
-    PlaceSettingsControl(state->updateStatus, 235, 234, 650, 24, dpi);
-}
-
-static void SetSettingsControlVisible(HWND control, bool visible) {
-    if (!control) return;
-    ShowWindow(control, visible ? SW_SHOW : SW_HIDE);
-    EnableWindow(control, visible ? TRUE : FALSE);
-}
 
 static VideoPixelFormat SelectedPixelFormat(
     const SettingsDialogState* state);
 static bool SettingsUsesExclusiveMode(
     const SettingsDialogState* state);
 
-static void UpdateScalingControlVisibility(SettingsDialogState* state) {
-    if (!state) return;
-    const bool pixelPerfect = state->pixelCheck &&
-        SendMessageW(state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    const bool visible = state->activeTab == SettingsTab::VideoWindow &&
-                         !pixelPerfect;
-    SetSettingsControlVisible(state->scalingLabel, visible);
-    SetSettingsControlVisible(state->scalingCombo, visible);
-}
-
-static void UpdateWindowBehaviorVisibility(SettingsDialogState* state) {
-    if (!state) return;
-    const bool pixelPerfect = state->pixelCheck &&
-        SendMessageW(state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    const bool relativeSize = state->relativeSizeCheck &&
-        SendMessageW(state->relativeSizeCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-
-    // These are everyday window-behavior preferences, not advanced tuning.
-    // Only show the caveat when the currently selected combination needs it.
-    const bool visible = state->activeTab == SettingsTab::VideoWindow;
-    SetSettingsControlVisible(state->relativeSizeCheck, visible);
-    SetSettingsControlVisible(state->borderlessCheck, visible);
-    SetSettingsControlVisible(state->fullscreenCursorLabel, visible);
-    SetSettingsControlVisible(state->fullscreenCursorCombo, visible);
-    SetSettingsControlVisible(state->fullscreenCursorHint, visible);
-    SetSettingsControlVisible(state->relativeSizeWarning,
-                              visible && pixelPerfect && relativeSize);
-}
-
+// The view consumes selections, not device/probe state.
 static void UpdateAdvancedControlVisibility(SettingsDialogState* state) {
     if (!state) return;
-    const bool audio = state->activeTab == SettingsTab::Audio;
-    const bool video = state->activeTab == SettingsTab::VideoWindow;
-    const bool guide = state->activeTab == SettingsTab::GuideDiagnostics;
-    const bool updates = state->activeTab == SettingsTab::Updates;
-    for (HWND control : {state->tabControl, state->languageLabel,
-                         state->languageCombo, state->skipStartupCheck,
-                         state->skipStartupHint, state->versionWatermark,
-                         state->startButton, state->cancelButton}) {
-        SetSettingsControlVisible(control, true);
-    }
-    for (HWND control : {state->audioOutputSection,
-                         state->audioPlaybackSection,
-                         state->audioStabilitySection,
-                         state->audioLabel, state->audioCombo,
-                         state->audioOutputLabel, state->audioOutputCombo,
-                         state->bufferLabel, state->bufferCombo,
-                         state->audioStatus,
-                         state->volumeHudLabel, state->volumeHudCombo,
-                         state->volumeBoostCheck, state->volumeBoostHelp,
-                         state->muteBackgroundCheck, state->audioOnlyCheck,
-                         state->driftLabel, state->driftHelp, state->driftCombo,
-                         state->pcmQueueLabel, state->pcmQueueHelp,
-                         state->pcmQueueCombo}) {
-        SetSettingsControlVisible(control, audio);
-    }
-    // The endpoint recheck belongs only to WASAPI Exclusive.  In Shared and
-    // ASIO modes it is both irrelevant and misleading, even on the Audio tab.
-    SetSettingsControlVisible(state->exclusiveTestButton,
-                              audio && SettingsUsesExclusiveMode(state));
-    for (HWND control : {state->videoCaptureSection,
-                         state->videoDisplaySection,
-                         state->videoWindowSection,
-                         state->presentationLabel, state->presentationHelp,
-                         state->presentationCombo, state->captureDeviceLabel,
-                         state->captureDeviceCombo,
-                         state->captureAudioDeviceLabel, state->videoLabel,
-                         state->videoCombo, state->pixelFormatLabel,
-                         state->pixelFormatCombo, state->frameRateLabel,
-                         state->frameRateCombo, state->videoCapabilityStatus,
-                         state->pixelCheck, state->windowSnapCheck,
-                         state->fullscreenCursorLabel,
-                         state->fullscreenCursorCombo,
-                         state->fullscreenCursorHint}) {
-        SetSettingsControlVisible(control, video);
-    }
-    // This row has two mutually exclusive controls: the device picker for a
-    // separate capture endpoint, or the short "built-in audio" status. Keep
-    // its existing video-tab choice intact; hide both together off-tab.
-    if (!video) {
-        SetSettingsControlVisible(state->captureAudioDeviceCombo, false);
-        SetSettingsControlVisible(state->captureAudioStatus, false);
-    }
-    const bool p010Selected = SelectedPixelFormat(state) ==
-        VideoPixelFormat::P010;
-    const bool mjpegSelected = SelectedPixelFormat(state) ==
-        VideoPixelFormat::Mjpeg;
-    SetSettingsControlVisible(state->forceHdr10Check, video && p010Selected);
-    SetSettingsControlVisible(state->forceHdr10Help, video && p010Selected);
-    SetSettingsControlVisible(state->mjpegColorLabel, video && mjpegSelected);
-    SetSettingsControlVisible(state->mjpegColorCombo, video && mjpegSelected);
-    SetSettingsControlVisible(state->mjpegColorHelp, video && mjpegSelected);
-    SetSettingsControlVisible(state->guideShortcutsTitle, guide);
-    SetSettingsControlVisible(state->guideText, guide);
-    SetSettingsControlVisible(state->guideDiagnosticsTitle, guide);
-    SetSettingsControlVisible(state->guideDiagnosticsText, guide);
-    SetSettingsControlVisible(state->guideLogFolderButton, guide);
-    SetSettingsControlVisible(state->saveLogCheck, guide);
-    SetSettingsControlVisible(state->showConsoleCheck, guide);
-    SetSettingsControlVisible(state->updateTitle, updates);
-    SetSettingsControlVisible(state->updateText, updates);
-    SetSettingsControlVisible(state->checkForUpdatesCheck, updates);
-    SetSettingsControlVisible(state->updateNowButton, updates);
-    SetSettingsControlVisible(state->updateStatus, updates);
-    UpdateScalingControlVisibility(state);
-    UpdateWindowBehaviorVisibility(state);
+    llcv::settings_ui::UpdateAdvancedControlVisibility(
+        state, SettingsUsesExclusiveMode(state), SelectedPixelFormat(state));
 }
 
 static void SetSettingsUpdateStatus(SettingsDialogState* state,
@@ -4276,166 +3755,8 @@ static void StartSettingsUpdateCheck(SettingsDialogState* state, HWND hwnd) {
     EnableWindow(state->updateNowButton, FALSE);
 }
 
-static void TrackSettingsTooltip(HWND target, HWND tooltip, bool active) {
-    if (!target || !tooltip) return;
-    TOOLINFOW tool{};
-    tool.cbSize = TTTOOLINFO_V1_SIZE;
-    tool.uFlags = TTF_IDISHWND | TTF_TRACK | TTF_ABSOLUTE;
-    tool.hwnd = GetParent(target);
-    tool.uId = reinterpret_cast<UINT_PTR>(target);
-    SendMessageW(tooltip, TTM_TRACKACTIVATE, active ? TRUE : FALSE,
-                 reinterpret_cast<LPARAM>(&tool));
-}
-
-static void AddSettingsTooltip(SettingsDialogState* state, HWND owner,
-                               HWND target, const wchar_t* text) {
-    if (!state || !owner || !target || !text) return;
-    if (!state->tooltipWindow) {
-        state->tooltipWindow = CreateWindowExW(
-            WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
-            WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
-            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
-            owner, nullptr, GetModuleHandleW(nullptr), nullptr);
-        if (!state->tooltipWindow) return;
-        SetWindowPos(state->tooltipWindow, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        SendMessageW(state->tooltipWindow, TTM_SETMAXTIPWIDTH, 0, 430);
-        SendMessageW(state->tooltipWindow, TTM_SETDELAYTIME,
-                     TTDT_INITIAL, 250);
-    }
-    TOOLINFOW tool{};
-    // The application intentionally has no Common Controls v6 manifest.  The
-    // built-in v5 tooltip rejects the newer structure size on some Windows
-    // installations, so register the compatible v1 fields explicitly.
-    tool.cbSize = TTTOOLINFO_V1_SIZE;
-    tool.uFlags = TTF_IDISHWND | TTF_TRACK | TTF_ABSOLUTE;
-    tool.hwnd = owner;
-    tool.uId = reinterpret_cast<UINT_PTR>(target);
-    tool.lpszText = const_cast<LPWSTR>(text);
-    SendMessageW(state->tooltipWindow, TTM_ADDTOOLW, 0,
-                 reinterpret_cast<LPARAM>(&tool));
-}
-
-static bool IsSettingsHelpControl(const SettingsDialogState* state,
-                                  HWND target) {
-    return state && (target == state->driftHelp ||
-                     target == state->pcmQueueHelp ||
-                      target == state->presentationHelp ||
-                      target == state->volumeBoostHelp ||
-                      target == state->forceHdr10Help ||
-                      target == state->mjpegColorHelp);
-}
-
-enum class SettingsHelpTopic {
-    Drift,
-    PcmQueue,
-    Presentation,
-    VolumeBoost,
-    ForceHdr10,
-    MjpegColor,
-};
-
 static const wchar_t* SettingsHelpText(SettingsHelpTopic topic) {
-    if (IsEnglishUi()) {
-        switch (topic) {
-        case SettingsHelpTopic::Drift:
-            return L"Preventing audio tearing · deciding whether correction is needed\n\n"
-                    L"The capture and output device clocks can run at slightly different rates. "
-                    L"Auto mode watches the application PCM queue first and enables resampling only "
-                    L"when a sustained imbalance is detected. It stays enabled for the rest of the "
-                    L"session once triggered, avoiding repeated on/off clicks. Check the Tab OSD for "
-                    L"10–30 minutes.\n\n"
-                   L"'Stable · correction unnecessary' or 'Rare errors · Off can be kept' means "
-                   L"you can leave it Off when the audio is clean. If 'Repeated imbalance · "
-                    L"correction recommended' continues, choose Auto. Do not judge "
-                   L"from errors immediately after startup.\n\n"
-                   L"The resampler and PCM safety buffer are independent. 'Resampler correction "
-                   L"limit approaching' indicates clock difference; 'Possible PCM buffer shortage' "
-                   L"indicates a momentary lack of queued audio; 'Capture packet delay detected' "
-                   L"indicates a late input callback. If the resampler is healthy but underruns "
-                   L"continue, raise the PCM buffer target first.\n\n"
-                   L"The imbalance ppm shown in the OSD is an estimate from accumulated underrun/"
-                    L"overrun frames, not a direct hardware-clock measurement. When Auto activates, "
-                    L"the resampler adds a small amount of audio buffering and changes PCM samples. "
-                    L"Off always preserves the original PCM path; On always uses the resampler.";
-        case SettingsHelpTopic::PcmQueue:
-            return L"PCM buffer target\n\n"
-                   L"The amount of captured audio kept inside the application before playback.\n"
-                   L"10 ms is minimum latency, 15 ms is the low-latency target, 20 ms is a stability "
-                   L"target, 25 ms is the recommended default, and 30 ms prioritizes stability.\n\n"
-                   L"Higher values absorb more scheduling jitter but add the same amount of audio "
-                   L"latency. This is independent of the WASAPI output buffer and clock-drift correction.";
-        case SettingsHelpTopic::Presentation:
-            return llcv::presentation_ui::HelpText(true);
-        case SettingsHelpTopic::VolumeBoost:
-            return L"Volume boost above 100%\n\n"
-                   L"Allows the mouse wheel to raise the app volume up to 200%. "
-                   L"100% is the original PCM level; values above it apply digital gain only inside this app.\n\n"
-                   L"No audio buffer or frame queue is added, so this option does not add audio latency. "
-                   L"At high source volumes, boosting can clip peaks and cause distortion. Keep it off unless "
-                   L"the capture audio is genuinely too quiet.";
-        case SettingsHelpTopic::ForceHdr10:
-            return L"Force HDR10 output\n\n"
-                   L"Use this only when the source is confirmed to be HDR and the capture driver does not expose "
-                   L"color metadata. It treats P010 as BT.2020/PQ and enables the HDR10 swap chain.\n\n"
-                   L"If the source is SDR, or the monitor is not handling HDR correctly, colors can look strongly "
-                   L"oversaturated or otherwise wrong. Turn it off in that case. This does not add a frame queue; "
-                   L"it only changes the output color interpretation.";
-        case SettingsHelpTopic::MjpegColor:
-            return L"MJPEG color interpretation\n\n"
-                   L"Auto uses decoder metadata first, then DirectShow metadata. If neither identifies "
-                   L"the format, it uses JPEG Full range with BT.709 for HD or BT.601 for SD.\n\n"
-                   L"Use a manual combination only when MJPEG colors still differ from another capture "
-                   L"application. Full/Limited changes black and white levels; BT.709/BT.601 changes the "
-                   L"YUV color matrix. This does not add a frame queue or increase latency.";
-        }
-    }
-    switch (topic) {
-    case SettingsHelpTopic::Drift:
-         return L"소리 찢어짐 방지 · 보정 필요 확인\n\n"
-                L"자동은 프로그램 내부 PCM 대기량을 관찰하다가 클록 불균형이 일정 시간 지속될 때만 "
-                L"리샘플링을 켭니다. 한 번 켜지면 세션 중 반복해서 켰다 끄지 않아 소리 변화와 클릭을 "
-                L"줄입니다. Tab OSD를 10~30분 확인하세요.\n\n"
-               L"'안정 · 보정 불필요' 또는 '드문 오류 · 끔 유지 가능'이면 소리에 문제가 "
-                L"없는 한 끔을 유지해도 됩니다. '반복 불균형 · 보정 권장'이 계속 보이면 자동을 "
-                L"선택하세요. 시작 직후 오류만으로 판단하지 마세요.\n\n"
-               L"리샘플러와 PCM 안전 대기량은 서로 독립입니다. '리샘플러 보정 한계 접근'은 "
-               L"클록 차이, 'PCM 버퍼 부족 가능'은 순간 버퍼 여유 부족, '캡처 패킷 지연 감지'는 "
-               L"입력 콜백 지연을 뜻합니다. 리샘플러가 정상인데 underrun이 나면 PCM 버퍼 "
-               L"목표를 먼저 높이세요.\n\n"
-                L"OSD의 불균형 ppm은 누적 underrun/overrun으로 계산한 참고값이며 실제 하드웨어 "
-                L"클록을 직접 측정한 값은 아닙니다. 자동이 작동하면 작은 오디오 대기량을 추가하고 "
-                L"PCM 샘플을 변경합니다. 끔은 원본 PCM을 유지하고, 켬은 항상 리샘플러를 사용합니다.";
-    case SettingsHelpTopic::PcmQueue:
-        return L"PCM 버퍼 목표 안내\n\n"
-               L"캡처 오디오를 재생 전에 확보하는 프로그램 내부 대기량입니다.\n"
-               L"10ms는 최저 지연, 15ms는 저지연 목표, 20ms는 안정 목표, 25ms는 권장 기본값, "
-               L"30ms는 안정성 우선 설정입니다.\n\n"
-               L"값을 높이면 순간적인 입력 지연을 흡수할 여유가 커지지만, 그만큼 오디오 지연이 "
-               L"늘어납니다. WASAPI 출력 버퍼와 클록 드리프트 보정과는 독립적으로 조정됩니다.";
-    case SettingsHelpTopic::Presentation:
-        return llcv::presentation_ui::HelpText(false);
-    case SettingsHelpTopic::VolumeBoost:
-        return L"100% 이상 볼륨 증폭 안내\n\n"
-               L"마우스 휠로 앱 음량을 최대 200%까지 올릴 수 있게 합니다. 100%는 원본 PCM 크기이고, "
-               L"그 이상은 이 앱 안에서만 디지털 증폭을 적용합니다.\n\n"
-               L"추가 오디오 버퍼나 프레임 큐를 만들지 않으므로 오디오 지연은 늘지 않습니다. 다만 원본 "
-               L"소리가 이미 큰 경우에는 피크가 잘려 왜곡될 수 있으니, 실제로 음량이 부족할 때만 켜세요.";
-    case SettingsHelpTopic::ForceHdr10:
-        return L"HDR10 강제 출력 안내\n\n"
-               L"캡처 드라이버가 색공간 메타데이터를 제공하지 않지만 입력이 HDR임을 확인한 경우에만 사용하세요. "
-               L"P010을 BT.2020/PQ로 처리하고 HDR10 출력으로 표시합니다.\n\n"
-               L"입력이 SDR이거나 모니터의 HDR 처리가 맞지 않으면 색상이 과포화되거나 부정확해질 수 있습니다. "
-               L"그 경우 이 옵션을 끄세요. 프레임 큐를 추가하지 않으므로 표시 지연은 늘지 않고 출력 색상 해석만 바뀝니다.";
-    case SettingsHelpTopic::MjpegColor:
-        return L"MJPEG 색상 해석 안내\n\n"
-               L"자동은 디코더 메타데이터를 먼저 사용하고, 없으면 DirectShow 정보를 확인합니다. 양쪽 모두 "
-               L"알려주지 않으면 JPEG Full range와 HD BT.709 또는 SD BT.601을 사용합니다.\n\n"
-               L"자동 색상이 다른 캡처 프로그램과 계속 다를 때만 수동 조합을 선택하세요. Full/Limited는 "
-               L"명암 범위를, BT.709/BT.601은 YUV 색상 행렬을 바꿉니다. 프레임 큐를 추가하지 않아 "
-               L"표시 지연은 늘지 않습니다.";
-    }
-    return L"";
+    return llcv::settings_ui::SettingsHelpText(topic, IsEnglishUi());
 }
 
 static bool SettingsUsesSharedMode(const SettingsDialogState* state) {
@@ -5101,10 +4422,20 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
     std::wstring message;
     if (audioOnly) {
         message = UI_TEXT(L"오디오 only: 영상 형식 확인 안 함");
+    } else if (!supported && FAILED(state->videoCapabilityQueryStatus)) {
+        wchar_t failure[256]{};
+        swprintf_s(failure, IsEnglishUi()
+            ? L"Device mode query failed (0x%08X). Reselect the device or resolution to retry."
+            : L"장치 모드 조회 실패 (0x%08X). 장치 또는 해상도를 다시 선택해 재시도하세요.",
+            static_cast<unsigned>(state->videoCapabilityQueryStatus));
+        message = failure;
     } else if (!supported) {
         message = UI_TEXT(L"지원 모드 없음: 다른 장치 또는 해상도를 선택하세요.");
     } else {
-        message = IsEnglishUi() ? L"Detected:\r\n" : L"자동 인식:\r\n";
+        message = FAILED(state->videoCapabilityQueryStatus)
+            ? (IsEnglishUi() ? L"Partial query failure; some modes may be missing:\r\n"
+                            : L"일부 조회 실패 · 모드가 누락될 수 있음:\r\n")
+            : (IsEnglishUi() ? L"Detected:\r\n" : L"자동 인식:\r\n");
         bool firstFormat = true;
         for (const auto format : {VideoPixelFormat::Nv12,
                                   VideoPixelFormat::Yuy2,
@@ -5149,7 +4480,8 @@ static void PopulateFrameRateCombo(SettingsDialogState* state) {
     if (state->pixelFormats.empty()) {
         const LRESULT noModeIndex = SendMessageW(
             state->frameRateCombo, CB_ADDSTRING, 0,
-            reinterpret_cast<LPARAM>(UI_TEXT(L"지원 프레임 없음")));
+            reinterpret_cast<LPARAM>(FAILED(state->videoCapabilityQueryStatus)
+                ? (IsEnglishUi() ? L"Query failed" : L"조회 실패") : UI_TEXT(L"지원 프레임 없음")));
         SendMessageW(state->frameRateCombo, CB_SETITEMDATA,
                      static_cast<WPARAM>(noModeIndex), 0);
         SendMessageW(state->frameRateCombo, CB_SETCURSEL,
@@ -5204,12 +4536,13 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
         desiredFormat = SelectedPixelFormat(state);
     }
     state->pixelFormats = ProbePixelFormats(
-        SelectedCaptureDeviceId(state), preset.width, preset.height);
+        SelectedCaptureDeviceId(state), preset.width, preset.height, &state->videoCapabilityQueryStatus);
     SendMessageW(state->pixelFormatCombo, CB_RESETCONTENT, 0, 0);
     if (state->pixelFormats.empty()) {
         const LRESULT noModeIndex = SendMessageW(
             state->pixelFormatCombo, CB_ADDSTRING, 0,
-            reinterpret_cast<LPARAM>(UI_TEXT(L"지원 포맷 없음")));
+            reinterpret_cast<LPARAM>(FAILED(state->videoCapabilityQueryStatus)
+                ? (IsEnglishUi() ? L"Query failed" : L"조회 실패") : UI_TEXT(L"지원 포맷 없음")));
         SendMessageW(state->pixelFormatCombo, CB_SETITEMDATA,
                      static_cast<WPARAM>(noModeIndex),
                      static_cast<LPARAM>(VideoPixelFormat::Auto));
@@ -5272,6 +4605,18 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->videoCombo, CB_GETCURSEL, 0, 0);
         const LRESULT presentationIndex = SendMessageW(
             state->presentationCombo, CB_GETCURSEL, 0, 0);
+        if (presentationIndex == 2 &&
+            SelectedPixelFormat(state) == VideoPixelFormat::P010 &&
+            SendMessageW(state->forceHdr10Check, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+            SendMessageW(state->audioOnlyCheck, BM_GETCHECK, 0, 0) != BST_CHECKED) {
+            MessageBoxW(hwnd, IsEnglishUi()
+                ? L"HDR10 cannot use compatibility output. Select Immediate or VSync, "
+                  L"or use an SDR capture format for this comparison."
+                : L"HDR10은 호환성 출력과 함께 사용할 수 없습니다. 저지연 또는 VSync를 "
+                  L"선택하거나, SDR 캡처 포맷으로 비교해 주세요.",
+                L"Low Latency Capture Viewer", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
         const LRESULT scalingIndex = SendMessageW(
             state->scalingCombo, CB_GETCURSEL, 0, 0);
         const LRESULT fullscreenCursorIndex = SendMessageW(
@@ -5316,7 +4661,14 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
         if (videoIndex >= 0 && videoIndex < static_cast<LRESULT>(ARRAYSIZE(kVideoPresets))) {
             g_settings.videoPreset = kVideoPresets[videoIndex].preset;
         }
-        g_settings.presentationMode = presentationIndex == 1
+        const LRESULT monitorIndex = SendMessageW(state->displayMonitorCombo, CB_GETCURSEL, 0, 0);
+        if (monitorIndex == 0) g_settings.preferredDisplayMonitor.clear();
+        else if (monitorIndex > 0 && static_cast<size_t>(monitorIndex) <= state->displayMonitors.size())
+            g_settings.preferredDisplayMonitor = state->displayMonitors[monitorIndex - 1].id;
+        // The disconnected entry preserves its saved identity until reconnected.
+        g_settings.presentationMode = presentationIndex == 2
+                                          ? PresentationMode::Compatibility
+                                          : presentationIndex == 1
                                           ? PresentationMode::VSync
                                           : PresentationMode::AllowTearing;
         g_settings.scalingMode = scalingIndex == 1
@@ -5492,638 +4844,27 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
 
     case WM_CREATE: {
         const HINSTANCE instance = reinterpret_cast<LPCREATESTRUCTW>(lParam)->hInstance;
-        auto makeLabel = [&](const wchar_t* text, int x, int y) {
-            return CreateWindowExW(0, L"STATIC", text,
-                                   WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
-                                   x, y, 160, 24, hwnd, nullptr, instance, nullptr);
-        };
-
-        state->tabControl = CreateWindowExW(
-            0, WC_TABCONTROLW, nullptr,
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_FIXEDWIDTH,
-            24, 16, 901, 31, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_TAB)),
-            instance, nullptr);
-        if (state->tabControl) {
-            const wchar_t* labels[] = {
-                UI_TEXT(L"오디오"), UI_TEXT(L"영상 · 창"),
-                UI_TEXT(L"단축키 · 진단"), UI_TEXT(L"업데이트")};
-            for (int i = 0; i < static_cast<int>(ARRAYSIZE(labels)); ++i) {
-                TCITEMW item{};
-                item.mask = TCIF_TEXT;
-                item.pszText = const_cast<LPWSTR>(labels[i]);
-                TabCtrl_InsertItem(state->tabControl, i, &item);
-            }
-            TabCtrl_SetCurSel(state->tabControl,
-                              static_cast<int>(state->activeTab));
-        }
-
-        state->audioOutputSection = makeLabel(UI_TEXT(L"출력"), 34, 62);
-        state->audioPlaybackSection = makeLabel(UI_TEXT(L"재생 · 편의"), 34, 226);
-        state->audioStabilitySection = makeLabel(UI_TEXT(L"동기화 · 안정성"), 34, 392);
-        state->videoCaptureSection = makeLabel(UI_TEXT(L"캡처"), 34, 62);
-        state->videoDisplaySection = makeLabel(UI_TEXT(L"영상"), 505, 62);
-        state->videoWindowSection = makeLabel(UI_TEXT(L"창"), 505, 184);
-        state->audioLabel = makeLabel(UI_TEXT(L"오디오 출력 모드"), 24, 24);
-        state->audioCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            180, 20, 210, 120, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_AUDIO)), instance, nullptr);
-        SendMessageW(state->audioCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(
-                         UI_TEXT(L"WASAPI Shared (호환성 우선 · 권장)")));
-        SendMessageW(state->audioCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(UI_TEXT(
-                         L"WASAPI Exclusive (이벤트 진단 · 장치 독점)")));
-        if (state->asioAvailable) {
-            SendMessageW(state->audioCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(UI_TEXT(
-                             L"ASIO (지연 최소화 · 드라이버 필요 · 실험적)")));
-        }
-        const LRESULT audioSelection =
-            g_settings.audioMode == AudioMode::Asio && state->asioAvailable
-                ? 2
-                : g_settings.audioMode == AudioMode::WasapiExclusive ? 1 : 0;
-        SendMessageW(state->audioCombo, CB_SETCURSEL,
-                      audioSelection, 0);
-
-        state->audioOutputLabel = makeLabel(UI_TEXT(L"오디오 출력 장치"), 24, 68);
-        state->audioOutputCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            150, 64, 250, 220, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_AUDIO_OUTPUT)),
-            instance, nullptr);
-        PopulateAudioOutputCombo(state);
-
-        state->selectedBufferMs = g_settings.wasapiBufferMs;
-        state->selectedSharedPeriodFrames =
-            g_settings.wasapiSharedPeriodFrames;
-
-        state->bufferLabel = makeLabel(UI_TEXT(L"오디오 출력 버퍼"), 24, 68);
-        state->bufferCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            180, 64, 210, 180, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_BUFFER)),
-            instance, nullptr);
-        PopulateSettingsBufferCombo(state);
-
-        state->audioStatus = CreateWindowExW(
-            0, L"STATIC", UI_TEXT(L"Shared 저지연 지원 확인 중…"),
-            WS_CHILD | WS_VISIBLE,
-            24, 104, 370, 22, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_AUDIO_STATUS)),
-            instance, nullptr);
-        state->exclusiveTestButton = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"독점 버퍼 검사"),
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-            350, 104, 125, 28, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_EXCLUSIVE_TEST)),
-            instance, nullptr);
-
-        state->volumeHudLabel = makeLabel(UI_TEXT(L"볼륨 HUD 위치"), 24, 142);
-        state->volumeHudCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            180, 138, 210, 160, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_VOLUME_HUD)),
-            instance, nullptr);
-        for (const wchar_t* label : {UI_TEXT(L"좌측 상단 (기본)"), UI_TEXT(L"우측 상단"),
-                                     UI_TEXT(L"좌측 하단"), UI_TEXT(L"우측 하단")}) {
-            SendMessageW(state->volumeHudCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(label));
-        }
-        SendMessageW(
-            state->volumeHudCombo, CB_SETCURSEL,
-            static_cast<WPARAM>(g_settings.volumeHudPosition), 0);
-
-        state->volumeBoostCheck = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"100% 이상 볼륨 증폭 허용 (최대 200%)"),
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            24, 230, 400, 28, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_VOLUME_BOOST)),
-            instance, nullptr);
-        SendMessageW(state->volumeBoostCheck, BM_SETCHECK,
-                     g_settings.allowVolumeBoost
-                         ? BST_CHECKED : BST_UNCHECKED, 0);
-        state->volumeBoostHelp = CreateWindowExW(
-            0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                BS_PUSHBUTTON | BS_NOTIFY,
-            438, 226, 24, 24, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_VOLUME_BOOST_HELP)),
-            instance, nullptr);
-        AddSettingsTooltip(
-            state, hwnd, state->volumeBoostHelp,
-            SettingsHelpText(SettingsHelpTopic::VolumeBoost));
-
-        state->driftLabel = makeLabel(UI_TEXT(L"클록 드리프트 보정"), 24, 226);
-        state->driftHelp = CreateWindowExW(
-            0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                BS_PUSHBUTTON,
-            162, 222, 24, 24, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_DRIFT_HELP)),
-            instance, nullptr);
-        AddSettingsTooltip(
-            state, hwnd, state->driftHelp,
-            SettingsHelpText(SettingsHelpTopic::Drift));
-        state->driftCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            192, 222, 228, 120, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_DRIFT)),
-            instance, nullptr);
-        SendMessageW(state->driftCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(
-                         UI_TEXT(L"끔 (원본 PCM · 음질 우선)")));
-        SendMessageW(state->driftCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(
-                         UI_TEXT(L"자동 (권장 · 필요 시 보정)")));
-        SendMessageW(state->driftCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(
-                         UI_TEXT(L"켬 (항상 리샘플링)")));
-        SendMessageW(
-            state->driftCombo, CB_SETCURSEL,
-            g_settings.driftCorrection == DriftCorrectionMode::Resample
-                ? 2
-                : g_settings.driftCorrection == DriftCorrectionMode::Auto
-                      ? 1
-                      : 0,
-            0);
-
-        state->pcmQueueLabel = makeLabel(UI_TEXT(L"PCM 버퍼 목표"), 24, 274);
-        state->pcmQueueHelp = CreateWindowExW(
-            0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                BS_PUSHBUTTON,
-            162, 270, 24, 24, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_PCM_QUEUE_HELP)),
-            instance, nullptr);
-        AddSettingsTooltip(
-            state, hwnd, state->pcmQueueHelp,
-            SettingsHelpText(SettingsHelpTopic::PcmQueue));
-        state->pcmQueueCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            180, 270, 210, 140, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_PCM_QUEUE)),
-            instance, nullptr);
-        const wchar_t* queueLabels[] = {
-            UI_TEXT(L"10 ms (최저 지연)"),
-            UI_TEXT(L"15 ms (저지연 목표)"),
-            UI_TEXT(L"20 ms (안정 목표)"),
-            UI_TEXT(L"25 ms (권장 · 기본)"),
-            UI_TEXT(L"30 ms (안정성 우선)" )};
-        size_t selectedQueue = 0;
-        for (size_t i = 0; i < ARRAYSIZE(kPcmQueueOptionsMs); ++i) {
-            const LRESULT index = SendMessageW(
-                state->pcmQueueCombo, CB_ADDSTRING, 0,
-                reinterpret_cast<LPARAM>(queueLabels[i]));
-            SendMessageW(state->pcmQueueCombo, CB_SETITEMDATA,
-                         static_cast<WPARAM>(index),
-                         kPcmQueueOptionsMs[i]);
-            if (g_settings.pcmQueueTargetMs == kPcmQueueOptionsMs[i]) {
-                selectedQueue = i;
-            }
-        }
-        SendMessageW(state->pcmQueueCombo, CB_SETCURSEL,
-                     static_cast<WPARAM>(selectedQueue), 0);
-
-        state->muteBackgroundCheck = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"백그라운드에서 자동 음소거"),
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            24, 358, 390, 28, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_MUTE_BACKGROUND)),
-            instance, nullptr);
-        SendMessageW(state->muteBackgroundCheck, BM_SETCHECK,
-                     g_settings.muteWhenBackground
-                         ? BST_CHECKED : BST_UNCHECKED, 0);
-
-        state->audioOnlyCheck = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"오디오 only 모드"),
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            24, 146, 451, 28, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_AUDIO_ONLY)),
-            instance, nullptr);
-        SendMessageW(state->audioOnlyCheck, BM_SETCHECK,
-                     g_settings.audioOnly ? BST_CHECKED : BST_UNCHECKED, 0);
-
-        state->languageLabel = makeLabel(
-            UI_TEXT(L"언어 / Language"), 24, 392);
-        state->languageCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            180, 388, 210, 120, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_LANGUAGE)),
-            instance, nullptr);
-        SendMessageW(state->languageCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(L"Auto (Windows language)"));
-        SendMessageW(state->languageCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(L"한국어"));
-        SendMessageW(state->languageCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(L"English"));
-        SendMessageW(state->languageCombo, CB_SETCURSEL,
-                     static_cast<WPARAM>(g_settings.uiLanguage), 0);
-
-        state->skipStartupCheck = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"다음 실행부터 바로 시작"),
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            24, 436, 451, 28, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_SKIP_STARTUP)),
-            instance, nullptr);
-        SendMessageW(state->skipStartupCheck, BM_SETCHECK,
-                     g_settings.skipStartupSettings
-                         ? BST_CHECKED : BST_UNCHECKED, 0);
-        state->skipStartupHint = CreateWindowExW(
-            0, L"STATIC", UI_TEXT(
-                L"저장된 설정으로 바로 실행 · Shift 실행 또는 F2로 설정 열기"),
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
-            44, 424, 431, 42, hwnd, nullptr, instance, nullptr);
-        state->checkForUpdatesCheck = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"업데이트 자동 확인 (시작 후 백그라운드)"),
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            24, 466, 451, 28, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_UPDATE_CHECK)),
-            instance, nullptr);
-        SendMessageW(state->checkForUpdatesCheck, BM_SETCHECK,
-                     g_settings.checkForUpdates
-                         ? BST_CHECKED : BST_UNCHECKED, 0);
-
-        state->guideShortcutsTitle = makeLabel(
-            UI_TEXT(L"단축키"), 34, 62);
-        state->guideText = CreateWindowExW(
-            0, L"STATIC", UI_TEXT(
-                L"F2  설정 다시 열기\r\nF3  오디오 OSD\r\n"
-                L"F5  Pixel-perfect 크기로 맞추기\r\n"
-                L"F11  보더리스 전체화면 켜기/끄기\r\n"
-                L"Tab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료"),
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            34, 84, 400, 220, hwnd, nullptr, instance, nullptr);
-        state->guideDiagnosticsTitle = makeLabel(
-            UI_TEXT(L"진단 · 문제 해결"), 505, 62);
-        state->guideDiagnosticsText = CreateWindowExW(
-            0, L"STATIC", UI_TEXT(
-                L"문제가 생길 때만 로그 저장을 켜고 같은 문제를 재현하세요.\r\n"
-                L"로그는 사용자 폴더의 logs에 저장됩니다."),
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            505, 84, 360, 70, hwnd, nullptr, instance, nullptr);
-        state->guideLogFolderButton = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"로그 폴더 열기"),
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-            505, 248, 165, 26, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_OPEN_LOG_FOLDER)),
-            instance, nullptr);
-        std::wstring versionLabel = UI_TEXT(L"현재 버전");
-        versionLabel += L"  ";
-        versionLabel += kAppVersionLabel;
-        state->updateTitle = CreateWindowExW(
-            0, L"STATIC", versionLabel.c_str(),
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
-            34, 76, 400, 24, hwnd, nullptr, instance, nullptr);
-        state->updateText = CreateWindowExW(
-            0, L"STATIC", UI_TEXT(
-                L"자동 확인은 시작 후 백그라운드에서 최신 릴리스를 확인합니다. "
-                L"새 버전이 있으면 공식 설치 파일 다운로드를 안내합니다."),
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            34, 110, 760, 70, hwnd, nullptr, instance, nullptr);
-        state->updateNowButton = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"최신 버전 확인"),
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-            34, 230, 185, 30, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_UPDATE_NOW)),
-            instance, nullptr);
-        state->updateStatus = CreateWindowExW(
-            0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
-            235, 234, 650, 24, hwnd, nullptr, instance, nullptr);
-        state->versionWatermark = CreateWindowExW(
-            0, L"STATIC", kAppVersionLabel,
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
-            24, 596, 260, 20, hwnd, nullptr, instance, nullptr);
-
-        state->presentationLabel = makeLabel(UI_TEXT(L"화면 표시 방식"), 24, 274);
-        state->presentationCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            180, 270, 210, 120, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_PRESENTATION)),
-            instance, nullptr);
-        SendMessageW(state->presentationCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(
-                         llcv::presentation_ui::ImmediateLabel(
-                             IsEnglishUi())));
-        SendMessageW(state->presentationCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(
-                         llcv::presentation_ui::VSyncLabel(
-                             IsEnglishUi())));
-        SendMessageW(state->presentationCombo, CB_SETCURSEL,
-                     g_settings.presentationMode == PresentationMode::VSync
-                         ? 1 : 0, 0);
-        state->presentationHelp = CreateWindowExW(
-            0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                BS_PUSHBUTTON,
-            604, 20, 24, 24, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_PRESENTATION_HELP)),
-            instance, nullptr);
-        AddSettingsTooltip(
-            state, hwnd, state->presentationHelp,
-            SettingsHelpText(SettingsHelpTopic::Presentation));
-
-        state->captureDeviceLabel = makeLabel(UI_TEXT(L"캡처 장치"), 430, 68);
-        state->captureDeviceCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            550, 64, 245, 220, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_CAPTURE_DEVICE)),
-            instance, nullptr);
-        SendMessageW(state->captureDeviceCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(
-                         UI_TEXT(L"자동 선택 (GC573 우선 · 권장)")));
-        LRESULT selectedCaptureDevice = 0;
-        for (size_t i = 0; i < state->captureDevices.size(); ++i) {
-            std::wstring label = state->captureDevices[i].name;
-            std::wstring lowered = label;
-            std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                           ::towlower);
-            if (lowered.find(L"gc573") == std::wstring::npos &&
-                lowered.find(L"live gamer 4k") == std::wstring::npos) {
-                label += UI_TEXT(L" (실험적)");
-            }
-            SendMessageW(state->captureDeviceCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(label.c_str()));
-            if (state->captureDevices[i].id == g_settings.captureDeviceId) {
-                selectedCaptureDevice = static_cast<LRESULT>(i + 1);
-            }
-        }
-        SendMessageW(state->captureDeviceCombo, CB_SETCURSEL,
-                     selectedCaptureDevice, 0);
-
-        state->captureAudioDeviceLabel = makeLabel(
-            UI_TEXT(L"캡처 오디오 장치"), 430, 112);
-        state->captureAudioDeviceCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            550, 108, 245, 220, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_CAPTURE_AUDIO_DEVICE)),
-            instance, nullptr);
-        SendMessageW(state->captureAudioDeviceCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(UI_TEXT(
-                         L"자동 선택 (영상 장치 오디오 우선 · 권장)")));
-        LRESULT selectedCaptureAudioDevice = 0;
-        for (size_t i = 0; i < state->captureAudioDevices.size(); ++i) {
-            const std::wstring& label = state->captureAudioDevices[i].name;
-            SendMessageW(state->captureAudioDeviceCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(label.c_str()));
-            if (state->captureAudioDevices[i].id ==
-                g_settings.captureAudioDeviceId) {
-                selectedCaptureAudioDevice = static_cast<LRESULT>(i + 1);
-            }
-        }
-        SendMessageW(state->captureAudioDeviceCombo, CB_SETCURSEL,
-                     selectedCaptureAudioDevice, 0);
-        state->captureAudioStatus = CreateWindowExW(
-            0, L"STATIC", UI_TEXT(L"내부 오디오 확인 중…"),
-            WS_CHILD | SS_LEFTNOWORDWRAP,
-            550, 108, 245, 24, hwnd, nullptr, instance, nullptr);
-
-        state->videoLabel = makeLabel(UI_TEXT(L"캡처 해상도"), 430, 156);
-        state->videoCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            550, 152, 245, 120, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_VIDEO)), instance, nullptr);
-        for (const auto& info : kVideoPresets) {
-            SendMessageW(state->videoCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(info.label));
-        }
-        size_t selectedVideo = 0;
-        for (size_t i = 0; i < ARRAYSIZE(kVideoPresets); ++i) {
-            if (kVideoPresets[i].preset == state->initialVideoPreset) {
-                selectedVideo = i;
-                break;
-            }
-        }
-        SendMessageW(state->videoCombo, CB_SETCURSEL,
-                     static_cast<WPARAM>(selectedVideo), 0);
-
-        state->pixelFormatLabel = makeLabel(UI_TEXT(L"픽셀 포맷"), 430, 156);
-        state->pixelFormatCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            550, 152, 245, 160, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_PIXEL_FORMAT)),
-            instance, nullptr);
-        state->frameRateLabel = makeLabel(UI_TEXT(L"프레임"), 430, 200);
-        state->frameRateCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            550, 196, 245, 200, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_FRAME_RATE)),
-            instance, nullptr);
-        state->videoCapabilityStatus = CreateWindowExW(
-            0, L"STATIC", UI_TEXT(L"지원 모드 확인 중..."),
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            430, 234, 365, 90, hwnd, nullptr, instance, nullptr);
-        PopulatePixelFormatCombo(state);
-
-        state->scalingLabel = makeLabel(UI_TEXT(L"화면 확대 방식"), 430, 274);
-        state->scalingCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            550, 270, 245, 120, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_SCALING)),
-            instance, nullptr);
-        SendMessageW(state->scalingCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(UI_TEXT(L"부드럽게")));
-        SendMessageW(state->scalingCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(UI_TEXT(L"선명하게")));
-        SendMessageW(state->scalingCombo, CB_SETCURSEL,
-                     g_settings.scalingMode == ScalingMode::Sharp ? 1 : 0, 0);
-
-        state->fullscreenCursorLabel = makeLabel(
-            UI_TEXT(L"전체화면 커서"), 505, 336);
-        state->fullscreenCursorCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS |
-                CBS_DROPDOWNLIST | WS_TABSTOP,
-            630, 332, 255, 120, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(
-                IDC_SETTINGS_FULLSCREEN_CURSOR)),
-            instance, nullptr);
-        SendMessageW(state->fullscreenCursorCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(UI_TEXT(L"자동 숨김 (권장)")));
-        SendMessageW(state->fullscreenCursorCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(UI_TEXT(L"항상 표시")));
-        SendMessageW(state->fullscreenCursorCombo, CB_SETCURSEL,
-                     g_settings.fullscreenCursorMode ==
-                             FullscreenCursorMode::AlwaysVisible
-                         ? 1 : 0,
-                     0);
-        state->fullscreenCursorHint = CreateWindowExW(
-            0, L"STATIC",
-            UI_TEXT(L"F11  보더리스 전체화면 켜기/끄기"),
-            WS_CHILD | WS_VISIBLE | SS_RIGHT,
-            630, 364, 255, 24, hwnd, nullptr, instance, nullptr);
-
-        state->forceHdr10Check = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(
-                L"P010 HDR10 강제 (메타데이터 없을 때 · 실험적)"),
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            505, 376, 390, 28, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_FORCE_HDR10)),
-            instance, nullptr);
-        SendMessageW(state->forceHdr10Check, BM_SETCHECK,
-                     g_settings.forceHdr10 ? BST_CHECKED : BST_UNCHECKED, 0);
-        state->forceHdr10Help = CreateWindowExW(
-            0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                BS_PUSHBUTTON,
-            900, 372, 24, 24, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_FORCE_HDR10_HELP)),
-            instance, nullptr);
-        AddSettingsTooltip(
-            state, hwnd, state->forceHdr10Help,
-            SettingsHelpText(SettingsHelpTopic::ForceHdr10));
-
-        state->mjpegColorLabel = makeLabel(
-            UI_TEXT(L"MJPEG 색상 해석"), 24, 376);
-        state->mjpegColorCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
-            190, 372, 240, 150, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_MJPEG_COLOR)),
-            instance, nullptr);
-        const struct {
-            const wchar_t* label;
-            llcv::video_color::Override value;
-        } mjpegColorChoices[] = {
-            {UI_TEXT(L"자동 (권장)"), llcv::video_color::Override::Auto},
-            {L"BT.709 · Full range", llcv::video_color::Override::Bt709Full},
-            {L"BT.709 · Limited range", llcv::video_color::Override::Bt709Limited},
-            {L"BT.601 · Full range", llcv::video_color::Override::Bt601Full},
-            {L"BT.601 · Limited range", llcv::video_color::Override::Bt601Limited},
-        };
-        LRESULT selectedMjpegColor = 0;
-        for (const auto& choice : mjpegColorChoices) {
-            const LRESULT index = SendMessageW(
-                state->mjpegColorCombo, CB_ADDSTRING, 0,
-                reinterpret_cast<LPARAM>(choice.label));
-            SendMessageW(state->mjpegColorCombo, CB_SETITEMDATA,
-                         static_cast<WPARAM>(index),
-                         static_cast<LPARAM>(choice.value));
-            if (choice.value == g_settings.mjpegColorOverride) {
-                selectedMjpegColor = index;
-            }
-        }
-        SendMessageW(state->mjpegColorCombo, CB_SETCURSEL,
-                     static_cast<WPARAM>(selectedMjpegColor), 0);
-        state->mjpegColorHelp = CreateWindowExW(
-            0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                BS_PUSHBUTTON,
-            438, 372, 24, 24, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_MJPEG_COLOR_HELP)),
-            instance, nullptr);
-        AddSettingsTooltip(
-            state, hwnd, state->mjpegColorHelp,
-            SettingsHelpText(SettingsHelpTopic::MjpegColor));
-
-        state->pixelCheck = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"Pixel-perfect (1:1 · 창 크기 고정)"),
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            24, 362, 250, 28, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_PIXEL)), instance, nullptr);
-        SendMessageW(state->pixelCheck, BM_SETCHECK,
-                     g_settings.pixelPerfect ? BST_CHECKED : BST_UNCHECKED, 0);
-
-        state->relativeSizeCheck = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"모니터 이동 시 상대적 창 크기 유지 (독립 옵션)"),
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            24, 396, 390, 28, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_RELATIVE_SIZE)),
-            instance, nullptr);
-        SendMessageW(state->relativeSizeCheck, BM_SETCHECK,
-                     g_settings.relativeWindowSize
-                         ? BST_CHECKED : BST_UNCHECKED, 0);
-
-        state->relativeSizeWarning = CreateWindowExW(
-            0, L"STATIC",
-            UI_TEXT(L"※ Pixel-perfect와 함께 켜면 모니터 이동 시 1:1이 깨질 수 있습니다."),
-            WS_CHILD | WS_VISIBLE,
-            44, 424, 411, 24, hwnd, nullptr, instance, nullptr);
-
-        state->borderlessCheck = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"제목 표시줄 숨기기 (borderless 창)"),
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            24, 430, 300, 28, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_BORDERLESS)),
-            instance, nullptr);
-        SendMessageW(state->borderlessCheck, BM_SETCHECK,
-                     g_settings.borderlessWindow ? BST_CHECKED : BST_UNCHECKED, 0);
-
-        state->windowSnapCheck = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"창을 모니터 가장자리에 스냅 (권장)"),
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            24, 464, 330, 28, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_WINDOW_SNAP)),
-            instance, nullptr);
-        SendMessageW(state->windowSnapCheck, BM_SETCHECK,
-                     g_settings.windowSnap ? BST_CHECKED : BST_UNCHECKED, 0);
-
-        state->saveLogCheck = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"진단 로그 파일 저장 (사용자 폴더)"),
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            430, 374, 365, 28, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_SAVE_LOG)),
-            instance, nullptr);
-        SendMessageW(state->saveLogCheck, BM_SETCHECK,
-                     g_settings.saveLog ? BST_CHECKED : BST_UNCHECKED, 0);
-
-        state->showConsoleCheck = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"진단 콘솔 창 표시"),
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            430, 408, 365, 28, hwnd,
-            reinterpret_cast<HMENU>(
-                static_cast<INT_PTR>(IDC_SETTINGS_SHOW_CONSOLE)),
-            instance, nullptr);
-        SendMessageW(state->showConsoleCheck, BM_SETCHECK,
-                     g_settings.showDiagnosticConsole
-                         ? BST_CHECKED : BST_UNCHECKED, 0);
-
-        state->startButton = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"시작"), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
-            285, 520, 80, 30, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_START)), instance, nullptr);
-        state->cancelButton = CreateWindowExW(
-            0, L"BUTTON", UI_TEXT(L"취소"), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-            375, 520, 80, 30, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_CANCEL)), instance, nullptr);
+        const llcv::settings_ui::SettingsControlInitialValues initial{
+            g_settings, IsEnglishUi(), state->asioAvailable, kAppVersionLabel,
+            state->initialVideoPreset, state->captureDevices,
+            state->captureAudioDevices, kVideoPresets, kPcmQueueOptionsMs,
+            state->displayMonitors};
+        const llcv::settings_ui::SettingsControlPopulation population{
+            state,
+            [](void* context) {
+                auto* dialog = static_cast<SettingsDialogState*>(context);
+                PopulateAudioOutputCombo(dialog);
+                dialog->selectedBufferMs = g_settings.wasapiBufferMs;
+                dialog->selectedSharedPeriodFrames = g_settings.wasapiSharedPeriodFrames;
+            },
+            [](void* context) {
+                PopulateSettingsBufferCombo(static_cast<SettingsDialogState*>(context));
+            },
+            [](void* context) {
+                PopulatePixelFormatCombo(static_cast<SettingsDialogState*>(context));
+            }};
+        llcv::settings_ui::CreateSettingsDialogControls(
+            state, hwnd, instance, initial, population);
         UpdateVideoCapabilityStatus(state);
 
         const UINT initialDpi = GetDpiForWindow(hwnd);
@@ -6552,6 +5293,7 @@ static bool ShowSettingsDialog(HINSTANCE hInst,
     }
 
     SettingsDialogState state{};
+    state.displayMonitors = llcv::display::EnumerateMonitors(IsEnglishUi());
     state.captureDevices = EnumerateCaptureDevices();
     state.captureAudioDevices = EnumerateCaptureAudioDevices();
     state.audioEndpoints =
@@ -6789,7 +5531,8 @@ static SIZE DesiredWindowOuterSize(HWND hwnd, HMONITOR monitor, UINT dpi) {
                                     style, exStyle, dpi);
 }
 
-static void NormalizeWindowSize(HWND hwnd, bool clampToWorkArea) {
+static void NormalizeWindowSize(HWND hwnd, bool clampToWorkArea,
+                                HMONITOR startupMonitor = nullptr) {
     // Only strict pixel-perfect without monitor-relative behavior is fixed.
     // When both options are enabled, relative sizing is allowed to change the
     // size programmatically as the window crosses monitors.
@@ -6797,8 +5540,11 @@ static void NormalizeWindowSize(HWND hwnd, bool clampToWorkArea) {
         g_settings.relativeWindowSize || g_fullscreen) return;
     RECT current{};
     if (!GetWindowRect(hwnd, &current)) return;
-    const HMONITOR currentMonitor =
-        MonitorFromRect(&current, MONITOR_DEFAULTTONEAREST);
+    // An oversized initial window may overlap another display more than the
+    // selected one. Honor the startup target for this one normalization only.
+    MONITORINFO startupInfo{sizeof(startupInfo)};
+    const HMONITOR currentMonitor = startupMonitor && GetMonitorInfoW(startupMonitor, &startupInfo)
+        ? startupMonitor : MonitorFromRect(&current, MONITOR_DEFAULTTONEAREST);
     const UINT dpi = EffectiveMonitorDpi(currentMonitor, hwnd);
     const SIZE desired = DesiredWindowOuterSize(
         hwnd, currentMonitor, dpi);
@@ -6806,8 +5552,7 @@ static void NormalizeWindowSize(HWND hwnd, bool clampToWorkArea) {
     int y = current.top;
     if (clampToWorkArea) {
         MONITORINFO info{sizeof(info)};
-        const HMONITOR monitor =
-            MonitorFromRect(&current, MONITOR_DEFAULTTONEAREST);
+        const HMONITOR monitor = currentMonitor;
         if (monitor && GetMonitorInfoW(monitor, &info)) {
             const int maximumX =
                 (std::max)(info.rcWork.left, info.rcWork.right - desired.cx);
@@ -6828,24 +5573,15 @@ static void NormalizeWindowSize(HWND hwnd, bool clampToWorkArea) {
 }
 
 static HMONITOR g_relativeMoveMonitor = nullptr;
-static bool g_manualResizeInProgress = false;
-static bool g_outputResizePending = false;
-// Window-style changes synchronously emit WM_SIZE while F11/F5 is still
-// updating the outer window. Coalesce those notifications so the render
-// thread never tears down and recreates the flip-model swap chain halfway
-// through a fullscreen transition.
-static unsigned int g_outputTransitionDepth = 0;
+static bool g_interactiveWindowMove = false;
+static llcv::video::OutputTransitionState g_outputTransition;
 
 static void BeginOutputTransition() {
-    ++g_outputTransitionDepth;
+    g_outputTransition.Begin();
 }
 
 static void EndOutputTransition(bool requestOutputUpdate) {
-    if (requestOutputUpdate) g_outputResizePending = true;
-    if (g_outputTransitionDepth > 0) --g_outputTransitionDepth;
-    if (g_outputTransitionDepth == 0 && g_outputResizePending &&
-        !g_manualResizeInProgress) {
-        g_outputResizePending = false;
+    if (g_outputTransition.End(requestOutputUpdate)) {
         g_outputConfigurationGeneration.fetch_add(
             1, std::memory_order_acq_rel);
     }
@@ -6929,6 +5665,12 @@ static BOOL CALLBACK FindMonitorCallback(HMONITOR monitor, HDC, LPRECT,
 }
 
 static HMONITOR SavedViewerMonitor() {
+    if (!g_settings.preferredDisplayMonitor.empty()) {
+        const auto monitors = llcv::display::EnumerateMonitors(IsEnglishUi());
+        if (const HMONITOR selected = llcv::display::FindMonitor(monitors, g_settings.preferredDisplayMonitor))
+            return selected;
+        return MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    }
     if (!g_settings.hasWindowPosition) return nullptr;
     if (!g_settings.monitorDevice.empty()) {
         MonitorLookup lookup{};
@@ -6943,7 +5685,7 @@ static HMONITOR SavedViewerMonitor() {
 }
 
 static bool RestoredWindowOrigin(const SIZE& outerSize, POINT& origin) {
-    if (!g_settings.hasWindowPosition) return false;
+    if (!g_settings.hasWindowPosition && g_settings.preferredDisplayMonitor.empty()) return false;
     MONITORINFOEXW monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
     HMONITOR monitor = SavedViewerMonitor();
@@ -6961,6 +5703,13 @@ static bool RestoredWindowOrigin(const SIZE& outerSize, POINT& origin) {
     }
 
     const RECT work = monitorInfo.rcWork;
+    if (!g_settings.preferredDisplayMonitor.empty() &&
+        (!g_settings.hasWindowPosition ||
+         _wcsicmp(g_settings.monitorDevice.c_str(), monitorInfo.szDevice) != 0)) {
+        origin.x = work.left + (std::max)(0L, (work.right - work.left - outerSize.cx) / 2);
+        origin.y = work.top + (std::max)(0L, (work.bottom - work.top - outerSize.cy) / 2);
+        return true;
+    }
     const int maximumX = (std::max)(work.left, work.right - outerSize.cx);
     const int maximumY = (std::max)(work.top, work.bottom - outerSize.cy);
     origin.x = std::clamp(g_settings.windowX,
@@ -7482,7 +6231,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
     const UINT32 paddingFrames =
         g_audioWasapiPaddingFrames.load(std::memory_order_acquire);
     const wchar_t* presentationText =
-        g_settings.presentationMode == PresentationMode::VSync
+        llcv::presentation::UsesVSync(g_settings.presentationMode)
             ? L"VSync"
             : g_videoTearing.load(std::memory_order_acquire)
                   ? UI_TEXT(L"저지연") : L"Immediate";
@@ -7659,7 +6408,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
           L"Path          %s · %s\n"
           L"Input         %d x %d @ %d fps · %s %s %s\n"
           L"Video quality %s\n"
-          L"Display       %d x %d · %s · Flip-discard · %s\n"
+          L"Display       %d x %d · %s · %s · %s\n"
           L"Actual FPS    Input %.1f · Present %.1f\n"
           L"App latency   %s  (not total HDMI latency)\n"
           L"Frames        Input %llu · Output %llu · Replaced %llu\n"
@@ -7678,7 +6427,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
           L"경로          %s · %s\n"
           L"입력          %d x %d @ %d fps · %s %s %s\n"
           L"영상 품질     %s\n"
-          L"표시          %d x %d · %s · Flip-discard · %s\n"
+          L"표시          %d x %d · %s · %s · %s\n"
           L"실제 FPS      입력 %.1f · Present %.1f\n"
           L"앱 처리 지연  %s  (총 HDMI 지연 아님)\n"
           L"프레임        입력 %llu · 출력 %llu · 최신화 건너뜀 %llu\n"
@@ -7701,6 +6450,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         outputWidth,
         outputHeight,
         scaleText,
+        llcv::presentation::PathName(g_settings.presentationMode),
         presentationText,
         g_osdInputFps.load(std::memory_order_acquire),
         g_osdPresentFps.load(std::memory_order_acquire), latencyText,
@@ -7969,6 +6719,11 @@ static void PaintAudioOnlyOsd(HDC dc, const RECT& client) {
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
+        // A viewer destroyed during a modal move must not leave a deferred
+        // transition behind when settings restart it in this process.
+        g_outputTransition = {};
+        g_interactiveWindowMove = false;
+        g_relativeMoveMonitor = nullptr;
         if (!g_settings.audioOnly) {
             g_videoHost = CreateWindowExW(
                 0, L"STATIC", nullptr,
@@ -7988,17 +6743,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (g_videoHost) {
             MoveWindow(g_videoHost, 0, 0, LOWORD(lParam), HIWORD(lParam), TRUE);
         }
-        if (!g_settings.audioOnly && wParam != SIZE_MINIMIZED) {
-            // Recreate the HWND swapchain after a completed resize so its
-            // backbuffer matches the new client area. During an interactive
-            // drag, defer this until WM_EXITSIZEMOVE; rebuilding the D3D11
-            // output for every sizing tick would cause needless stalls.
-            if (g_manualResizeInProgress || g_outputTransitionDepth > 0) {
-                g_outputResizePending = true;
-            } else {
-                g_outputConfigurationGeneration.fetch_add(
-                    1, std::memory_order_acq_rel);
-            }
+        // Coalesce F11/F5 and interactive-drag notifications before rebuilding.
+        if (!g_settings.audioOnly && wParam != SIZE_MINIMIZED &&
+            g_outputTransition.OnClientSize(LOWORD(lParam), HIWORD(lParam))) {
+            g_outputConfigurationGeneration.fetch_add(
+                1, std::memory_order_acq_rel);
         }
         if (g_settings.audioOnly) InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -8042,7 +6791,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_SIZING:
         if (lParam && !g_settings.audioOnly && !g_fullscreen &&
             !g_settings.pixelPerfect) {
-            g_manualResizeInProgress = true;
+            g_outputTransition.SetManualResize(true);
             ConstrainWindowRectToVideoAspect(
                 hwnd, *reinterpret_cast<RECT*>(lParam),
                 static_cast<UINT>(wParam));
@@ -8093,13 +6842,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         break;
 
     case WM_GETDPISCALEDSIZE:
+        // During an interactive resize the incoming pending size can differ
+        // from GetClientRect. Let Windows scale that user-controlled size;
+        // the saved monitor-relative ratio is only a policy for moving.
+        if (g_outputTransition.ManualResize() && !g_settings.pixelPerfect)
+            return FALSE;
         if ((g_settings.pixelPerfect || g_settings.relativeWindowSize) &&
             !g_fullscreen && lParam) {
             const UINT pendingDpi = static_cast<UINT>(wParam);
-            POINT cursor{};
-            GetCursorPos(&cursor);
             const HMONITOR targetMonitor =
-                MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+                g_interactiveWindowMove && g_relativeMoveMonitor
+                    ? g_relativeMoveMonitor
+                    : MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
             const SIZE desired = DesiredWindowOuterSize(
                 hwnd, targetMonitor, pendingDpi);
             *reinterpret_cast<SIZE*>(lParam) = desired;
@@ -8113,22 +6867,37 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_DPICHANGED:
         if ((g_settings.pixelPerfect || g_settings.relativeWindowSize) &&
             !g_fullscreen) {
+            if (!lParam) return 0;
             const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+            const HMONITOR targetMonitor = MonitorFromRect(suggested, MONITOR_DEFAULTTONEAREST);
+            const bool manualResize = g_outputTransition.ManualResize() && !g_settings.pixelPerfect;
+            const SIZE desired = manualResize
+                ? SIZE{suggested->right - suggested->left, suggested->bottom - suggested->top}
+                : DesiredWindowOuterSize(hwnd, targetMonitor, LOWORD(wParam));
+            if (desired.cx <= 0 || desired.cy <= 0) return 0;
             fwprintf(stderr,
                      L"[video] DPI changed: %u dpi, suggested outer %ld x %ld\n",
                      LOWORD(wParam), suggested->right - suggested->left,
                      suggested->bottom - suggested->top);
+            BeginOutputTransition();
             SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
-                         suggested->right - suggested->left,
-                         suggested->bottom - suggested->top,
+                         desired.cx, desired.cy,
                          SWP_NOZORDER | SWP_NOACTIVATE);
+            if (g_interactiveWindowMove) g_relativeMoveMonitor = targetMonitor;
+            EndOutputTransition(false);
             return 0;
         }
         break;
 
     case WM_ENTERSIZEMOVE:
         ResetWindowSnapState();
-        g_manualResizeInProgress = false;
+        // Moving can resize a monitor-relative window, just like WM_SIZING.
+        // Keep one transition open until final geometry has been reconciled.
+        if (!g_interactiveWindowMove) {
+            g_interactiveWindowMove = true;
+            BeginOutputTransition();
+        }
+        g_outputTransition.SetManualResize(false);
         g_relativeMoveMonitor =
             MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         return 0;
@@ -8151,13 +6920,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_EXITSIZEMOVE:
         ResetWindowSnapState();
         g_relativeMoveMonitor = nullptr;
-        if (g_manualResizeInProgress) {
+        if (g_outputTransition.ManualResize()) {
             RememberRelativeScaleFromWindow(hwnd);
         }
-        g_manualResizeInProgress = false;
+        // WM_MOVING / WM_DPICHANGED already chose the final relative size.
+        // Reclassifying its monitor by overlap here can select the opposite
+        // display solely because that size changed, making each exit oscillate.
+        g_outputTransition.SetManualResize(false);
         NormalizeWindowSize(hwnd, true);
-        if (g_outputResizePending) {
-            g_outputResizePending = false;
+        if (g_interactiveWindowMove) {
+            g_interactiveWindowMove = false;
+            EndOutputTransition(false);
+        }
+        // An enclosing output transition still owns the deferred rebuild.
+        if (g_outputTransition.TakePendingUpdate()) {
             g_outputConfigurationGeneration.fetch_add(
                 1, std::memory_order_acq_rel);
         }
@@ -8506,7 +7282,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                                                        : L"WASAPI Shared";
     wchar_t title[256]{};
     const wchar_t* videoLabel =
-        g_settings.presentationMode == PresentationMode::VSync
+        llcv::presentation::IsCompatibility(g_settings.presentationMode)
+            ? L"Single Graph / Direct D3D11 / Blt + VSync"
+            : g_settings.presentationMode == PresentationMode::VSync
             ? L"Single Graph / Direct D3D11 / VSync"
             : L"Single Graph / Direct D3D11 / Tearing";
     if (g_settings.audioOnly) {
@@ -8564,7 +7342,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         CloseSavedLog();
         return 1;
     }
-    if (!g_settings.audioOnly) NormalizeWindowSize(hwnd, true);
+    if (!g_settings.audioOnly) NormalizeWindowSize(hwnd, true,
+        g_settings.preferredDisplayMonitor.empty() ? nullptr : initialMonitor);
     RECT clientRect{};
     GetClientRect(hwnd, &clientRect);
     if (g_settings.audioOnly) {
@@ -8698,6 +7477,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                     failureFormat,
                     static_cast<unsigned int>(failure),
                     failureText.c_str(), PixelFormatName(g_settings.pixelFormat));
+                if (failure == HRESULT_FROM_WIN32(ERROR_TIMEOUT)) {
+                    swprintf_s(message, IsEnglishUi()
+                        ? L"Capture startup timed out.\n\nError: 0x%08X\n\nCheck that the HDMI source is on and close other capture applications, then retry. The diagnostic log identifies the failed stage and rejected input samples. This does not by itself mean the selected display mode is unsupported."
+                        : L"캡처 시작 대기 시간이 초과되었습니다.\n\n오류: 0x%08X\n\nHDMI 입력 기기가 켜져 있는지 확인하고 다른 캡처 앱을 종료한 뒤 다시 시도하세요. 진단 로그에서 실패 단계와 거부된 입력 샘플 수를 확인할 수 있습니다. 이 오류만으로 화면 출력 방식이 미지원이라는 뜻은 아닙니다.",
+                        static_cast<unsigned>(failure));
+                } else if (failure == HRESULT_FROM_WIN32(ERROR_INVALID_DATA)) {
+                    swprintf_s(message, IsEnglishUi()
+                        ? L"The capture device returned an invalid or unexpected data format.\n\nError: 0x%08X\n\nReselect the capture mode and retry. Attach the diagnostic log so the selected and connected video layouts can be compared."
+                        : L"캡처 장치가 잘못되었거나 예상과 다른 데이터 형식을 반환했습니다.\n\n오류: 0x%08X\n\n캡처 모드를 다시 선택해 시도하세요. 선택 형식과 실제 연결 형식을 비교할 수 있도록 진단 로그를 첨부해 주세요.",
+                        static_cast<unsigned>(failure));
+                }
                 MessageBoxW(hwnd, message, L"Low Latency Capture Viewer",
                             MB_OK | MB_ICONERROR);
                 g_restartToSettings.store(true, std::memory_order_release);

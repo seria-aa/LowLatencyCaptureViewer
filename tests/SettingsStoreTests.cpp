@@ -28,6 +28,7 @@ std::wstring TemporaryIniPath() {
 void TestDefaults(const std::wstring& path) {
     DeleteFileW(path.c_str());
     const auto loaded = llcv::settings::LoadFromIni(path);
+    Check(loaded.settings.preferredDisplayMonitor.empty(), "default display is automatic");
     Check(loaded.settings.audioMode ==
               llcv::settings::AudioMode::WasapiShared,
           "default audio mode");
@@ -45,6 +46,7 @@ void TestDefaults(const std::wstring& path) {
 void TestRoundTrip(const std::wstring& path) {
     using namespace llcv::settings;
     AppSettings saved{};
+    saved.preferredDisplayMonitor = L"interface:monitor-test-id";
     saved.uiLanguage = UiLanguage::English;
     saved.audioMode = AudioMode::Asio;
     saved.wasapiBufferMs = 30;
@@ -89,6 +91,7 @@ void TestRoundTrip(const std::wstring& path) {
     SaveToIni(path, saved);
     const LoadResult result = LoadFromIni(path);
     const AppSettings& loaded = result.settings;
+    Check(loaded.preferredDisplayMonitor == saved.preferredDisplayMonitor, "display monitor round trip");
     Check(loaded.uiLanguage == saved.uiLanguage, "language round trip");
     Check(loaded.audioMode == saved.audioMode, "audio mode round trip");
     Check(loaded.wasapiBufferMs == saved.wasapiBufferMs,
@@ -131,6 +134,25 @@ void TestRoundTrip(const std::wstring& path) {
     Check(loaded.skipStartupSettings && !loaded.checkForUpdates &&
               loaded.audioOnly,
           "general settings round trip");
+}
+
+void TestPresentationModes(const std::wstring& path) {
+    using namespace llcv::settings;
+    for (const auto mode : {PresentationMode::AllowTearing,
+                            PresentationMode::VSync,
+                            PresentationMode::Compatibility}) {
+        AppSettings settings{};
+        settings.presentationMode = mode;
+        SaveToIni(path, settings);
+        Check(LoadFromIni(path).settings.presentationMode == mode,
+              "all presentation modes round trip");
+    }
+    WritePrivateProfileStringW(L"Video", L"Presentation", L"unknown", path.c_str());
+    Check(LoadFromIni(path).settings.presentationMode == PresentationMode::AllowTearing,
+          "unknown presentation mode retains original default");
+    WritePrivateProfileStringW(L"Video", L"Presentation", nullptr, path.c_str());
+    Check(LoadFromIni(path).settings.presentationMode == PresentationMode::AllowTearing,
+          "missing presentation mode retains original default");
 }
 
 void TestPcmDefaultAndPreservation(const std::wstring& path) {
@@ -203,6 +225,7 @@ int main() {
     }
     TestDefaults(path);
     TestRoundTrip(path);
+    TestPresentationModes(path);
     TestPcmDefaultAndPreservation(path);
     TestLegacyPcmMigration(path);
     DeleteFileW(path.c_str());

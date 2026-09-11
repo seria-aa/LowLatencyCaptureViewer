@@ -38,6 +38,7 @@ void LatestVideoSample::Push(IMediaSample* sample) {
     if (!sample || sample->GetActualDataLength() <= 0 ||
         (expectedBytes_ != 0 && sample->GetActualDataLength() <
                                   static_cast<long>(expectedBytes_))) {
+        rejectedSamples_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     const int64_t arrivalMicroseconds =
@@ -75,8 +76,8 @@ IMediaSample* LatestVideoSample::TakeLatest(
 }
 
 VideoSampleGrabberCallback::VideoSampleGrabberCallback(
-    LatestVideoSample* sampleSlot, diagnostics::LogSink log)
-    : sampleSlot_(sampleSlot), log_(log) {}
+    LatestVideoSample* sampleSlot, diagnostics::LogSink)
+    : sampleSlot_(sampleSlot) {}
 
 STDMETHODIMP VideoSampleGrabberCallback::QueryInterface(
     REFIID id, void** object) {
@@ -103,25 +104,9 @@ STDMETHODIMP_(ULONG) VideoSampleGrabberCallback::Release() {
 STDMETHODIMP VideoSampleGrabberCallback::SampleCB(
     double, IMediaSample* sample) {
     if (!sample) return E_POINTER;
-    if (!surfaceCapabilityProbed_.exchange(
-            true, std::memory_order_acq_rel)) {
-        IMediaSample2Config* surfaceConfig = nullptr;
-        IUnknown* surface = nullptr;
-        const HRESULT configResult = sample->QueryInterface(
-            IID_PPV_ARGS(&surfaceConfig));
-        const HRESULT surfaceResult = SUCCEEDED(configResult)
-            ? surfaceConfig->GetSurface(&surface) : configResult;
-        diagnostics::LogMessage(
-            log_,
-            L"[video] DirectShow VRAM sample surface: %s "
-            L"(interface 0x%08X, surface 0x%08X)\n",
-            SUCCEEDED(surfaceResult) && surface ? L"available"
-                                                : L"not available",
-            static_cast<unsigned>(configResult),
-            static_cast<unsigned>(surfaceResult));
-        SafeRelease(surface);
-        SafeRelease(surfaceConfig);
-    }
+    // This pipeline uploads CPU samples. Probing an unused VRAM interface (and
+    // logging it) before publishing can delay the first frame on some drivers.
+    // Keep optional COM queries and diagnostic I/O off the capture callback.
     if (sampleSlot_) sampleSlot_->Push(sample);
     return S_OK;
 }

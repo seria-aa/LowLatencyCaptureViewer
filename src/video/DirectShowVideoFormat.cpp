@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include <limits>
+#include <cstdio>
 
 namespace llcv::video {
 namespace {
@@ -76,7 +78,41 @@ bool FrameRateAllowedByCaps(const VIDEO_STREAM_CONFIG_CAPS& caps, int fps) {
         std::min(caps.MinFrameInterval, caps.MaxFrameInterval);
     const REFERENCE_TIME maximum =
         std::max(caps.MinFrameInterval, caps.MaxFrameInterval);
-    return duration >= minimum && duration <= maximum;
+    // 100ns rounding at a boundary (e.g. 240fps) must not hide that rate.
+    return duration >= minimum - 1 &&
+        (duration <= maximum || duration - maximum <= 1);
+}
+
+AM_MEDIA_TYPE* CloneMediaType(const AM_MEDIA_TYPE* source) {
+    auto* copy = static_cast<AM_MEDIA_TYPE*>(CoTaskMemAlloc(sizeof(AM_MEDIA_TYPE)));
+    if (!copy) return nullptr;
+    *copy = *source;
+    copy->pbFormat = nullptr;
+    if (source->cbFormat) {
+        copy->pbFormat = static_cast<BYTE*>(CoTaskMemAlloc(source->cbFormat));
+        if (!copy->pbFormat) { CoTaskMemFree(copy); return nullptr; }
+        std::memcpy(copy->pbFormat, source->pbFormat, source->cbFormat);
+    }
+    if (copy->pUnk) copy->pUnk->AddRef();
+    return copy;
+}
+
+void LogQuery(LogCallback log, const wchar_t* stage, int index, HRESULT hr) {
+    if (!log) return;
+    wchar_t text[192]{};
+    swprintf_s(text, L"[video-caps] %s index=%d result=0x%08X\n",
+               stage, index, static_cast<unsigned>(hr));
+    log(text);
+}
+
+void LogMode(LogCallback log, int index, VideoPixelFormat format, int width,
+             int height, REFERENCE_TIME duration, const VIDEO_STREAM_CONFIG_CAPS& caps) {
+    if (!log) return;
+    wchar_t text[256]{};
+    swprintf_s(text, L"[video-caps] entry=%d %s %dx%d duration=%lld interval=%lld~%lld (100ns)\n",
+        index, PixelFormatName(format), width, height, duration,
+        caps.MinFrameInterval, caps.MaxFrameInterval);
+    log(text);
 }
 
 const wchar_t* DirectShowTransferName(UINT value) {
@@ -143,7 +179,7 @@ VideoPixelFormat PixelFormatFromSubtype(const GUID& subtype) {
 bool VideoFormatDetails(const AM_MEDIA_TYPE* mediaType, int& width,
                         int& height, REFERENCE_TIME& frameDuration,
                         DWORD& imageBytes, VideoPixelFormat* pixelFormat) {
-    if (!mediaType || mediaType->majortype != MEDIATYPE_Video) return false;
+    if (!mediaType || !mediaType->pbFormat || mediaType->majortype != MEDIATYPE_Video) return false;
     const VideoPixelFormat detected = PixelFormatFromSubtype(mediaType->subtype);
     if (detected == VideoPixelFormat::Auto) return false;
     if (pixelFormat) *pixelFormat = detected;
@@ -170,11 +206,45 @@ bool VideoFormatDetails(const AM_MEDIA_TYPE* mediaType, int& width,
         bitmap = &info->hdr.bmiHeader;
         frameDuration = info->hdr.AvgTimePerFrame;
     }
-    if (!bitmap) return false;
+    if (!bitmap || bitmap->biHeight == (std::numeric_limits<LONG>::min)()) return false;
     width = static_cast<int>(bitmap->biWidth);
     height = std::abs(static_cast<int>(bitmap->biHeight));
     imageBytes = bitmap->biSizeImage;
     return width > 0 && height > 0;
+}
+
+HRESULT ValidateVideoLayout(const AM_MEDIA_TYPE* mediaType,
+    int expectedWidth, int expectedHeight, VideoPixelFormat expectedFormat,
+    DWORD& imageBytes, UINT32& stride, int& fps) {
+    int width = 0, height = 0;
+    REFERENCE_TIME duration = 0;
+    DWORD bytes = 0;
+    VideoPixelFormat format = VideoPixelFormat::Auto;
+    if (!VideoFormatDetails(mediaType, width, height, duration, bytes, &format) ||
+        width != expectedWidth || height != expectedHeight || format != expectedFormat ||
+        duration < 0 || duration > 10'000'000 || (duration == 0 && fps <= 0))
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    UINT32 rowPitch = 0;
+    if (!IsCompressedVideoFormat(format)) {
+        if ((width & 1) || (format != VideoPixelFormat::Yuy2 && (height & 1)))
+            return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        const uint64_t rows = format == VideoPixelFormat::Yuy2 ? height : uint64_t(height) * 3 / 2;
+        const uint64_t minimumPitch = uint64_t(width) * (format == VideoPixelFormat::Nv12 ? 1 : 2);
+        const uint64_t minimumBytes = rows * minimumPitch;
+        if (minimumBytes > (std::numeric_limits<LONG>::max)() ||
+            (bytes && (bytes < minimumBytes || bytes > static_cast<DWORD>((std::numeric_limits<LONG>::max)()))))
+            return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        if (!bytes) bytes = static_cast<DWORD>(minimumBytes);
+        const uint64_t pitch = bytes / rows;
+        if (pitch < minimumPitch || (format != VideoPixelFormat::Nv12 && (pitch & 1)))
+            return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        rowPitch = static_cast<UINT32>(pitch);
+    }
+    imageBytes = bytes;
+    stride = rowPitch;
+    // A connected type may omit frame timing; preserve the negotiated rate.
+    if (duration > 0) fps = static_cast<int>((10'000'000 + duration / 2) / duration);
+    return S_OK;
 }
 
 bool ExtractDirectShowColorMetadata(
@@ -277,12 +347,12 @@ bool FindMatchingDirectShowColorMetadata(
     int count = 0;
     int capBytes = 0;
     hr = config->GetNumberOfCapabilities(&count, &capBytes);
-    if (FAILED(hr) ||
-        capBytes < static_cast<int>(sizeof(VIDEO_STREAM_CONFIG_CAPS))) {
+    if (FAILED(hr) || count < 0 ||
+        (count > 0 && capBytes < static_cast<int>(sizeof(VIDEO_STREAM_CONFIG_CAPS)))) {
         SafeRelease(config);
         return false;
     }
-    std::vector<BYTE> caps(static_cast<size_t>(capBytes));
+    std::vector<BYTE> caps(capBytes > 0 ? static_cast<size_t>(capBytes) : 1);
     bool found = false;
     for (int i = 0; i < count && !found; ++i) {
         AM_MEDIA_TYPE* candidate = nullptr;
@@ -318,6 +388,7 @@ HRESULT ConfigureVideoPin(
     VideoPixelFormat wantedFormat, DWORD& imageBytes, UINT32& stride,
     int& configuredFps, VideoPixelFormat& configuredFormat,
     LogCallback logCallback) {
+    if (!videoPin) return E_POINTER;
     IAMStreamConfig* config = nullptr;
     HRESULT hr = videoPin->QueryInterface(IID_PPV_ARGS(&config));
     if (FAILED(hr)) return hr;
@@ -327,6 +398,7 @@ HRESULT ConfigureVideoPin(
     hr = config->GetNumberOfCapabilities(&count, &capBytes);
     if (FAILED(hr) ||
         capBytes < static_cast<int>(sizeof(VIDEO_STREAM_CONFIG_CAPS))) {
+        LogQuery(logCallback, L"configure/count", count, FAILED(hr) ? hr : E_FAIL);
         SafeRelease(config);
         return FAILED(hr) ? hr : E_FAIL;
     }
@@ -342,7 +414,11 @@ HRESULT ConfigureVideoPin(
     for (int i = 0; i < count; ++i) {
         AM_MEDIA_TYPE* candidate = nullptr;
         hr = config->GetStreamCaps(i, &candidate, caps.data());
-        if (FAILED(hr) || !candidate) continue;
+        if (FAILED(hr) || !candidate) {
+            LogQuery(logCallback, L"configure/entry", i, FAILED(hr) ? hr : E_FAIL);
+            DeleteMediaType(candidate);
+            continue;
+        }
 
         VIDEO_STREAM_CONFIG_CAPS streamCaps{};
         std::memcpy(&streamCaps, caps.data(), sizeof(streamCaps));
@@ -358,15 +434,21 @@ HRESULT ConfigureVideoPin(
         const bool formatMatches = wantedFormat == VideoPixelFormat::Auto
             ? IsAutoSelectableVideoFormat(format) : format == wantedFormat;
         if (details && formatMatches && width == wantedWidth &&
-            height == wantedHeight && fps > 0) {
-            if (wantedFps == 30 && fps != wantedFps &&
-                FrameRateAllowedByCaps(streamCaps, wantedFps) &&
-                SetVideoFrameDuration(
-                    candidate, FrameDurationForRate(wantedFps))) {
-                fps = wantedFps;
+            height == wantedHeight && duration >= 0) {
+            LogMode(logCallback, i, format, width, height, duration, streamCaps);
+            if (wantedFps > 0 && fps != wantedFps &&
+                FrameRateAllowedByCaps(streamCaps, wantedFps)) {
+                auto* adjusted = CloneMediaType(candidate);
+                if (adjusted && SetVideoFrameDuration(adjusted, FrameDurationForRate(wantedFps)))
+                    candidates.push_back({adjusted, wantedFps, bytes, format});
+                else DeleteMediaType(adjusted);
             }
-            candidates.push_back({candidate, fps, bytes, format});
-            continue;
+            // A zero default duration is not an executable fallback. The
+            // interval-derived requested candidate above has explicit timing.
+            if (fps > 0) {
+                candidates.push_back({candidate, fps, bytes, format});
+                continue;
+            }
         }
         DeleteMediaType(candidate);
     }
@@ -395,45 +477,35 @@ HRESULT ConfigureVideoPin(
 
     hr = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
     FormatCandidate* selected = nullptr;
+    bool requestedRateAdvertised = false;
+    for (const auto& candidate : candidates)
+        requestedRateAdvertised |= candidate.fps == wantedFps;
+    if (!requestedRateAdvertised) LogQuery(logCallback, L"requested-rate-not-advertised", wantedFps,
+                                          HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
     for (auto& candidate : candidates) {
+        DWORD candidateBytes = 0;
+        UINT32 candidateStride = 0;
+        int candidateFps = candidate.fps;
+        hr = ValidateVideoLayout(candidate.mediaType, wantedWidth, wantedHeight,
+            candidate.format, candidateBytes, candidateStride, candidateFps);
+        if (FAILED(hr)) {
+            LogQuery(logCallback, L"invalid-candidate-layout/fps", candidate.fps, hr);
+            continue;
+        }
         hr = config->SetFormat(candidate.mediaType);
+        LogQuery(logCallback, L"SetFormat/fps", candidate.fps, hr);
         if (SUCCEEDED(hr)) {
             selected = &candidate;
+            imageBytes = candidateBytes;
+            stride = candidateStride;
+            configuredFps = candidateFps;
+            configuredFormat = candidate.format;
             break;
         }
     }
 
     if (selected) {
-        imageBytes = selected->imageBytes;
-        configuredFps = selected->fps;
-        configuredFormat = selected->format;
-        if (!imageBytes && !IsCompressedVideoFormat(configuredFormat)) {
-            imageBytes = static_cast<DWORD>(
-                configuredFormat == VideoPixelFormat::Yuy2
-                    ? wantedWidth * wantedHeight * 2
-                    : configuredFormat == VideoPixelFormat::P010
-                        ? wantedWidth * wantedHeight * 3
-                        : wantedWidth * wantedHeight * 3 / 2);
-        }
-        const uint64_t derivedStride =
-            configuredFormat == VideoPixelFormat::Yuy2
-                ? static_cast<uint64_t>(imageBytes) / wantedHeight
-                : configuredFormat == VideoPixelFormat::P010
-                    ? static_cast<uint64_t>(imageBytes) * 2 /
-                          (static_cast<uint64_t>(wantedHeight) * 3)
-                    : (static_cast<uint64_t>(imageBytes) * 2) /
-                          (static_cast<uint64_t>(wantedHeight) * 3);
-        const UINT32 minimumStride =
-            configuredFormat == VideoPixelFormat::Yuy2
-                ? static_cast<UINT32>(wantedWidth * 2)
-                : configuredFormat == VideoPixelFormat::P010
-                    ? static_cast<UINT32>(wantedWidth * 2)
-                    : static_cast<UINT32>(wantedWidth);
-        stride = IsCompressedVideoFormat(configuredFormat)
-            ? 0
-            : static_cast<UINT32>(derivedStride >= minimumStride
-                                      ? derivedStride : minimumStride);
-        if (configuredFps != wantedFps && logCallback) {
+        if (SUCCEEDED(hr) && configuredFps != wantedFps && logCallback) {
             wchar_t message[320]{};
             swprintf_s(
                 message,
@@ -455,24 +527,37 @@ HRESULT GetActiveVideoPinFormat(IPin* videoPin, AM_MEDIA_TYPE** mediaType) {
     IAMStreamConfig* config = nullptr;
     HRESULT hr = videoPin->QueryInterface(IID_PPV_ARGS(&config));
     if (SUCCEEDED(hr)) hr = config->GetFormat(mediaType);
+    if (SUCCEEDED(hr) && !*mediaType) hr = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     SafeRelease(config);
     return hr;
 }
 
 std::vector<PixelFormatSupport> ProbePixelFormats(
-    IPin* videoPin, int width, int height) {
+    IPin* videoPin, int width, int height, HRESULT* queryStatus, LogCallback logCallback) {
     std::vector<PixelFormatSupport> result;
-    if (!videoPin) return result;
+    if (queryStatus) *queryStatus = S_OK;
+    if (!videoPin) { if (queryStatus) *queryStatus = E_POINTER; return result; }
     IAMStreamConfig* config = nullptr;
     HRESULT hr = videoPin->QueryInterface(IID_PPV_ARGS(&config));
     int count = 0;
     int capBytes = 0;
     if (SUCCEEDED(hr)) hr = config->GetNumberOfCapabilities(&count, &capBytes);
+    if (SUCCEEDED(hr) && ((count > 0 && capBytes < static_cast<int>(sizeof(VIDEO_STREAM_CONFIG_CAPS))) || count < 0))
+        hr = E_FAIL;
+    if (FAILED(hr)) {
+        if (queryStatus) *queryStatus = hr;
+        LogQuery(logCallback, L"probe/count", count, hr);
+        SafeRelease(config);
+        return result;
+    }
     std::vector<BYTE> caps(capBytes > 0 ? static_cast<size_t>(capBytes) : 1);
     for (int i = 0; SUCCEEDED(hr) && i < count; ++i) {
         AM_MEDIA_TYPE* mediaType = nullptr;
-        if (FAILED(config->GetStreamCaps(i, &mediaType, caps.data())) ||
-            !mediaType) {
+        const HRESULT entryHr = config->GetStreamCaps(i, &mediaType, caps.data());
+        if (FAILED(entryHr) || !mediaType) {
+            if (queryStatus) *queryStatus = FAILED(entryHr) ? entryHr : E_FAIL;
+            LogQuery(logCallback, L"probe/entry", i, FAILED(entryHr) ? entryHr : E_FAIL);
+            DeleteMediaType(mediaType);
             continue;
         }
         VIDEO_STREAM_CONFIG_CAPS streamCaps{};
@@ -484,30 +569,47 @@ std::vector<PixelFormatSupport> ProbePixelFormats(
         REFERENCE_TIME duration = 0;
         DWORD bytes = 0;
         VideoPixelFormat format = VideoPixelFormat::Auto;
-        if (VideoFormatDetails(mediaType, candidateWidth, candidateHeight,
-                               duration, bytes, &format) &&
-            format != VideoPixelFormat::Auto && candidateWidth == width &&
-            candidateHeight == height && duration > 0) {
-            const int fps = static_cast<int>(
-                (10'000'000 + duration / 2) / duration);
+        const bool knownVideoType = mediaType->majortype == MEDIATYPE_Video &&
+            PixelFormatFromSubtype(mediaType->subtype) != VideoPixelFormat::Auto;
+        const bool validDetails = VideoFormatDetails(mediaType, candidateWidth, candidateHeight,
+                                                       duration, bytes, &format);
+        if (knownVideoType && !validDetails) {
+            const HRESULT invalid = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+            if (queryStatus) *queryStatus = invalid;
+            LogQuery(logCallback, L"probe/invalid-format", i, invalid);
+        } else if (validDetails && candidateWidth == width && candidateHeight == height) {
+            LogMode(logCallback, i, format, candidateWidth, candidateHeight, duration, streamCaps);
+            const int fps = duration > 0 ? static_cast<int>(
+                (10'000'000 + duration / 2) / duration) : 0;
+            UINT32 checkedStride = 0;
+            // Validate geometry even if only the separate interval range is
+            // present. This sentinel is never exposed as an advertised rate.
+            int checkedFps = fps > 0 ? fps : 1;
+            const bool hasTiming = duration > 0 || (duration == 0 &&
+                streamCaps.MinFrameInterval > 0 && streamCaps.MaxFrameInterval > 0);
+            const HRESULT layoutHr = hasTiming ? ValidateVideoLayout(mediaType, width, height,
+                format, bytes, checkedStride, checkedFps) : HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+            if (FAILED(layoutHr)) {
+                if (queryStatus) *queryStatus = layoutHr;
+                LogQuery(logCallback, L"probe/invalid-layout", i, layoutHr);
+                DeleteMediaType(mediaType);
+                continue;
+            }
             const bool duplicate = std::any_of(
                 result.begin(), result.end(),
                 [format, fps](const PixelFormatSupport& support) {
                     return support.format == format &&
                            support.selectedFps == fps;
                 });
-            if (!duplicate) result.push_back({format, fps});
+            if (fps > 0 && !duplicate) result.push_back({format, fps});
 
-            constexpr int kAdditionalFrameRate = 30;
-            const bool thirtyFpsDuplicate = std::any_of(
-                result.begin(), result.end(),
-                [format](const PixelFormatSupport& support) {
-                    return support.format == format &&
-                           support.selectedFps == 30;
-                });
-            if (!thirtyFpsDuplicate &&
-                FrameRateAllowedByCaps(streamCaps, kAdditionalFrameRate)) {
-                result.push_back({format, kAdditionalFrameRate});
+            for (const int rate : {30, 60, 90, 100, 120, 144, 165, 180, 200, 240}) {
+                const bool duplicateRate = std::any_of(result.begin(), result.end(),
+                    [format, rate](const PixelFormatSupport& support) {
+                        return support.format == format && support.selectedFps == rate;
+                    });
+                if (!duplicateRate && FrameRateAllowedByCaps(streamCaps, rate))
+                    result.push_back({format, rate});
             }
         }
         DeleteMediaType(mediaType);

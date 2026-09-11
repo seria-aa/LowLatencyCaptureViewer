@@ -1,11 +1,31 @@
 // Hardware-free integration regressions: exercise the actual application
 // callbacks, not copies of their startup/minimum-buffer logic.
+#define LLCV_GPU_DIAGNOSTICS
 #include "../src/main.cpp"
 #undef fwprintf
 #include "../src/audio/AsioOutput.cpp"
 
 #include <cstdlib>
+#include <d3d11sdklayers.h>
+#include <set>
 #include "audio/SharedDeadlineMonitor.h"
+#include "FakeVideoPin.h"
+
+void TestStartupWaitBoundary() {
+    using Clock = std::chrono::steady_clock;
+    const auto start = Clock::time_point{};
+    const auto deadline = start + std::chrono::seconds(10);
+    for (int ms = 0; ms <= 20000; ++ms) {
+        const auto now = start + std::chrono::milliseconds(ms);
+        // The production loop calls this predicate only following a non-event
+        // wait. This is a boundary test, not a full capture-graph simulation.
+        if (StartupInputWaitExpired(false, now, deadline) != (ms >= 10000) ||
+            StartupInputWaitExpired(true, now, deadline)) std::abort();
+    }
+    // Valid input with no successful presentation (OCCLUDED) must not time out.
+    if (StartupInputWaitExpired(true, deadline, deadline)) std::abort();
+    std::puts("Startup boundary: 20001 timestamps x pre/post input states passed.");
+}
 
 namespace {
 void Require(bool value, const char* message) {
@@ -16,6 +36,78 @@ void Require(bool value, const char* message) {
 }
 std::wstring savedMessage;
 void SaveMessage(const wchar_t* message) { savedMessage = message; }
+
+DWORD settingsProbeThread = 0;
+int settingsProbeCalls = 0;
+bool settingsProbeFails = false;
+std::vector<PixelFormatSupport> SimulatedSettingsProbe(
+    const std::wstring& id, int width, int height, HRESULT* status) {
+    Require(GetCurrentThreadId() == settingsProbeThread,
+            "video capability probe stays synchronous on settings caller thread");
+    ++settingsProbeCalls;
+    FakeVideoPin pin;
+    pin.countFails = settingsProbeFails;
+    pin.modes = {{id == L"device-A" ? 120 : 60, width, height}};
+    return llcv::video::ProbePixelFormats(&pin, width, height, status);
+}
+
+void TestSettingsCapabilityRefresh() {
+    const auto saved = g_settings;
+    g_settings.videoFrameRate = 0;
+    g_settings.pixelFormat = VideoPixelFormat::Auto;
+    HWND parent = CreateWindowExW(0, L"STATIC", L"Hidden capability replay", 0,
+        0, 0, 320, 240, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    Require(parent != nullptr, "create hidden settings replay parent");
+    {
+        SettingsDialogState state;
+        auto control = [&](const wchar_t* type) {
+            HWND child = CreateWindowExW(0, type, L"", WS_CHILD |
+                (std::wcscmp(type, L"COMBOBOX") == 0 ? CBS_DROPDOWNLIST : 0),
+                0, 0, 200, 100, parent, nullptr, GetModuleHandleW(nullptr), nullptr);
+            Require(child != nullptr, "create settings replay control");
+            return child;
+        };
+        state.captureDeviceCombo = control(L"COMBOBOX");
+        state.videoCombo = control(L"COMBOBOX");
+        state.pixelFormatCombo = control(L"COMBOBOX");
+        state.frameRateCombo = control(L"COMBOBOX");
+        state.videoCapabilityStatus = control(L"STATIC");
+        state.startButton = control(L"BUTTON");
+        state.captureDevices.resize(2);
+        state.captureDevices[0].id = L"device-A";
+        state.captureDevices[1].id = L"device-B";
+        for (const auto* label : {L"Auto", L"A", L"B"})
+            SendMessageW(state.captureDeviceCombo, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(label));
+        for (size_t i = 0; i < ARRAYSIZE(kVideoPresets); ++i)
+            SendMessageW(state.videoCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"size"));
+        g_testVideoCapabilityProbe = SimulatedSettingsProbe;
+        settingsProbeThread = GetCurrentThreadId();
+        settingsProbeCalls = 0;
+        for (int iteration = 0; iteration < 1000; ++iteration) {
+            SendMessageW(state.captureDeviceCombo, CB_SETCURSEL, 1 + iteration % 2, 0);
+            SendMessageW(state.videoCombo, CB_SETCURSEL, iteration % ARRAYSIZE(kVideoPresets), 0);
+            settingsProbeFails = iteration % 5 == 0;
+            PopulatePixelFormatCombo(&state);
+            Require(settingsProbeCalls == iteration + 1,
+                    "each selection applies exactly one fresh synchronous query");
+            if (settingsProbeFails) {
+                Require(FAILED(state.videoCapabilityQueryStatus) && state.pixelFormats.empty() && !IsWindowEnabled(state.startButton) &&
+                        !IsWindowEnabled(state.frameRateCombo),
+                        "query failure has explicit error status and disables start");
+            } else {
+                Require(SUCCEEDED(state.videoCapabilityQueryStatus) && state.pixelFormats.size() == 1 &&
+                        state.pixelFormats[0].selectedFps == (iteration % 2 ? 60 : 120) &&
+                        IsWindowEnabled(state.startButton) && IsWindowEnabled(state.frameRateCombo),
+                        "device/resolution change or recovery replaces stale modes and re-enables UI");
+            }
+        }
+        g_testVideoCapabilityProbe = nullptr;
+    }
+    DestroyWindow(parent);
+    g_settings = saved;
+    std::puts("Settings capability refresh: 1000 device/resolution/failure/recovery changes passed.");
+}
 
 void TestExclusiveScanResultLifetime() {
     SettingsDialogState state;
@@ -87,40 +179,37 @@ void TestExclusiveScanResultLifetime() {
 
 void TestOutputTransitions() {
     const auto savedGeneration = g_outputConfigurationGeneration.load();
-    const auto savedDepth = g_outputTransitionDepth;
-    const bool savedPending = g_outputResizePending;
-    const bool savedManualResize = g_manualResizeInProgress;
+    const auto savedTransition = g_outputTransition;
     const bool savedAudioOnly = g_settings.audioOnly;
     const HWND savedVideoHost = g_videoHost;
     const HMONITOR savedRelativeMonitor = g_relativeMoveMonitor;
     const auto savedSnapState = g_windowSnapState;
     g_outputConfigurationGeneration.store(100);
-    g_outputTransitionDepth = 0;
-    g_outputResizePending = false;
-    g_manualResizeInProgress = false;
+    g_outputTransition = {};
     g_settings.audioOnly = false;
     g_videoHost = nullptr;
 
     // A null host exercises the real message handlers without creating any
     // window, capture graph, output device, or persistent settings file.
-    const auto resize = []() {
-        WndProc(nullptr, WM_SIZE, SIZE_RESTORED, MAKELPARAM(1280, 720));
+    int resizeWidth = 1280;
+    const auto resize = [&]() {
+        WndProc(nullptr, WM_SIZE, SIZE_RESTORED, MAKELPARAM(resizeWidth++, 720));
     };
     BeginOutputTransition();
     EndOutputTransition(false);
     Require(g_outputConfigurationGeneration.load() == 100 &&
-                g_outputTransitionDepth == 0 && !g_outputResizePending,
+                g_outputTransition.Depth() == 0 && !g_outputTransition.Pending(),
             "an empty output transition must not rebuild the renderer");
 
     BeginOutputTransition();
     resize();
     resize();
     Require(g_outputConfigurationGeneration.load() == 100 &&
-                g_outputResizePending,
+                g_outputTransition.Pending(),
             "synchronous style-change sizes must wait for transition end");
     EndOutputTransition(true);
     Require(g_outputConfigurationGeneration.load() == 101 &&
-                !g_outputResizePending && g_outputTransitionDepth == 0,
+                !g_outputTransition.Pending() && g_outputTransition.Depth() == 0,
             "one fullscreen transition must publish only one output rebuild");
 
     BeginOutputTransition();
@@ -129,35 +218,35 @@ void TestOutputTransitions() {
     EndOutputTransition(false);
     resize();
     Require(g_outputConfigurationGeneration.load() == 101 &&
-                g_outputTransitionDepth == 1 && g_outputResizePending,
+                g_outputTransition.Depth() == 1 && g_outputTransition.Pending(),
             "nested fullscreen exit must not publish halfway through F5");
     EndOutputTransition(true);
     Require(g_outputConfigurationGeneration.load() == 102 &&
-                g_outputTransitionDepth == 0 && !g_outputResizePending,
+                g_outputTransition.Depth() == 0 && !g_outputTransition.Pending(),
             "nested F5 and fullscreen transitions must coalesce all sizes");
 
     BeginOutputTransition();
     BeginOutputTransition();
     EndOutputTransition(true);
     Require(g_outputConfigurationGeneration.load() == 102 &&
-                g_outputResizePending,
+                g_outputTransition.Pending(),
             "an inner explicit rebuild request must remain deferred");
     EndOutputTransition(false);
     Require(g_outputConfigurationGeneration.load() == 103 &&
-                !g_outputResizePending,
+                !g_outputTransition.Pending(),
             "outer completion must preserve an inner explicit rebuild request");
 
-    g_manualResizeInProgress = true;
+    g_outputTransition.SetManualResize(true);
     BeginOutputTransition();
     resize();
     EndOutputTransition(true);
     resize();
     Require(g_outputConfigurationGeneration.load() == 103 &&
-                g_outputTransitionDepth == 0 && g_outputResizePending,
+                g_outputTransition.Depth() == 0 && g_outputTransition.Pending(),
             "completed transitions during a manual drag must remain deferred");
     WndProc(nullptr, WM_EXITSIZEMOVE, 0, 0);
     Require(g_outputConfigurationGeneration.load() == 104 &&
-                !g_manualResizeInProgress && !g_outputResizePending,
+                !g_outputTransition.ManualResize() && !g_outputTransition.Pending(),
             "ending a manual drag must publish exactly one pending rebuild");
     WndProc(nullptr, WM_EXITSIZEMOVE, 0, 0);
     Require(g_outputConfigurationGeneration.load() == 104,
@@ -165,7 +254,7 @@ void TestOutputTransitions() {
 
     WndProc(nullptr, WM_SIZE, SIZE_MINIMIZED, 0);
     Require(g_outputConfigurationGeneration.load() == 104 &&
-                !g_outputResizePending,
+                !g_outputTransition.Pending(),
             "minimization must not rebuild a zero-sized video output");
     resize();
     Require(g_outputConfigurationGeneration.load() == 105,
@@ -180,14 +269,30 @@ void TestOutputTransitions() {
         WndProc(nullptr, WM_KEYDOWN, VK_F11, (LPARAM{1} << 30) | 1);
         Require(g_fullscreen.load() == wasFullscreen &&
                     g_outputConfigurationGeneration.load() == 106 &&
-                    g_outputTransitionDepth == 0 && !g_outputResizePending,
+                    g_outputTransition.Depth() == 0 && !g_outputTransition.Pending(),
                 "holding F11 must not toggle fullscreen or rebuild output again");
     }
 
+    for (int cycle = 0; cycle < 1000; ++cycle) {
+        const auto before = g_outputConfigurationGeneration.load();
+        BeginOutputTransition();
+        for (int event = 0; event < 5; ++event) resize();
+        EndOutputTransition(false);
+        Require(g_outputConfigurationGeneration.load() == before + 1,
+                "repeated transition sizes coalesce into one generation");
+        WndProc(nullptr, WM_SIZE, SIZE_RESTORED, MAKELPARAM(resizeWidth - 1, 720));
+        WndProc(nullptr, WM_SIZE, SIZE_RESTORED, MAKELPARAM(resizeWidth - 1, 720));
+        Require(g_outputConfigurationGeneration.load() == before + 1,
+                "identical standalone sizes do not request redundant rebuilds");
+        DirectD3D11Renderer observer;
+        observer.outputConfigurationGeneration = before;
+        Require(observer.outputConfigurationChanged(), "older renderer generation remains invalid");
+        observer.outputConfigurationGeneration = before + 1;
+        Require(!observer.outputConfigurationChanged(), "current renderer generation is recognized");
+    }
+
     g_outputConfigurationGeneration.store(savedGeneration);
-    g_outputTransitionDepth = savedDepth;
-    g_outputResizePending = savedPending;
-    g_manualResizeInProgress = savedManualResize;
+    g_outputTransition = savedTransition;
     g_settings.audioOnly = savedAudioOnly;
     g_videoHost = savedVideoHost;
     g_relativeMoveMonitor = savedRelativeMonitor;
@@ -195,7 +300,268 @@ void TestOutputTransitions() {
 }
 }
 
-int main() {
+void TestPresentationPolicy() {
+    using namespace llcv::presentation;
+    const auto saved = g_settings;
+    for (auto mode : {Mode::AllowTearing, Mode::VSync, Mode::Compatibility}) {
+        for (bool tearing : {false, true}) {
+            const auto desc = Description(mode, 1920, 1080, false, tearing);
+            Require(desc.Width == 1920 && desc.Height == 1080 &&
+                    desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+                    desc.BufferCount == 2, "output geometry and format unchanged");
+            if (IsCompatibility(mode)) {
+                Require(desc.SwapEffect == DXGI_SWAP_EFFECT_DISCARD &&
+                        desc.Flags == 0 && UsesVSync(mode),
+                        "Blt output must not use flip-only flags or immediate presentation");
+            } else {
+                Require(desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD &&
+                        (desc.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) &&
+                        !!(desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) == tearing,
+                        "existing flip swapchain policy remains unchanged");
+            }
+        }
+        g_settings.presentationMode = mode;
+        for (auto language : {UiLanguage::Korean, UiLanguage::English}) {
+            g_settings.uiLanguage = language;
+            const auto osd = BuildRuntimeOsdText(1920, 1080);
+            Require(osd.find(PathName(mode)) != std::wstring::npos,
+                    "diagnostics must identify the selected output path");
+        }
+    }
+    g_settings = saved;
+}
+
+// Explicit opt-in GPU smoke test: synthetic pixels only, hidden HWND, no
+// capture/audio devices and no reads/writes to the user's settings or logs.
+int TestPresentationGpu() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    HWND hwnd = CreateWindowExW(0, L"STATIC", L"Presentation smoke",
+        WS_OVERLAPPEDWINDOW, 0, 0, 320, 240, nullptr, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    Require(hwnd != nullptr, "create hidden GPU smoke window");
+    g_settings.pixelPerfect = false;
+    std::vector<BYTE> pixels(64 * 64 * 3 / 2, 128);
+    for (auto mode : {PresentationMode::AllowTearing, PresentationMode::VSync,
+                      PresentationMode::Compatibility, PresentationMode::VSync}) {
+        g_settings.presentationMode = mode;
+        DirectD3D11Renderer renderer;
+        for (int cycle = 0; cycle < 2; ++cycle) {
+            SetWindowPos(hwnd, nullptr, 0, 0, 320 + cycle * 32, 240 + cycle * 32,
+                         SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE);
+            const auto hr = renderer.initialize(hwnd, 64, 64, 60, VideoPixelFormat::Nv12);
+            std::printf("GPU init mode=%d cycle=%d HRESULT=0x%08lX\n",
+                        static_cast<int>(mode), cycle, static_cast<unsigned long>(hr));
+            Require(SUCCEEDED(hr), "initialize actual D3D11 output path");
+            DXGI_SWAP_CHAIN_DESC1 desc{};
+            Require(SUCCEEDED(renderer.swapChain->GetDesc1(&desc)) &&
+                    desc.SwapEffect == (mode == PresentationMode::Compatibility
+                        ? DXGI_SWAP_EFFECT_DISCARD : DXGI_SWAP_EFFECT_FLIP_DISCARD),
+                    "actual swapchain uses requested path");
+            renderer.upload(pixels.data(), 64);
+            const auto presented = renderer.presentUploaded();
+            Require(SUCCEEDED(presented), "synthetic frame upload and presentation");
+        }
+    }
+    g_settings.presentationMode = PresentationMode::Compatibility;
+    DirectD3D11Renderer hdr;
+    Require(hdr.initialize(hwnd, 64, 64, 60, VideoPixelFormat::P010, true) ==
+            DXGI_ERROR_UNSUPPORTED, "reject HDR10 instead of misinterpreting it as SDR");
+    DestroyWindow(hwnd);
+    CoUninitialize();
+    return 0;
+}
+
+int TestPresentationRecreateReplay() {
+    Require(SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)), "initialize GPU replay COM");
+    HWND hwnd = CreateWindowExW(0, L"STATIC", L"Hidden rebuild replay",
+        WS_OVERLAPPEDWINDOW, 0, 0, 320, 240, nullptr, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    Require(hwnd != nullptr, "create hidden recreation replay window");
+    IMemAllocator* allocator = nullptr;
+    Require(SUCCEEDED(CoCreateInstance(CLSID_MemoryAllocator, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&allocator))), "create in-process DirectShow sample allocator");
+    ALLOCATOR_PROPERTIES requested{4, 64 * 64 * 3 / 2, 1, 0}, actual{};
+    Require(SUCCEEDED(allocator->SetProperties(&requested, &actual)) &&
+        actual.cbBuffer >= requested.cbBuffer && SUCCEEDED(allocator->Commit()), "allocate synthetic NV12 samples");
+    HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    Require(ready != nullptr, "create live-mailbox GPU replay event");
+    std::atomic<bool> stop{false};
+    std::atomic<unsigned> produced{0};
+    unsigned frames = 0, diagnostics = 0, occluded = 0;
+    {
+        llcv::capture::LatestVideoSample slot(requested.cbBuffer, ready);
+        auto* callback = new llcv::capture::VideoSampleGrabberCallback(&slot);
+        std::thread producer([&] {
+            while (!stop.load()) {
+                IMediaSample* sample = nullptr;
+                if (FAILED(allocator->GetBuffer(&sample, nullptr, nullptr, 0))) break;
+                BYTE* pixels = nullptr;
+                if (SUCCEEDED(sample->GetPointer(&pixels))) {
+                    std::memset(pixels, 128, requested.cbBuffer);
+                    sample->SetActualDataLength(requested.cbBuffer);
+                    callback->SampleCB(0, sample);
+                    ++produced;
+                }
+                sample->Release();
+                Sleep(1);
+            }
+        });
+        g_settings.pixelPerfect = false;
+        DirectD3D11Renderer renderer;
+        for (int cycle = 0; cycle < 60; ++cycle) {
+            g_settings.presentationMode = cycle % 3 == 0 ? PresentationMode::AllowTearing :
+                cycle % 3 == 1 ? PresentationMode::VSync : PresentationMode::Compatibility;
+            SetWindowPos(hwnd, nullptr, 0, 0, 320 + (cycle % 4) * 32,
+                         240 + (cycle % 4) * 24, SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE);
+            g_outputConfigurationGeneration.fetch_add(1);
+            Require(SUCCEEDED(renderer.initialize(hwnd, 64, 64, 60, VideoPixelFormat::Nv12)),
+                    "recreate renderer while callbacks continue publishing");
+            Require(!renderer.outputConfigurationChanged(), "recreated output acknowledges current generation");
+            // Check generation changes that arrive after initialization as well.
+            g_outputConfigurationGeneration.fetch_add(1);
+            Require(renderer.outputConfigurationChanged(), "later output change remains visible to renderer");
+            Require(WaitForSingleObject(ready, 2000) == WAIT_OBJECT_0, "capture mailbox remains live across rebuild");
+            int64_t arrival = 0;
+            auto* sample = slot.TakeLatest(arrival);
+            Require(sample != nullptr, "take valid sample after rebuild");
+            BYTE* pixels = nullptr;
+            Require(SUCCEEDED(sample->GetPointer(&pixels)), "read synthetic pixels");
+            renderer.upload(pixels, 64);
+            sample->Release();
+            const auto hr = renderer.presentUploaded();
+            Require(SUCCEEDED(hr), "present after recreation without failure");
+            occluded += hr == DXGI_STATUS_OCCLUDED;
+            ++frames;
+            ID3D11InfoQueue* queue = nullptr;
+            Require(SUCCEEDED(renderer.device->QueryInterface(IID_PPV_ARGS(&queue))), "read GPU debug queue");
+            for (UINT64 i = 0; i < queue->GetNumStoredMessagesAllowedByRetrievalFilter(); ++i) {
+                SIZE_T length = 0;
+                queue->GetMessage(i, nullptr, &length);
+                std::vector<BYTE> buffer(length);
+                auto* message = reinterpret_cast<D3D11_MESSAGE*>(buffer.data());
+                if (SUCCEEDED(queue->GetMessage(i, message, &length)) &&
+                    message->Severity <= D3D11_MESSAGE_SEVERITY_WARNING) {
+                    ++diagnostics;
+                    std::fprintf(stderr, "D3D replay: %s\n", message->pDescription);
+                }
+            }
+            queue->Release();
+        }
+        stop.store(true);
+        producer.join();
+        callback->Release();
+    }
+    CloseHandle(ready);
+    allocator->Decommit(); allocator->Release();
+    DestroyWindow(hwnd);
+    CoUninitialize();
+    std::printf("Recreate replay: %u rebuild/present cycles, %u concurrent samples, %u occluded, %u GPU warnings/errors.\n",
+                frames, produced.load(), occluded, diagnostics);
+    return diagnostics ? 1 : 0;
+}
+
+int TestPresentationDebug() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    HWND hwnd = CreateWindowExW(0, L"STATIC", L"GPU debug validation",
+        WS_OVERLAPPEDWINDOW, 0, 0, 1280, 720, nullptr, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    Require(hwnd != nullptr, "create hidden diagnostic window");
+    g_settings.pixelPerfect = false;
+    unsigned warnings = 0, errors = 0;
+    std::set<int> printedMessages;
+    for (auto mode : {PresentationMode::AllowTearing, PresentationMode::VSync,
+                      PresentationMode::Compatibility}) {
+        for (auto format : {VideoPixelFormat::Nv12, VideoPixelFormat::Yuy2}) {
+            g_settings.presentationMode = mode;
+            DirectD3D11Renderer renderer;
+            const auto initialized = renderer.initialize(hwnd, 1920, 1080, 60, format);
+            if (FAILED(initialized)) {
+                std::printf("DEBUG init failed 0x%08lX; debug layer or hardware may be unavailable\n",
+                            static_cast<unsigned long>(initialized));
+                DestroyWindow(hwnd);
+                CoUninitialize();
+                return 2;
+            }
+            ID3D11InfoQueue* queue = nullptr;
+            Require(SUCCEEDED(renderer.device->QueryInterface(IID_PPV_ARGS(&queue))),
+                    "D3D11 debug info queue must be available");
+            const UINT stride = format == VideoPixelFormat::Yuy2 ? 3840 : 1920;
+            const size_t bytes = format == VideoPixelFormat::Yuy2
+                ? 1920 * 1080 * 2 : 1920 * 1080 * 3 / 2;
+            std::vector<BYTE> pixels(bytes, 128);
+            double total[4]{}, maximum[4]{};
+            unsigned occluded = 0;
+            for (unsigned frame = 0; frame < 120; ++frame) {
+                g_osdVisible.store((frame / 30) % 2 != 0);
+                // A hidden window would otherwise skip all work after the first
+                // OCCLUDED result. Force the processing call, NOT visibility,
+                // to validate repeated GPU writes and overlay transitions.
+                renderer.occluded = false;
+                renderer.occlusionLogged = true;
+                const auto start = std::chrono::steady_clock::now();
+                renderer.upload(pixels.data(), stride);
+                const double uploadUs = std::chrono::duration<double, std::micro>(
+                    std::chrono::steady_clock::now() - start).count();
+                const auto hr = renderer.presentUploaded();
+                if (hr == DXGI_STATUS_OCCLUDED) ++occluded;
+                Require(SUCCEEDED(hr), "debug frame processing must succeed");
+                const double durations[] = {uploadUs, renderer.diagnosticVideoUs,
+                    renderer.diagnosticOverlayUs, renderer.diagnosticPresentUs};
+                for (int i = 0; i < 4; ++i) {
+                    total[i] += durations[i];
+                    maximum[i] = (std::max)(maximum[i], durations[i]);
+                }
+            }
+            renderer.context->Flush();
+            const UINT64 count = queue->GetNumStoredMessagesAllowedByRetrievalFilter();
+            for (UINT64 i = 0; i < count; ++i) {
+                SIZE_T bytesNeeded = 0;
+                queue->GetMessage(i, nullptr, &bytesNeeded);
+                std::vector<BYTE> storage(bytesNeeded);
+                auto* message = reinterpret_cast<D3D11_MESSAGE*>(storage.data());
+                if (FAILED(queue->GetMessage(i, message, &bytesNeeded))) continue;
+                if (message->Severity > D3D11_MESSAGE_SEVERITY_WARNING) continue;
+                if (message->Severity == D3D11_MESSAGE_SEVERITY_WARNING) ++warnings;
+                else ++errors;
+                if (printedMessages.insert(static_cast<int>(message->ID)).second) {
+                    std::printf("D3D11 severity=%d id=%d: %s\n",
+                        static_cast<int>(message->Severity),
+                        static_cast<int>(message->ID), message->pDescription);
+                }
+            }
+            queue->Release();
+            std::printf("mode=%d format=%d frames=120 occluded=%u; CPU API duration avg/max us: "
+                        "upload %.1f/%.1f video %.1f/%.1f overlay %.1f/%.1f present %.1f/%.1f\n",
+                        static_cast<int>(mode), static_cast<int>(format), occluded,
+                        total[0]/120, maximum[0], total[1]/120, maximum[1],
+                        total[2]/120, maximum[2], total[3]/120, maximum[3]);
+        }
+    }
+    g_osdVisible.store(false);
+    DestroyWindow(hwnd);
+    CoUninitialize();
+    std::printf("D3D11 totals: errors=%u warnings=%u (hidden-window test, NOT display-link validation)\n",
+                errors, warnings);
+    return errors ? 1 : 0;
+}
+
+#include "VideoTransitionStress.inl"
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--transition-stress") return RunTransitionStress(false);
+    if (argc == 2 && std::string(argv[1]) == "--transition-faults") return RunTransitionStress(true);
+    if (argc == 2 && std::string(argv[1]) == "--presentation-debug") {
+        return TestPresentationDebug();
+    }
+    if (argc == 2 && std::string(argv[1]) == "--presentation-recreate") {
+        return TestPresentationRecreateReplay();
+    }
+    if (argc == 2 && std::string(argv[1]) == "--presentation-gpu") {
+        return TestPresentationGpu();
+    }
+    TestPresentationPolicy();
+    TestStartupWaitBoundary();
+    TestSettingsCapabilityRefresh();
     TestExclusiveScanResultLifetime();
     TestOutputTransitions();
     g_settings.driftCorrection = DriftCorrectionMode::Off;

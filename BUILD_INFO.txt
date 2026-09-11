@@ -1,4 +1,23 @@
-Low Latency Capture Viewer v1.2.6 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.7 x64 (continued from the v0.14.2 rework)
+
+v1.2.7 display transition and capture startup hardening
+-----------------------------------------------------
+- Adds a startup display-monitor selector and optional SDR Blt + VSync output.
+- Coalesces monitor/DPI/resize transitions and preserves manual resize intent.
+- Validates reported/negotiated capture layouts and distinguishes capability
+  query failures, first input arrival, and first presentation in diagnostics.
+- Splits settings view/control creation, translations, and transition state.
+- Existing audio processing and default presentation mode are retained.
+- Automated regression and local hidden-window GPU tests do not replace
+  long-session validation on each physical-device setup.
+
+v1.2.6.1-test optional Blt compatibility output
+---------------------------------------------
+- Adds opt-in SDR Blt-discard + VSync; existing Flip modes/default are unchanged.
+- No capture/audio pipeline changes. Extra presentation latency/load is possible.
+- Settings/OSD regressions and explicit hidden-window GPU smoke tests added.
+- This is a local test build, not a published release or a confirmed signal-loss fix.
+- See docs/TEST-BLT.ko.md for comparison instructions and limitations.
 
 v1.2.6 audio stability and lifecycle hardening release
 ----------------------------------------------------

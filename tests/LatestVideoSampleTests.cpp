@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <thread>
+#include <dvdmedia.h>
 
 static std::atomic<unsigned> liveSamples{0};
 static unsigned failures = 0;
@@ -17,6 +18,9 @@ public:
         : bytes_(bytes), sequence_(sequence) { ++liveSamples; }
     ULONG References() const { return refs_.load(); }
     unsigned Sequence() const { return sequence_; }
+    void GateSurfaceProbe(HANDLE entered, HANDLE resume) {
+        probeEntered_ = entered; probeResume_ = resume;
+    }
     void ObserveDestruction(void (*observer)(void*), void* context) {
         destructionObserver_ = observer;
         destructionContext_ = context;
@@ -24,6 +28,11 @@ public:
     STDMETHODIMP QueryInterface(REFIID iid, void** object) override {
         if (!object) return E_POINTER;
         *object = nullptr;
+        if (iid == __uuidof(IMediaSample2Config) && probeEntered_) {
+            SetEvent(probeEntered_);
+            if (WaitForSingleObject(probeResume_, 10000) != WAIT_OBJECT_0)
+                return E_FAIL;
+        }
         if (iid != IID_IUnknown && iid != IID_IMediaSample) return E_NOINTERFACE;
         *object = static_cast<IMediaSample*>(this); AddRef(); return S_OK;
     }
@@ -57,6 +66,7 @@ private:
     std::atomic<ULONG> refs_{1};
     long bytes_;
     const unsigned sequence_;
+    HANDLE probeEntered_ = nullptr, probeResume_ = nullptr;
     void (*destructionObserver_)(void*) = nullptr;
     void* destructionContext_ = nullptr;
 };
@@ -183,6 +193,77 @@ private:
     GraphLifetimeTrace& trace_;
 };
 
+static void TestDelayedFirstCallback() {
+    using namespace llcv::capture;
+    // A first frame delayed by the producer is still accepted. The callback
+    // no longer queries optional interfaces or logs before publishing it.
+    for (int iteration = 0; iteration < 100; ++iteration) {
+        HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        HANDLE entered = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        HANDLE resume = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        Check(ready && entered && resume, "create callback replay gates");
+        if (!ready || !entered || !resume) {
+            if (ready) CloseHandle(ready);
+            if (entered) CloseHandle(entered);
+            if (resume) CloseHandle(resume);
+            return;
+        }
+        {
+            LatestVideoSample slot(100, ready);
+            auto* callback = new VideoSampleGrabberCallback(&slot, Log);
+            auto* sample = new Sample(100);
+            const unsigned logsBefore = logged;
+            std::thread producer([&] {
+                SetEvent(entered);
+                WaitForSingleObject(resume, 10000);
+                callback->SampleCB(0, sample); sample->Release();
+            });
+            Check(WaitForSingleObject(entered, 5000) == WAIT_OBJECT_0,
+                  "producer is deliberately paused before first sample delivery");
+            // One wall-clock run exceeds the app's current 3-second deadline;
+            // other runs use gates, without real sleeps or timing assumptions.
+            Check(WaitForSingleObject(ready, iteration == 0 ? 3100 : 0) == WAIT_TIMEOUT,
+                  "consumer waits until delayed producer delivers input");
+            int64_t arrival = 0;
+            Check(slot.TakeLatest(arrival) == nullptr,
+                  "no frame is published before producer delivery");
+            SetEvent(resume);
+            producer.join();
+            Check(WaitForSingleObject(ready, 1000) == WAIT_OBJECT_0,
+                  "releasing producer pause publishes the frame");
+            auto* frame = slot.TakeLatest(arrival);
+            Check(frame != nullptr && logged == logsBefore,
+                  "callback publishes input without synchronous log I/O");
+            if (frame) frame->Release();
+            for (long bytes : {0L, 99L, 100L}) {
+                auto* next = new Sample(bytes);
+                callback->SampleCB(0, next); next->Release();
+                const auto wait = WaitForSingleObject(ready, 0);
+                frame = slot.TakeLatest(arrival);
+                Check((bytes == 100 ? wait == WAIT_OBJECT_0 && frame != nullptr
+                                    : wait == WAIT_TIMEOUT && frame == nullptr),
+                      "empty/short callbacks do not wake consumer; valid recovery does");
+                if (frame) frame->Release();
+            }
+            Check(logged == logsBefore && slot.RejectedSamples() == 2,
+                  "rejected inputs counted without logging on the callback thread");
+            ResetEvent(entered);
+            auto* guarded = new Sample(100);
+            guarded->GateSurfaceProbe(entered, resume);
+            callback->SampleCB(0, guarded); guarded->Release();
+            Check(WaitForSingleObject(entered, 0) == WAIT_TIMEOUT,
+                  "optional surface interface is never queried on input callback");
+            frame = slot.TakeLatest(arrival);
+            Check(frame != nullptr, "frame publishes without optional driver-interface probe");
+            if (frame) frame->Release();
+            callback->Release();
+        }
+        CloseHandle(ready); CloseHandle(entered); CloseHandle(resume);
+        Check(liveSamples == 0, "delayed callback replay leaves no retained samples");
+    }
+    std::puts("Callback replay: 100 delayed-input recoveries; no optional queries or callback log I/O.");
+}
+
 static void TestPartialRunTeardown(bool explicitReset) {
     using namespace llcv::capture;
     GraphLifetimeTrace trace;
@@ -211,7 +292,10 @@ static void TestPartialRunTeardown(bool explicitReset) {
           "explicit Reset and destructor teardown each release all resources exactly once");
 }
 
-int main() {
+#include "VideoMailboxStress.inl"
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--stress") return RunMailboxStress();
     using namespace llcv::capture;
     HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     Check(ready != nullptr, "create test frame event");
@@ -271,7 +355,7 @@ int main() {
             auto* sample = new Sample(17);
             callback->SampleCB(0, sample); sample->Release();
         }
-        Check(logged == 1, "surface capability probe logs only once");
+        Check(logged == 0, "capture callback performs no diagnostic log I/O");
         callback->Release();
     }
     Check(liveSamples == 0, "callback and slot release all retained samples");
@@ -339,5 +423,6 @@ int main() {
     CloseHandle(ready);
     TestPartialRunTeardown(true);
     TestPartialRunTeardown(false);
+    TestDelayedFirstCallback();
     return failures ? 1 : 0;
 }
