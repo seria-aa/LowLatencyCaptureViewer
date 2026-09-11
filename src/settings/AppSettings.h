@@ -33,9 +33,18 @@ enum class VideoPreset {
     R3840x2160,
 };
 
+struct VideoPresetInfo {
+    VideoPreset preset;
+    int width;
+    int height;
+    int framerate;
+    const wchar_t* label;
+};
+
 enum class PresentationMode {
     AllowTearing,
     VSync,
+    Compatibility,
 };
 
 enum class ScalingMode {
@@ -117,6 +126,8 @@ struct AppSettings {
     int windowX = 0;
     int windowY = 0;
     std::wstring monitorDevice;
+    // Explicit startup display; empty preserves the last-window-position policy.
+    std::wstring preferredDisplayMonitor;
 };
 
 }  // namespace llcv::settings

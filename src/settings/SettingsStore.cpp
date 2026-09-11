@@ -275,12 +275,12 @@ LoadResult LoadFromIni(const std::wstring& path) {
     }
     settings.videoFrameRate =
         std::max(0, ReadInt(path, L"Video", L"FrameRate"));
-    settings.presentationMode =
-        _wcsicmp(ReadString(path, L"Video", L"Presentation",
-                            L"AllowTearing").c_str(),
-                 L"VSync") == 0
-            ? PresentationMode::VSync
-            : PresentationMode::AllowTearing;
+    const auto presentation = ReadString(path, L"Video", L"Presentation",
+                                         L"AllowTearing");
+    settings.presentationMode = _wcsicmp(presentation.c_str(), L"Compatibility") == 0
+        ? PresentationMode::Compatibility
+        : _wcsicmp(presentation.c_str(), L"VSync") == 0
+            ? PresentationMode::VSync : PresentationMode::AllowTearing;
     settings.scalingMode =
         _wcsicmp(ReadString(path, L"Video", L"Scaling", L"Smooth").c_str(),
                  L"Sharp") == 0
@@ -303,6 +303,7 @@ LoadResult LoadFromIni(const std::wstring& path) {
             ? FullscreenCursorMode::AlwaysVisible
             : FullscreenCursorMode::AutoHide;
 
+    settings.preferredDisplayMonitor = ReadString(path, L"Video", L"DisplayMonitor");
     settings.windowSnap = ReadBool(path, L"Window", L"Snap", true);
     const std::wstring windowX = ReadString(path, L"Window", L"X");
     const std::wstring windowY = ReadString(path, L"Window", L"Y");
@@ -411,7 +412,9 @@ void SaveToIni(const std::wstring& path, const AppSettings& settings) {
                 PixelFormatSettingName(settings.pixelFormat));
     WriteInt(path, L"Video", L"FrameRate", settings.videoFrameRate);
     WriteString(path, L"Video", L"Presentation",
-                settings.presentationMode == PresentationMode::VSync
+                settings.presentationMode == PresentationMode::Compatibility
+                    ? L"Compatibility"
+                    : settings.presentationMode == PresentationMode::VSync
                     ? L"VSync" : L"AllowTearing");
     WriteString(path, L"Video", L"Scaling",
                 settings.scalingMode == ScalingMode::Sharp
@@ -431,6 +434,7 @@ void SaveToIni(const std::wstring& path, const AppSettings& settings) {
                         FullscreenCursorMode::AlwaysVisible
                     ? L"AlwaysVisible" : L"AutoHide");
 
+    WriteString(path, L"Video", L"DisplayMonitor", settings.preferredDisplayMonitor.c_str());
     WriteInt(path, L"Window", L"Snap", settings.windowSnap ? 1 : 0);
     WriteInt(path, L"Diagnostics", L"SaveLog", settings.saveLog ? 1 : 0);
     WriteInt(path, L"Diagnostics", L"ShowConsole",

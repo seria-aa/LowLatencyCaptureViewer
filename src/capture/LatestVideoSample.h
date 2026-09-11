@@ -31,6 +31,7 @@ public:
 
     void Push(IMediaSample* sample);
     IMediaSample* TakeLatest(int64_t& arrivalMicroseconds);
+    uint64_t RejectedSamples() const { return rejectedSamples_.load(std::memory_order_relaxed); }
 
 private:
     bool TrackingActive() const;
@@ -41,6 +42,8 @@ private:
     HANDLE readyEvent_ = nullptr;
     int64_t latestArrivalMicroseconds_ = 0;
     VideoSampleTelemetry telemetry_{};
+    // Updated only on invalid input, not on the normal per-frame path.
+    std::atomic<uint64_t> rejectedSamples_{0};
 };
 
 class VideoSampleGrabberCallback final : public ISampleGrabberCB {
@@ -57,9 +60,7 @@ public:
 
 private:
     std::atomic<ULONG> references_{1};
-    std::atomic<bool> surfaceCapabilityProbed_{false};
     LatestVideoSample* sampleSlot_ = nullptr;
-    diagnostics::LogSink log_ = nullptr;
 };
 
 }  // namespace llcv::capture

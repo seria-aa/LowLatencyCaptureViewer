@@ -152,6 +152,27 @@ void Run(const Scenario& test) {
 #include "SharedReplayExtended.inl"
 
 int main(int argc,char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "--additional-seeds") == 0) {
+        const int periods[]{128, 144, 192, 240, 384, 480};
+        for (uint32_t seed = 11; seed <= 22; ++seed) {
+            for (int period : {480, periods[seed % 6]}) {
+                ExtendedCase test{"additional-seed-clock-jitter"};
+                test.targetMs = 25; test.periodFrames = period;
+                test.seed = seed * 2654435761u;
+                test.jitterMs = seed % 2 ? 4 : 8;
+                test.clock = seed % 3 ? ClockProfile::Reverse300 : ClockProfile::Ramp300;
+                RunExtended(test, 180);
+            }
+        }
+        for (int period : {128, 240, 480}) for (bool discard : {false, true}) {
+            ExtendedCase test{"additional-combined-input-output-stall"};
+            test.targetMs = 25; test.periodFrames = period; test.seed = 20260911;
+            test.inputPauseMs = 40; test.outputPauseMs = 20; test.jitterMs = 8;
+            test.discard = discard; test.clock = ClockProfile::Reverse300;
+            RunExtended(test, 240);
+        }
+        return failures ? 1 : 0;
+    }
     if (argc > 1 && std::strcmp(argv[1], "--target25") == 0) {
         RunExtendedMatrix(argc > 2 && std::strcmp(argv[2], "--long") == 0, 25);
         return failures ? 1 : 0;

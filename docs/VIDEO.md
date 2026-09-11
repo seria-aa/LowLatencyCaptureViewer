@@ -5,7 +5,7 @@
 ## Capture path
 
 The viewer captures through DirectShow, keeps only the newest video sample, and
-presents it through the D3D11 Video Processor and a flip-discard swapchain with
+presents it through the D3D11 Video Processor and, by default, a flip-discard swapchain with
 maximum frame latency set to 1. Stale samples are discarded instead of being
 allowed to form a playback queue.
 
@@ -79,6 +79,15 @@ frame pacing or introduce occasional micro-stutter when the window moves between
 displays. Low-latency presentation avoids an extra VSync wait but cannot remove
 every DWM pacing difference. Compare Input FPS and Present FPS in the Tab overlay
 on the monitor that will actually be used.
+
+**Compatibility (Blt + VSync)** uses a different swapchain path from the two Flip
+modes above. It can add latency and GPU load and does not support HDR10 output.
+Capture and audio buffering remain unchanged.
+
+**Display monitor** chooses the startup location. Auto restores the last position;
+an explicit selection starts on that monitor, or the primary monitor if it is
+disconnected. The choice does not lock the window or GPU output route: you can
+still move the window and use F11 on its current monitor.
 
 ## Pixel-perfect and resizing
 
