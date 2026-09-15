@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 1.2.7 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 1.2.8 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,6 +32,7 @@ add_executable(LowLatencyCaptureViewer
     src/video/DirectShowVideoFormat.cpp
     src/video/MjpegDecoder.cpp
     src/video/VideoColor.cpp
+    src/video/HdrDisplay.cpp
 )
 
 target_include_directories(LowLatencyCaptureViewer PRIVATE
@@ -89,6 +90,11 @@ endif()
 
 include(CTest)
 if (BUILD_TESTING)
+    add_executable(HdrPolicyTests tests/HdrPolicyTests.cpp)
+    target_include_directories(HdrPolicyTests PRIVATE src)
+    target_compile_definitions(HdrPolicyTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    set_target_properties(HdrPolicyTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_test(NAME HdrPolicyTests COMMAND HdrPolicyTests)
     add_executable(OutputTransitionStateTests tests/OutputTransitionStateTests.cpp)
     target_include_directories(OutputTransitionStateTests PRIVATE src)
     set_target_properties(OutputTransitionStateTests PROPERTIES WIN32_EXECUTABLE FALSE)
@@ -140,6 +146,21 @@ if (BUILD_TESTING)
         target_compile_options(AudioCallbackTests PRIVATE /W4 /EHsc /permissive- /utf-8)
     endif()
     add_test(NAME AudioCallbackTests COMMAND AudioCallbackTests)
+
+    add_executable(HdrPipelineTests tests/HdrPipelineTests.cpp ${audio_callback_sources})
+    target_include_directories(HdrPipelineTests PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(HdrPipelineTests PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,COMPILE_DEFINITIONS>)
+    target_link_libraries(HdrPipelineTests PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,LINK_LIBRARIES>)
+    set_target_properties(HdrPipelineTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    if (MSVC)
+        target_compile_options(HdrPipelineTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+        target_compile_options(HdrPolicyTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    endif()
+    add_test(NAME HdrPipelineTests COMMAND HdrPipelineTests)
+    set_tests_properties(HdrPipelineTests PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77 LABELS GPU)
 
     add_executable(MonitorMoveTests tests/MonitorMoveTests.cpp
         ${audio_callback_sources} src/audio/AsioOutput.cpp)

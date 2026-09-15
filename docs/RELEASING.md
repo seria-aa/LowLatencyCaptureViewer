@@ -4,14 +4,14 @@
 
 Use this checklist to keep versioning, builds, packages, and GitHub releases
 consistent. Release work stays on the existing `agent/release-v1.0.0` branch.
-All executable examples below are for **v1.2.7**, using the compact build-folder
-name `build-v1270-release`. For another version, update the version, build
+All executable examples below are for **v1.2.8**, using the compact build-folder
+name `build-v1280-release`. For another version, update the version, build
 folder, and output paths together; do not substitute a dotted version into
 the build-folder name and leave the packaging defaults unchanged.
 
 ## 1. Versioning
 
-Use `v1.2.7` for the Git tag and app version label. Resource and installer
+Use `v1.2.8` for the Git tag and app version label. Resource and installer
 version fields use the numeric version without `v`. Keep these locations aligned:
 
 - `project(... VERSION ...)` in `CMakeLists.txt`
@@ -21,7 +21,7 @@ version fields use the numeric version without `v`. Keep these locations aligned
   `installer/LowLatencyCaptureViewer.iss`
 - default build/output paths in `tools/package-v1.ps1`
 - current-version headers in `BUILD_INFO.txt`, `DEPENDENCIES.txt`, and `실행안내.txt`
-- `docs/release-notes-v1.2.7.md`
+- `docs/release-notes-v1.2.8.md`
 
 Search for stale active version strings after editing. Historical release
 notes and changelog entries keep their original version numbers.
@@ -38,9 +38,9 @@ check the diff.
 
 ```powershell
 chcp.com 65001 > $null
-cmake -S . -B build-v1270-release -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-v1270-release
-ctest --test-dir build-v1270-release --output-on-failure
+cmake -S . -B build-v1280-release -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-v1280-release
+ctest --test-dir build-v1280-release --output-on-failure
 git diff --check
 ```
 
@@ -55,22 +55,22 @@ long-duration playback.
 Build exactly these two release assets:
 
 ```text
-LowLatencyCaptureViewer_v1.2.7_Setup.exe
-LowLatencyCaptureViewer_v1.2.7_x64.zip
+LowLatencyCaptureViewer_v1.2.8_Setup.exe
+LowLatencyCaptureViewer_v1.2.8_x64.zip
 ```
 
 ```powershell
 chcp.com 65001 > $null
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
-  -Version 1.2.7 -BuildDir ..\build-v1270-release -OutputDir ..\outputs\v1.2.7
+  -Version 1.2.8 -BuildDir ..\build-v1280-release -OutputDir ..\outputs\v1.2.8
 & "C:\Program Files\Inno Setup 7\ISCC.exe" `
-  "--define=BuildDir=..\build-v1270-release" ".\installer\LowLatencyCaptureViewer.iss"
+  "--define=BuildDir=..\build-v1280-release" ".\installer\LowLatencyCaptureViewer.iss"
 ```
 
 Do not ship `settings.ini`, `%LOCALAPPDATA%` logs, `build-*` directories, PDB
 files, ILK files, or test executables. Verify the executable inside the ZIP and
-the installer version before uploading: v1.2.7 uses a numeric file version of
-`1.2.7` or `1.2.7.0`, not the previous release's executable under a new ZIP name.
+the installer version before uploading: v1.2.8 uses a numeric file version of
+`1.2.8` or `1.2.8.0`, not the previous release's executable under a new ZIP name.
 
 Both packages must contain these ASIO notices at their top level:
 
@@ -84,7 +84,7 @@ and common accidental build/settings files.
 ```powershell
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $releaseArchive = [IO.Compression.ZipFile]::OpenRead(
-  (Resolve-Path '..\outputs\v1.2.7\LowLatencyCaptureViewer_v1.2.7_x64.zip').Path)
+  (Resolve-Path '..\outputs\v1.2.8\LowLatencyCaptureViewer_v1.2.8_x64.zip').Path)
 try {
   foreach ($required in @('LowLatencyCaptureViewer.exe', 'LICENSE',
       'ASIO-SDK-LICENSE.txt', 'ASIO-HOST-LICENSE.txt',
@@ -113,21 +113,21 @@ Review the worktree and stage only confirmed files before committing.
 ```powershell
 git status --short
 git diff --cached --check
-git commit -m "Prepare v1.2.7 release"
+git commit -m "Prepare v1.2.8 release"
 git push origin agent/release-v1.0.0
 ```
 
 Publish from the branch HEAD using the matching release-notes file. Add
-`--prerelease` only when a beta is intended; **v1.2.7 is a regular release**.
+`--prerelease` only when a beta is intended; **v1.2.8 is a regular release**.
 
 ```powershell
-gh release create v1.2.7 `
-  "..\outputs\v1.2.7\LowLatencyCaptureViewer_v1.2.7_Setup.exe" `
-  "..\outputs\v1.2.7\LowLatencyCaptureViewer_v1.2.7_x64.zip" `
+gh release create v1.2.8 `
+  "..\outputs\v1.2.8\LowLatencyCaptureViewer_v1.2.8_Setup.exe" `
+  "..\outputs\v1.2.8\LowLatencyCaptureViewer_v1.2.8_x64.zip" `
   --repo seria-aa/LowLatencyCaptureViewer `
   --target agent/release-v1.0.0 `
-  --title "Low Latency Capture Viewer v1.2.7" `
-  --notes-file ".\docs\release-notes-v1.2.7.md"
+  --title "Low Latency Capture Viewer v1.2.8" `
+  --notes-file ".\docs\release-notes-v1.2.8.md"
 ```
 
 Never overwrite published tags or assets. Fix a published-release issue in the
