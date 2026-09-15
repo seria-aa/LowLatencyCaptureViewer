@@ -89,6 +89,33 @@ an explicit selection starts on that monitor, or the primary monitor if it is
 disconnected. The choice does not lock the window or GPU output route: you can
 still move the window and use F11 on its current monitor.
 
+## P010 HDR10 (experimental)
+
+HDR viewing requires **Windows HDR on the monitor displaying the app**, not just
+an HDR capture source or passthrough display. Tab distinguishes the app's PQ
+output from the current display's HDR state. If it reports SDR or unconfirmed
+HDR, check Windows and monitor settings first. Display moves and HDR setting
+changes are checked periodically.
+
+- The supported path is **P010 / BT.2020 / PQ / Limited → Flip HDR10**.
+  Input chroma location selects left or top-left sampling.
+- Final connected color metadata takes priority. When PQ is known but some
+  fields are missing, HDR10 defaults are used and logged as assumptions.
+- Use **Force HDR10** only for confirmed PQ/BT.2020 input whose metadata is
+  missing or incorrect. It does not convert SDR into HDR.
+- HLG, Full-range HDR, and Blt HDR are unsupported, not silently reinterpreted
+  as SDR. P010 with completely absent color metadata retains the SDR assumption;
+  for an HDR source, check the force option or device settings.
+- Video PQ values are preserved without inventing mastering or peak-light
+  metadata. The app does not provide its own HDR-to-SDR tone mapper.
+- HDR overlays use linear-light composition with Windows' SDR UI white level,
+  or a 203-nit reference when that query is unavailable. This does not adjust
+  the video's brightness.
+
+Capture-device processing and display tone mapping may still differ from
+passthrough. Final luminance/color validation on actual HDR hardware remains
+necessary; these changes do not guarantee an exact match on every device.
+
 ## Pixel-perfect and resizing
 
 With **Pixel-perfect** enabled, the client area is fixed to the selected capture

@@ -1,4 +1,12 @@
-Low Latency Capture Viewer v1.2.7 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.8 x64 (continued from the v0.14.2 rework)
+
+v1.2.8 HDR10 refinement
+----------------------
+- Refines connected P010 HDR10 color metadata and GPU conversion validation.
+- Composites HDR overlays in linear light using the Windows SDR white level.
+- Adds display HDR-state diagnostics and automated color/compositing tests.
+- Audio processing and defaults remain unchanged; no new video frame queue.
+- P010 HDR10 remains experimental. Physical HDR visual validation was not performed.
 
 v1.2.7 display transition and capture startup hardening
 -----------------------------------------------------

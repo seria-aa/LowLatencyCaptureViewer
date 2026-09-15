@@ -68,6 +68,9 @@
 #include "video/DirectShowVideoFormat.h"
 #include "video/MjpegDecoder.h"
 #include "video/VideoColor.h"
+#include "video/HdrPolicy.h"
+#include "video/HdrOverlay.h"
+#include "video/HdrDisplay.h"
 
 #include <atomic>
 #include <chrono>
@@ -100,7 +103,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.2.7";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.8";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -289,6 +292,11 @@ static std::wstring g_activeAudioOutputName = L"Windows 기본 장치";
 static std::atomic<int> g_activePixelFormat{
     static_cast<int>(VideoPixelFormat::Nv12)};
 static std::atomic<bool> g_hdrOutputActive{false};
+static std::atomic<int> g_hdrDisplayState{-1};
+static std::atomic<float> g_hdrUiWhiteNits{203.0f};
+static std::atomic<const wchar_t*> g_hdrFailureDetail{nullptr};
+
+static void RefreshHdrDisplayStatus(HWND hwnd);
 static std::atomic<int> g_activeVideoColorMatrix{
     static_cast<int>(llcv::video_color::Matrix::Bt709)};
 static std::atomic<int> g_activeVideoColorRange{
@@ -332,6 +340,21 @@ static int TeeFwprintf(FILE* stream, const wchar_t* format, ...) {
 }
 
 #define fwprintf TeeFwprintf
+
+static void RefreshHdrDisplayStatus(HWND hwnd) {
+    const auto state = llcv::hdr::QueryDisplay(hwnd);
+    const int previous = g_hdrDisplayState.exchange(state.hdr);
+    const float previousWhite = g_hdrUiWhiteNits.exchange(state.uiWhiteNits);
+    if (previous != state.hdr || previousWhite != state.uiWhiteNits) {
+        fwprintf(stderr, L"[hdr] display=%s state=%s bits=%u UI-white=%.1f nits (%s); "
+                         L"PQ video luminance unchanged.\n",
+                 state.name, state.hdr == 1 ? L"HDR" : state.hdr == 0 ? L"SDR" : L"unknown",
+                 state.bits, state.uiWhiteNits, state.systemWhite ? L"Windows" : L"reference fallback");
+        if (state.hdr != 1)
+            fwprintf(stderr, L"[hdr] HDR display not confirmed. Enable Windows HDR on the viewing monitor; "
+                             L"PQ swapchain support alone does not confirm HDR display or passthrough brightness.\n");
+    }
+}
 
 static const wchar_t* PixelFormatName(VideoPixelFormat format) {
     return llcv::video::PixelFormatName(format);
@@ -1816,6 +1839,9 @@ struct DirectD3D11Renderer {
     ID3D11Buffer* overlayRectBuffer = nullptr;
     ID3D11SamplerState* overlaySampler = nullptr;
     ID3D11BlendState* overlayBlendState = nullptr;
+    ID3D11Texture2D* hdrOverlayBackground = nullptr;
+    ID3D11ShaderResourceView* hdrOverlayBackgroundView = nullptr;
+    ID3D11Buffer* hdrOverlayConstants = nullptr;
     IDWriteFactory* dwriteFactory = nullptr;
     IDWriteTextFormat* osdTextFormat = nullptr;
     IDWriteTextFormat* volumeTextFormat = nullptr;
@@ -1838,6 +1864,7 @@ struct DirectD3D11Renderer {
     uint64_t nextOcclusionTestMs = 0;
     DXGI_FORMAT inputFormat = DXGI_FORMAT_NV12;
     bool hdrOutput = false;
+    DXGI_COLOR_SPACE_TYPE hdrInputColorSpace = DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020;
 #ifdef LLCV_GPU_DIAGNOSTICS
     double diagnosticVideoUs = 0;
     double diagnosticOverlayUs = 0;
@@ -1851,6 +1878,9 @@ struct DirectD3D11Renderer {
             context->Flush();
         }
         SafeRelease(overlayBlendState);
+        SafeRelease(hdrOverlayBackgroundView);
+        SafeRelease(hdrOverlayBackground);
+        SafeRelease(hdrOverlayConstants);
         SafeRelease(overlaySampler);
         SafeRelease(overlayRectBuffer);
         SafeRelease(overlayPixelShader);
@@ -1919,6 +1949,7 @@ struct DirectD3D11Renderer {
         hdrOutput = false;
         sdrColor = {};
         g_hdrOutputActive.store(false, std::memory_order_release);
+        g_hdrDisplayState.store(-1, std::memory_order_release);
     }
 
     ~DirectD3D11Renderer() {
@@ -1937,8 +1968,10 @@ struct DirectD3D11Renderer {
     HRESULT initialize(HWND hwnd, int width, int height, int fps,
                        VideoPixelFormat pixelFormat,
                        bool hdrInputMetadataAvailable = false,
-                       llcv::video_color::Configuration color = {}) {
+                       llcv::video_color::Configuration color = {},
+                       DXGI_COLOR_SPACE_TYPE hdrColorSpace = DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020) {
         reset();
+        hdrInputColorSpace = hdrColorSpace;
         if (llcv::presentation::IsCompatibility(g_settings.presentationMode) &&
             pixelFormat == VideoPixelFormat::P010 && hdrInputMetadataAvailable) {
             fwprintf(stderr, L"[video] HDR10 is not supported by Blt compatibility output; "
@@ -1995,8 +2028,7 @@ struct DirectD3D11Renderer {
             hdrOutput = true;
         } else if (pixelFormat == VideoPixelFormat::P010) {
             fwprintf(stderr,
-                     L"[hdr] P010 color metadata unavailable; using "
-                     L"BT.709 SDR output to avoid forced HDR color conversion.\n");
+                     L"[hdr] P010 SDR renderer selected; this is not HDR-to-SDR tone mapping.\n");
         }
 
         IDXGIDevice* dxgiDevice = nullptr;
@@ -2053,6 +2085,13 @@ struct DirectD3D11Renderer {
             IDXGISwapChain3* swapChain3 = nullptr;
             hr = swapChain->QueryInterface(IID_PPV_ARGS(&swapChain3));
             if (SUCCEEDED(hr)) {
+                UINT support = 0;
+                hr = swapChain3->CheckColorSpaceSupport(
+                    DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support);
+                if (SUCCEEDED(hr) && !(support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT))
+                    hr = DXGI_ERROR_UNSUPPORTED;
+            }
+            if (SUCCEEDED(hr)) {
                 hr = swapChain3->SetColorSpace1(
                     DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
             }
@@ -2066,27 +2105,18 @@ struct DirectD3D11Renderer {
             }
             IDXGISwapChain4* swapChain4 = nullptr;
             if (SUCCEEDED(swapChain->QueryInterface(IID_PPV_ARGS(&swapChain4)))) {
-                DXGI_HDR_METADATA_HDR10 metadata{};
-                metadata.RedPrimary[0] = 34000;
-                metadata.RedPrimary[1] = 16000;
-                metadata.GreenPrimary[0] = 13250;
-                metadata.GreenPrimary[1] = 34500;
-                metadata.BluePrimary[0] = 7500;
-                metadata.BluePrimary[1] = 3000;
-                metadata.WhitePoint[0] = 15635;
-                metadata.WhitePoint[1] = 16450;
-                metadata.MaxMasteringLuminance = 10000000;
-                metadata.MinMasteringLuminance = 1;
-                metadata.MaxContentLightLevel = 1000;
-                metadata.MaxFrameAverageLightLevel = 400;
-                swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10,
-                                            sizeof(metadata), &metadata);
+                // DirectShow extended color flags do not contain mastering
+                // luminance/primaries or MaxCLL/MaxFALL. Do not invent them.
+                const HRESULT metadataHr = swapChain4->SetHDRMetaData(
+                    DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
+                fwprintf(stderr, L"[hdr] original mastering metadata unavailable; no synthetic metadata sent (0x%08X).\n",
+                         static_cast<unsigned>(metadataHr));
                 SafeRelease(swapChain4);
             }
             fwprintf(stderr,
-                     L"[hdr] experimental HDR10 output active: P010 -> "
+                     L"[hdr] HDR10 swapchain configured: P010 -> "
                      L"BT.2020 PQ 10-bit swap chain; no frame queue.\n");
-            g_hdrOutputActive.store(true, std::memory_order_release);
+            RefreshHdrDisplayStatus(hwnd);
         }
 
         IDXGISwapChain2* swapChain2 = nullptr;
@@ -2138,6 +2168,21 @@ struct DirectD3D11Renderer {
         }
         hr = videoDevice->CreateVideoProcessor(enumerator, 0, &processor);
         if (FAILED(hr)) return hr;
+        if (hdrOutput) {
+            ID3D11VideoProcessorEnumerator1* enumerator1 = nullptr;
+            hr = enumerator->QueryInterface(IID_PPV_ARGS(&enumerator1));
+            BOOL supported = FALSE;
+            if (SUCCEEDED(hr)) hr = enumerator1->CheckVideoProcessorFormatConversion(
+                inputFormat, hdrInputColorSpace, swapDesc.Format,
+                DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &supported);
+            SafeRelease(enumerator1);
+            if (FAILED(hr) || !supported) {
+                fwprintf(stderr, L"[hdr] exact P010/PQ -> RGB10/PQ conversion unsupported (input color space %u, 0x%08X).\n",
+                         static_cast<unsigned>(hdrInputColorSpace), static_cast<unsigned>(hr));
+                return FAILED(hr) ? hr : DXGI_ERROR_UNSUPPORTED;
+            }
+            videoContext->VideoProcessorSetStreamAutoProcessingMode(processor, 0, FALSE);
+        }
         if (g_settings.scalingMode == ScalingMode::Sharp &&
             !g_settings.pixelPerfect) {
             D3D11_VIDEO_PROCESSOR_FILTER_RANGE sharpness{};
@@ -2239,11 +2284,15 @@ struct DirectD3D11Renderer {
                         &shaderErrors);
         SafeRelease(shaderErrors);
         if (SUCCEEDED(hr)) {
-            hr = D3DCompile(overlayPixelSource,
-                            sizeof(overlayPixelSource) - 1, nullptr, nullptr,
+            const char* pixelSource = hdrOutput ? llcv::hdr::kOverlayShader : overlayPixelSource;
+            hr = D3DCompile(pixelSource,
+                            strlen(pixelSource), nullptr, nullptr,
                             nullptr, "main", "ps_4_0", 0, 0, &pixelBlob,
                             &shaderErrors);
         }
+        if (FAILED(hr) && shaderErrors)
+            fwprintf(stderr, L"[video] overlay shader compile failed: %hs\n",
+                     static_cast<const char*>(shaderErrors->GetBufferPointer()));
         SafeRelease(shaderErrors);
         if (SUCCEEDED(hr)) {
             hr = device->CreateVertexShader(
@@ -2266,6 +2315,10 @@ struct DirectD3D11Renderer {
         hr = device->CreateBuffer(&constantBufferDesc, nullptr,
                                   &overlayRectBuffer);
         if (FAILED(hr)) return hr;
+        if (hdrOutput) {
+            hr = device->CreateBuffer(&constantBufferDesc, nullptr, &hdrOverlayConstants);
+            if (FAILED(hr)) return hr;
+        }
         D3D11_SAMPLER_DESC samplerDesc{};
         samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -2275,7 +2328,7 @@ struct DirectD3D11Renderer {
         hr = device->CreateSamplerState(&samplerDesc, &overlaySampler);
         if (FAILED(hr)) return hr;
         D3D11_BLEND_DESC blendDesc{};
-        blendDesc.RenderTarget[0].BlendEnable = TRUE;
+        blendDesc.RenderTarget[0].BlendEnable = hdrOutput ? FALSE : TRUE;
         blendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
         blendDesc.RenderTarget[0].DestBlend =
             D3D11_BLEND_INV_SRC_ALPHA;
@@ -2376,7 +2429,7 @@ struct DirectD3D11Renderer {
         }
         if (SUCCEEDED(hr)) {
             hr = audioCacheTarget->CreateSolidColorBrush(
-                D2D1::ColorF(0.055f, 0.063f, 0.078f, 0.92f),
+                D2D1::ColorF(0.055f, 0.063f, 0.078f, hdrOutput ? 0.90f : 0.92f),
                 &audioCacheBackgroundBrush);
         }
         if (SUCCEEDED(hr)) {
@@ -2485,11 +2538,10 @@ struct DirectD3D11Renderer {
         videoContext->VideoProcessorSetOutputTargetRect(processor, TRUE,
                                                         &outputRect);
         if (hdrOutput) {
-            // P010 HDR10 prototype: use the explicit DXGI color-space APIs
-            // instead of the legacy BT.709-only bitfield. This path is only
-            // selected when the user explicitly chooses P010.
+            // Preserve PQ video values; use the validated range/chroma tuple
+            // instead of the legacy SDR color-space bitfield.
             videoContext1->VideoProcessorSetStreamColorSpace1(
-                processor, 0, DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020);
+                processor, 0, hdrInputColorSpace);
             videoContext1->VideoProcessorSetOutputColorSpace1(
                 processor, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
         } else {
@@ -2503,6 +2555,7 @@ struct DirectD3D11Renderer {
             videoContext->VideoProcessorSetStreamColorSpace(processor, 0,
                                                             &inputColor);
         }
+        g_hdrOutputActive.store(hdrOutput, std::memory_order_release);
         return S_OK;
     }
 
@@ -2693,6 +2746,45 @@ struct DirectD3D11Renderer {
         return hr;
     }
 
+    HRESULT prepareHdrOverlay(LONG left, LONG top, LONG right, LONG bottom) {
+        const LONG x = (std::max)(0L, left), y = (std::max)(0L, top);
+        const LONG r = (std::min)(static_cast<LONG>(outputWidth), right);
+        const LONG b = (std::min)(static_cast<LONG>(outputHeight), bottom);
+        if (r <= x || b <= y) return S_FALSE;
+        if (r - x > static_cast<LONG>(kOsdOverlayWidth) ||
+            b - y > static_cast<LONG>(kOsdOverlayHeight)) return E_INVALIDARG;
+        if (!hdrOverlayBackground) {
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = kOsdOverlayWidth;
+            desc.Height = kOsdOverlayHeight;
+            desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+            desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            HRESULT hr = device->CreateTexture2D(&desc, nullptr, &hdrOverlayBackground);
+            if (FAILED(hr)) return hr;
+        }
+        if (!hdrOverlayBackgroundView) {
+            const HRESULT hr = device->CreateShaderResourceView(
+                hdrOverlayBackground, nullptr, &hdrOverlayBackgroundView);
+            if (FAILED(hr)) return hr;
+        }
+        // Copy just this panel, including any earlier overlapping overlay.
+        // Unbind before copying to avoid RTV/SRV hazards. No full-frame copy.
+        ID3D11ShaderResourceView* empty = nullptr;
+        context->PSSetShaderResources(1, 1, &empty);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        const D3D11_BOX box{static_cast<UINT>(x), static_cast<UINT>(y), 0,
+                            static_cast<UINT>(r), static_cast<UINT>(b), 1};
+        context->CopySubresourceRegion(hdrOverlayBackground, 0, 0, 0, 0, backBuffer, 0, &box);
+        context->OMSetRenderTargets(1, &backBufferRenderTarget, nullptr);
+        const float values[]{static_cast<float>(x), static_cast<float>(y),
+            g_hdrUiWhiteNits.load(std::memory_order_relaxed), 0.0f};
+        context->UpdateSubresource(hdrOverlayConstants, 0, nullptr, values, 0, 0);
+        context->PSSetConstantBuffers(0, 1, &hdrOverlayConstants);
+        context->PSSetShaderResources(1, 1, &hdrOverlayBackgroundView);
+        return S_OK;
+    }
+
     HRESULT drawOverlayQuads() {
         const bool osdVisible =
             g_osdVisible.load(std::memory_order_acquire);
@@ -2722,6 +2814,11 @@ struct DirectD3D11Renderer {
 
         auto draw = [&](ID3D11ShaderResourceView* texture,
                         LONG left, LONG top, LONG right, LONG bottom) {
+            if (FAILED(hr)) return;
+            if (hdrOutput) {
+                hr = prepareHdrOverlay(left, top, right, bottom);
+                if (hr != S_OK) return;
+            }
             const float rectangle[4]{
                 -1.0f + 2.0f * left / outputWidth,
                 1.0f - 2.0f * top / outputHeight,
@@ -2780,9 +2877,10 @@ struct DirectD3D11Renderer {
             draw(audioOverlayShaderView, rect.left, rect.top,
                  rect.right, rect.bottom);
         }
-        ID3D11ShaderResourceView* noTexture = nullptr;
-        context->PSSetShaderResources(0, 1, &noTexture);
+        ID3D11ShaderResourceView* noTextures[2]{};
+        context->PSSetShaderResources(0, hdrOutput ? 2 : 1, noTextures);
         context->OMSetBlendState(nullptr, nullptr, 0xffffffffu);
+        if (FAILED(hr)) return hr;
         g_overlayRenderedFrames.fetch_add(1,
                                           std::memory_order_relaxed);
         return S_OK;
@@ -3045,6 +3143,7 @@ static HRESULT ValidateCaptureLayout(const wchar_t* stage, const AM_MEDIA_TYPE* 
 
 static bool UnifiedCaptureRenderLoop(HWND host) {
     const auto& preset = CurrentVideoPreset();
+    g_hdrFailureDetail.store(nullptr, std::memory_order_release);
     g_captureFailureHr.store(S_OK, std::memory_order_release);
     g_captureAudioAvailable.store(false, std::memory_order_release);
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -3159,26 +3258,11 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                 directShowColorMetadataDetected = true;
             }
         }
-        const bool hdrInputMetadataDetected =
-            configuredFormat == VideoPixelFormat::P010 &&
-            directShowColorMetadataDetected && directShowColorInfo.hdr10();
-        bool hdrInputMetadataAvailable = hdrInputMetadataDetected;
+        bool hdrInputMetadataAvailable = false;
+        DXGI_COLOR_SPACE_TYPE hdrColorSpace = DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020;
         if (configuredFormat == VideoPixelFormat::P010) {
             LogDirectShowColorMetadata(L"P010 selected format",
                                        directShowColorInfo);
-            if (g_settings.forceHdr10) {
-                hdrInputMetadataAvailable = true;
-                fwprintf(stderr,
-                         L"[hdr] P010 HDR10 output forced by user; DirectShow "
-                         L"metadata: %s.\n",
-                         hdrInputMetadataDetected ? L"available"
-                                                   : L"unavailable");
-            } else {
-                fwprintf(stderr,
-                         L"[hdr] P010 prototype selected; HDR10 metadata: %s.\n",
-                         hdrInputMetadataDetected ? L"available"
-                                                   : L"unavailable");
-            }
         }
         if (compressedVideo) {
             LogDirectShowColorMetadata(L"MJPEG selected format",
@@ -3201,9 +3285,12 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             sdrColor = compressedDecoder.colorConfiguration();
         }
         initializationStage = L"initialize D3D11 video renderer";
-        hr = renderer.initialize(host, preset.width, preset.height,
-                                 configuredFps, rendererInputFormat,
-                                 hdrInputMetadataAvailable, sdrColor);
+        // P010 color is decided from the final connected type below. Do not
+        // create a speculative HDR/SDR swapchain before negotiation completes.
+        if (configuredFormat != VideoPixelFormat::P010)
+            hr = renderer.initialize(host, preset.width, preset.height,
+                                     configuredFps, rendererInputFormat,
+                                     hdrInputMetadataAvailable, sdrColor, hdrColorSpace);
         if (FAILED(hr)) {
             LogHr(L"DirectD3D11Renderer::initialize", hr);
             break;
@@ -3266,17 +3353,8 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                     connectedColorDetected) {
                     LogDirectShowColorMetadata(L"P010 connected media type",
                                                connectedColorInfo);
-                    if (!hdrInputMetadataAvailable &&
-                        connectedColorInfo.hdr10()) {
-                        hdrInputMetadataAvailable = true;
-                        hr = renderer.initialize(
-                            host, preset.width, preset.height, configuredFps,
-                            rendererInputFormat, true);
-                        if (FAILED(hr)) {
-                            LogHr(L"DirectD3D11Renderer::initialize(HDR metadata)",
-                                  hr);
-                        }
-                    }
+                    directShowColorInfo = llcv::hdr::ConnectedMetadata(
+                        directShowColorInfo, connectedColorInfo);
                 }
                 if (SUCCEEDED(hr) && compressedVideo) {
                     DirectShowColorMetadata effectiveColorInfo =
@@ -3306,7 +3384,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                             hr = renderer.initialize(
                                 host, preset.width, preset.height,
                                 configuredFps, rendererInputFormat,
-                                hdrInputMetadataAvailable, sdrColor);
+                                hdrInputMetadataAvailable, sdrColor, hdrColorSpace);
                         }
                     }
                     if (FAILED(hr)) {
@@ -3326,11 +3404,32 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         const int previousFps = configuredFps;
         if (SUCCEEDED(hr)) hr = ValidateCaptureLayout(L"connected", &connectedLayout,
             preset.width, preset.height, configuredFormat, imageBytes, stride, configuredFps);
+        if (SUCCEEDED(hr) && configuredFormat == VideoPixelFormat::P010) {
+            DirectShowColorMetadata finalColor{};
+            if (ExtractVideoColorMetadata(&connectedLayout, finalColor))
+                directShowColorInfo = llcv::hdr::ConnectedMetadata(directShowColorInfo, finalColor);
+        }
         FreeMediaType(connectedLayout);
         if (FAILED(hr)) break;
-        if (configuredFps != previousFps) {
+        if (configuredFormat == VideoPixelFormat::P010) {
+            initializationStage = L"validate connected P010 color / HDR10 conversion";
+            const auto input = llcv::hdr::ResolveInput(directShowColorInfo, g_settings.forceHdr10);
+            LogDirectShowColorMetadata(L"P010 effective metadata", directShowColorInfo);
+            fwprintf(stderr, L"[hdr] input decision: %s\n", input.reason);
+            if (input.kind == llcv::hdr::InputKind::Unsupported) {
+                g_hdrFailureDetail.store(input.reason, std::memory_order_release);
+                hr = DXGI_ERROR_UNSUPPORTED;
+                break;
+            }
+            hdrInputMetadataAvailable = input.kind == llcv::hdr::InputKind::Hdr10;
+            hdrColorSpace = input.colorSpace;
+            if (!hdrInputMetadataAvailable)
+                sdrColor = llcv::video_color::Resolve(false, preset.width, preset.height, {},
+                    {directShowColorInfo.transferMatrix, directShowColorInfo.nominalRange});
+        }
+        if (configuredFps != previousFps || configuredFormat == VideoPixelFormat::P010) {
             hr = renderer.initialize(host, preset.width, preset.height, configuredFps,
-                                     rendererInputFormat, hdrInputMetadataAvailable, sdrColor);
+                                     rendererInputFormat, hdrInputMetadataAvailable, sdrColor, hdrColorSpace);
             if (FAILED(hr)) break;
         }
         g_videoConfiguredFps.store(configuredFps, std::memory_order_release);
@@ -3482,7 +3581,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                 if (retryDelaysMs[attempt]) Sleep(retryDelaysMs[attempt]);
                 const HRESULT recoveryHr = renderer.initialize(
                     host, preset.width, preset.height, configuredFps,
-                    rendererInputFormat, hdrInputMetadataAvailable, sdrColor);
+                    rendererInputFormat, hdrInputMetadataAvailable, sdrColor, hdrColorSpace);
                 if (SUCCEEDED(recoveryHr)) {
                     const bool recoveredTearing = renderer.allowTearing &&
                         g_settings.presentationMode ==
@@ -3543,7 +3642,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                 hr = renderer.initialize(host, preset.width, preset.height,
                                          configuredFps,
                                          rendererInputFormat,
-                                         hdrInputMetadataAvailable, sdrColor);
+                                         hdrInputMetadataAvailable, sdrColor, hdrColorSpace);
                 if (FAILED(hr)) {
                     if (recoverRenderer(L"D3D11 output resize", hr)) {
                         hr = S_OK;
@@ -3571,7 +3670,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                         hr = renderer.initialize(
                             host, preset.width, preset.height, configuredFps,
                             rendererInputFormat, hdrInputMetadataAvailable,
-                            sdrColor);
+                            sdrColor, hdrColorSpace);
                     }
                 }
                 if (SUCCEEDED(hr) && decodedBuffer) {
@@ -6192,8 +6291,13 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
             llcv::video_color::CompactSourceName(activeColorMatrixSource,
                                                   activeColorRangeSource));
     }
+    const int hdrDisplay = g_hdrDisplayState.load(std::memory_order_acquire);
     const wchar_t* qualityText = hdrVideo
-        ? L"BT.2020 · PQ · HDR10 prototype"
+        ? (hdrDisplay == 1 ? L"BT.2020 · PQ · HDR10 · Display HDR"
+           : hdrDisplay == 0 ? (IsEnglishUi() ? L"BT.2020 · PQ · Display SDR (enable Windows HDR)"
+                                             : L"BT.2020 · PQ · 화면 SDR (Windows HDR 켜기)")
+                             : (IsEnglishUi() ? L"BT.2020 · PQ · Display HDR unconfirmed"
+                                              : L"BT.2020 · PQ · 화면 HDR 확인 불가"))
         : p010Video
         ? L"P010 · HDR output unavailable"
         : compressedVideo
@@ -6805,6 +6909,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         if (wParam == 1) {
+            // All display enumeration stays off the capture/render thread.
+            // Also catches HDR/SDR white changes for which no resize is sent.
+            static ULONGLONG nextHdrDisplayCheck = 0;
+            const ULONGLONG now = GetTickCount64();
+            if (g_hdrOutputActive.load(std::memory_order_acquire) && now >= nextHdrDisplayCheck) {
+                nextHdrDisplayCheck = now + 2000;
+                RefreshHdrDisplayStatus(hwnd);
+            }
             FlushSharedDiagnostics();
             UpdateOsdRates();
             g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
@@ -7477,7 +7589,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                     failureFormat,
                     static_cast<unsigned int>(failure),
                     failureText.c_str(), PixelFormatName(g_settings.pixelFormat));
-                if (failure == HRESULT_FROM_WIN32(ERROR_TIMEOUT)) {
+                if (failure == DXGI_ERROR_UNSUPPORTED &&
+                    static_cast<VideoPixelFormat>(g_activePixelFormat.load()) == VideoPixelFormat::P010) {
+                    const wchar_t* detail = g_hdrFailureDetail.load(std::memory_order_acquire);
+                    swprintf_s(message, IsEnglishUi()
+                        ? L"P010/HDR10 output is not supported by the current input or output path.\n\n%s\n\nHDR10 requires PQ / BT.2020 / Limited input and a supported Flip output conversion. HLG, Full-range HDR and Blt HDR are not supported. Enable Windows HDR on the viewing monitor. Attach the diagnostic log to report this issue."
+                        : L"현재 입력 형식 또는 출력 경로에서 P010/HDR10을 지원하지 않습니다.\n\n%s\n\nHDR10은 PQ / BT.2020 / Limited 입력과 변환을 지원하는 Flip 출력이 필요합니다. HLG, Full-range HDR, Blt HDR은 지원하지 않습니다. 표시할 모니터의 Windows HDR을 켜고, 문제가 계속되면 진단 로그를 첨부해 주세요.",
+                        detail ? detail : (IsEnglishUi() ? L"Check the HDR conversion stage in the diagnostic log."
+                                                        : L"진단 로그의 HDR 변환 단계에서 상세 원인을 확인할 수 있습니다."));
+                } else if (failure == HRESULT_FROM_WIN32(ERROR_TIMEOUT)) {
                     swprintf_s(message, IsEnglishUi()
                         ? L"Capture startup timed out.\n\nError: 0x%08X\n\nCheck that the HDMI source is on and close other capture applications, then retry. The diagnostic log identifies the failed stage and rejected input samples. This does not by itself mean the selected display mode is unsupported."
                         : L"캡처 시작 대기 시간이 초과되었습니다.\n\n오류: 0x%08X\n\nHDMI 입력 기기가 켜져 있는지 확인하고 다른 캡처 앱을 종료한 뒤 다시 시도하세요. 진단 로그에서 실패 단계와 거부된 입력 샘플 수를 확인할 수 있습니다. 이 오류만으로 화면 출력 방식이 미지원이라는 뜻은 아닙니다.",
