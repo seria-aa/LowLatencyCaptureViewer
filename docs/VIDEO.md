@@ -103,6 +103,12 @@ changes are checked periodically.
   fields are missing, HDR10 defaults are used and logged as assumptions.
 - Use **Force HDR10** only for confirmed PQ/BT.2020 input whose metadata is
   missing or incorrect. It does not convert SDR into HDR.
+- **HDR chroma placement** appears below Force HDR10 when P010 is selected.
+  Leave it on **Auto (recommended)** normally. **Top-left** and **Left** are
+  manual compatibility interpretations for missing or incorrect placement
+  metadata. Compare fine colored edges and text with a reference; opening the
+  video does not by itself establish correct placement. These choices do not
+  reconstruct staggered chroma planes or change HDR range validation.
 - HLG, Full-range HDR, and Blt HDR are unsupported, not silently reinterpreted
   as SDR. P010 with completely absent color metadata retains the SDR assumption;
   for an HDR source, check the force option or device settings.
@@ -111,6 +117,9 @@ changes are checked periodically.
 - HDR overlays use linear-light composition with Windows' SDR UI white level,
   or a 203-nit reference when that query is unavailable. This does not adjust
   the video's brightness.
+- The HDR `Tab` diagnostics panel uses a black background at **90% opacity**
+  (about 10% scene-light transmission). Text uses the same UI white level;
+  SDR panel appearance is unchanged.
 
 Capture-device processing and display tone mapping may still differ from
 passthrough. Final luminance/color validation on actual HDR hardware remains

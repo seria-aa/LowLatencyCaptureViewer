@@ -68,6 +68,9 @@ static constexpr Member kMembers[] = {
     {&SettingsControls::audioOnlyCheck, "audioOnlyCheck"},
     {&SettingsControls::forceHdr10Check, "forceHdr10Check"},
     {&SettingsControls::forceHdr10Help, "forceHdr10Help"},
+    {&SettingsControls::hdrChromaLabel, "hdrChromaLabel"},
+    {&SettingsControls::hdrChromaCombo, "hdrChromaCombo"},
+    {&SettingsControls::hdrChromaHelp, "hdrChromaHelp"},
     {&SettingsControls::mjpegColorLabel, "mjpegColorLabel"},
     {&SettingsControls::mjpegColorCombo, "mjpegColorCombo"},
     {&SettingsControls::mjpegColorHelp, "mjpegColorHelp"},
@@ -168,6 +171,9 @@ static constexpr Geometry kGeometry[] = {
     {&SettingsControls::fullscreenCursorHint, "fullscreenCursorHint", 630, 440, 404, 255, 24},
     {&SettingsControls::forceHdr10Check, "forceHdr10Check", 34, 374, 374, 360, 28},
     {&SettingsControls::forceHdr10Help, "forceHdr10Help", 402, 370, 370, 24, 24},
+    {&SettingsControls::hdrChromaLabel, "hdrChromaLabel", 34, 414, 414, 140, 24},
+    {&SettingsControls::hdrChromaCombo, "hdrChromaCombo", 190, 410, 410, 240, 150},
+    {&SettingsControls::hdrChromaHelp, "hdrChromaHelp", 438, 410, 410, 24, 24},
     {&SettingsControls::mjpegColorLabel, "mjpegColorLabel", 34, 374, 374, 140, 24},
     {&SettingsControls::mjpegColorCombo, "mjpegColorCombo", 190, 370, 370, 240, 150},
     {&SettingsControls::mjpegColorHelp, "mjpegColorHelp", 438, 370, 370, 24, 24},
@@ -195,6 +201,9 @@ static void ExpectVisible(HWND hwnd, bool visible) {
     Check((IsWindowEnabled(hwnd) != FALSE) == visible, "hidden controls must not accept input");
 }
 static void TestHelpText() {
+    Check(std::wcsstr(SettingsHelpText(SettingsHelpTopic::HdrChroma, true), L"staggered") != nullptr &&
+          std::wcsstr(SettingsHelpText(SettingsHelpTopic::HdrChroma, false), L"보장하지") != nullptr,
+          "chroma help discloses interpretation override limitations in both languages");
     const struct { SettingsHelpTopic topic; uint32_t english, korean; } golden[] = {
     {SettingsHelpTopic::Drift, 754620631u, 3340162937u},
     {SettingsHelpTopic::PcmQueue, 2979267523u, 1200270022u},
@@ -308,6 +317,8 @@ static void TestActualControlCreation() {
     {&SettingsControls::fullscreenCursorCombo, 2040},
     {&SettingsControls::forceHdr10Check, 2033},
     {&SettingsControls::forceHdr10Help, 2034},
+    {&SettingsControls::hdrChromaCombo, 2044},
+    {&SettingsControls::hdrChromaHelp, 2045},
     {&SettingsControls::mjpegColorCombo, 2041},
     {&SettingsControls::mjpegColorHelp, 2042},
     {&SettingsControls::pixelCheck, 2003},
@@ -339,6 +350,7 @@ static void TestActualControlCreation() {
         settings.fullscreenCursorMode = profile % 2 ? FullscreenCursorMode::AlwaysVisible : FullscreenCursorMode::AutoHide;
         settings.uiLanguage = static_cast<UiLanguage>(profile % 3);
         settings.mjpegColorOverride = static_cast<llcv::video_color::Override>(profile % 5);
+        settings.hdrChromaLocation = static_cast<llcv::hdr::ChromaLocation>(profile % 3);
         settings.allowVolumeBoost = (profile & 1) != 0;
         settings.pixelPerfect = (profile & 2) != 0;
         settings.relativeWindowSize = (profile & 4) != 0;
@@ -393,6 +405,10 @@ static void TestActualControlCreation() {
         Check(selection(state.scalingCombo) == profile % 2, "scaling selection");
         Check(selection(state.fullscreenCursorCombo) == profile % 2, "cursor selection");
         Check(selection(state.mjpegColorCombo) == profile % 5, "MJPEG interpretation selection");
+        Check(selection(state.hdrChromaCombo) == profile % 3 &&
+              SendMessageW(state.hdrChromaCombo, CB_GETCOUNT, 0, 0) == 3 &&
+              SendMessageW(state.hdrChromaCombo, CB_GETITEMDATA, profile % 3, 0) == profile % 3,
+              "HDR chroma choices retain stable values and initial selection");
         Check(selection(state.captureDeviceCombo) == (noDevices ? 0 : 1 + profile % 2), "video device restored");
         Check(selection(state.captureAudioDeviceCombo) == (noDevices ? 0 : 2 - profile % 2), "capture audio device restored");
         const struct { HWND handle; bool expected; } checks[] = {
@@ -421,7 +437,7 @@ static void TestActualControlCreation() {
                          L"F11  보더리스 전체화면 켜기/끄기") == 0, "F11 caption unchanged");
         Check((GetWindowLongPtrW(state.fullscreenCursorHint, GWL_STYLE) & SS_TYPEMASK) == SS_RIGHT,
               "F11 right alignment unchanged");
-        Check(SendMessageW(state.tooltipWindow, TTM_GETTOOLCOUNT, 0, 0) == 7, "six help buttons and display monitor tooltip registered");
+        Check(SendMessageW(state.tooltipWindow, TTM_GETTOOLCOUNT, 0, 0) == 8, "seven help buttons and display monitor tooltip registered");
         ApplySettingsFont(&state, parent, 96);
         LayoutSettingsControls(&state, 96);
         const RECT boost = ClientRectOf(parent, state.volumeBoostCheck);
@@ -432,6 +448,12 @@ static void TestActualControlCreation() {
         SendMessageW(state.volumeBoostHelp, BM_CLICK, 0, 0);
         Check(SendMessageW(state.volumeBoostCheck, BM_GETCHECK, 0, 0) == checked,
               "clicking real help control does not toggle volume boost");
+        const LRESULT forced = SendMessageW(state.forceHdr10Check, BM_GETCHECK, 0, 0);
+        const LRESULT placement = selection(state.hdrChromaCombo);
+        SendMessageW(state.hdrChromaHelp, BM_CLICK, 0, 0);
+        Check(SendMessageW(state.forceHdr10Check, BM_GETCHECK, 0, 0) == forced &&
+              selection(state.hdrChromaCombo) == placement,
+              "chroma help does not toggle HDR or change placement");
         DestroyWindow(state.tooltipWindow);
         DestroyWindow(parent);
         for (HFONT font : state.uiFonts) Check(DeleteObject(font) != FALSE, "release real creation fonts");
@@ -501,6 +523,11 @@ int main() {
                   !IsSettingsHelpControl(&state, state.volumeBoostCheck), "help routing distinct from option toggle");
             ExpectVisible(state.exclusiveTestButton, audio && exclusive);
             ExpectVisible(state.forceHdr10Check, video && format == VideoPixelFormat::P010);
+            for (HWND control : {state.hdrChromaLabel, state.hdrChromaCombo, state.hdrChromaHelp})
+                ExpectVisible(control, video && format == VideoPixelFormat::P010);
+            const RECT chromaCombo = ClientRectOf(parent, state.hdrChromaCombo);
+            const RECT chromaHelp = ClientRectOf(parent, state.hdrChromaHelp);
+            Check(chromaHelp.left > chromaCombo.right, "HDR chroma help cannot overlap combo hit target");
             ExpectVisible(state.mjpegColorCombo, video && format == VideoPixelFormat::Mjpeg);
             ExpectVisible(state.scalingCombo, video && !pixel);
             ExpectVisible(state.relativeSizeWarning, video && pixel && relative);
@@ -536,13 +563,13 @@ int main() {
     ExpectVisible(state.captureAudioStatus, true);
 
     const HWND helpControls[] = {state.driftHelp, state.pcmQueueHelp, state.presentationHelp,
-                                 state.volumeBoostHelp, state.forceHdr10Help, state.mjpegColorHelp};
+                                 state.volumeBoostHelp, state.forceHdr10Help, state.mjpegColorHelp, state.hdrChromaHelp};
     for (HWND help : helpControls) {
         AddSettingsTooltip(&state, parent, help, L"Persistent test tooltip");
         Check(IsSettingsHelpControl(&state, help), "help handle is recognized");
     }
     Check(state.tooltipWindow != nullptr &&
-          SendMessageW(state.tooltipWindow, TTM_GETTOOLCOUNT, 0, 0) == 6, "all tooltip tools register with v1 structure");
+          SendMessageW(state.tooltipWindow, TTM_GETTOOLCOUNT, 0, 0) == 7, "all tooltip tools register with v1 structure");
     TestHelpText();
     DestroyWindow(state.tooltipWindow);
     DestroyWindow(parent);

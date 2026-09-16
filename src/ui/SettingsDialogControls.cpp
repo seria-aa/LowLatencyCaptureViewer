@@ -569,6 +569,35 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
         state, hwnd, state->forceHdr10Help,
         SettingsHelpText(SettingsHelpTopic::ForceHdr10, initial.english));
 
+    state->hdrChromaLabel = makeLabel(text(L"HDR 색차 배치"), 34, 414);
+    state->hdrChromaCombo = CreateWindowExW(
+        0, L"COMBOBOX", nullptr,
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP,
+        190, 410, 240, 150, hwnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_HDR_CHROMA)),
+        instance, nullptr);
+    const struct { const wchar_t* label; llcv::hdr::ChromaLocation value; } chromaChoices[] = {
+        {text(L"자동 (권장)"), llcv::hdr::ChromaLocation::Auto},
+        {text(L"Top-left (호환성 해석)"), llcv::hdr::ChromaLocation::TopLeft},
+        {text(L"Left (호환성 해석)"), llcv::hdr::ChromaLocation::Left},
+    };
+    LRESULT selectedChroma = 0;
+    for (const auto& choice : chromaChoices) {
+        const LRESULT index = SendMessageW(state->hdrChromaCombo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(choice.label));
+        SendMessageW(state->hdrChromaCombo, CB_SETITEMDATA,
+            static_cast<WPARAM>(index), static_cast<LPARAM>(choice.value));
+        if (choice.value == initial.settings.hdrChromaLocation) selectedChroma = index;
+    }
+    SendMessageW(state->hdrChromaCombo, CB_SETCURSEL, selectedChroma, 0);
+    state->hdrChromaHelp = CreateWindowExW(
+        0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        438, 410, 24, 24, hwnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_HDR_CHROMA_HELP)),
+        instance, nullptr);
+    AddSettingsTooltip(state, hwnd, state->hdrChromaHelp,
+        SettingsHelpText(SettingsHelpTopic::HdrChroma, initial.english));
+
     state->mjpegColorLabel = makeLabel(
         text(L"MJPEG 색상 해석"), 24, 376);
     state->mjpegColorCombo = CreateWindowExW(

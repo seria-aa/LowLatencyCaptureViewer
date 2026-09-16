@@ -50,6 +50,12 @@
 #include "capture/AudioSampleGrabber.h"
 #include "capture/DirectShowGraphResources.h"
 #include "capture/LatestVideoSample.h"
+#ifdef LLCV_EXPERIMENTAL_HARDWARE_TONEMAP
+#ifndef LLCV_HDR_FRAME_AUDIT
+#error Experimental vendor HDR control must only be built into a private diagnostic.
+#endif
+#include "capture/HardwareToneMapping.h"
+#endif
 #include "diagnostics/Logger.h"
 #include "diagnostics/AudioErrorHistory.h"
 #include "settings/AppSettings.h"
@@ -92,6 +98,16 @@
 #include <cstdarg>
 #include <unordered_map>
 
+#ifdef LLCV_HDR_FRAME_AUDIT
+#include "diagnostics/HdrFrameAudit.h"
+static std::atomic<bool> g_hdrFrameAuditRequested{false};
+static std::wstring g_hdrFrameAuditDirectory;
+#endif
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+#include "video/ScrgbPrototype.h"
+static bool g_useScrgbPrototype = false;
+#endif
+
 // -----------------------------------------------------------------------------
 // User-tested settings.
 // -----------------------------------------------------------------------------
@@ -103,7 +119,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.2.8";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.9";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -773,6 +789,9 @@ static void LoadSettings() {
 }
 
 static void SaveSettings() {
+#ifdef LLCV_HDR_FRAME_AUDIT
+    return; // Includes settings-dialog acceptance and window-position updates.
+#endif
     EnsureUserDataDirectory();
     llcv::settings::SaveToIni(SettingsPath(), g_settings);
 }
@@ -1871,8 +1890,57 @@ struct DirectD3D11Renderer {
     double diagnosticPresentUs = 0;
 #endif
     llcv::video_color::Configuration sdrColor{};
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+    bool scrgbOutput = false;
+    llcv::scrgb::Pipeline scrgbPipeline;
+#endif
+#ifdef LLCV_HDR_FRAME_AUDIT
+    llcv::video::CaptureColorMetadata auditMetadata{};
+
+    void saveRequestedFrameAudit() {
+        if (!g_hdrFrameAuditRequested.exchange(false)) return;
+        HRESULT result = E_FAIL;
+        std::wstring path;
+        try {
+            GUID id{};
+            result = CoCreateGuid(&id);
+            wchar_t suffix[40]{};
+            if (SUCCEEDED(result) && StringFromGUID2(id, suffix, 40)) {
+                path = g_hdrFrameAuditDirectory + L"\\hdr-frame-" + suffix;
+                llcv::hdr_audit::Interpretation info{};
+                info.metadata = auditMetadata;
+                info.forceHdr = g_settings.forceHdr10;
+                info.hdrChromaSelection = static_cast<unsigned>(g_settings.hdrChromaLocation);
+                info.hdrOutput = hdrOutput;
+                info.inputColorSpace = static_cast<unsigned>(hdrInputColorSpace);
+                DXGI_COLOR_SPACE_TYPE outputSpace{};
+                if (videoContext1 && processor)
+                    videoContext1->VideoProcessorGetOutputColorSpace1(processor, &outputSpace);
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+                if (scrgbOutput) outputSpace = DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+#endif
+                info.outputColorSpace = static_cast<unsigned>(outputSpace);
+                info.sdrMatrix = static_cast<unsigned>(sdrColor.matrix);
+                info.sdrRange = static_cast<unsigned>(sdrColor.range);
+                info.displayHdr = g_hdrDisplayState.load();
+                info.uiWhiteNits = g_hdrUiWhiteNits.load();
+                result = llcv::hdr_audit::SavePair(context,
+                    nv12Textures[activeUploadSurface], backBuffer, path, info);
+            }
+        } catch (const std::bad_alloc&) {
+            result = E_OUTOFMEMORY;
+        }
+        fwprintf(stderr, L"[hdr-audit] %s result=0x%08lX directory=%s\n",
+                 SUCCEEDED(result) ? L"saved matching frame pair" : L"save failed (P010 required)",
+                 static_cast<unsigned long>(result), path.c_str());
+    }
+#endif
 
     void reset() {
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+        scrgbPipeline.Reset();
+        scrgbOutput = false;
+#endif
         if (context) {
             context->ClearState();
             context->Flush();
@@ -1972,6 +2040,9 @@ struct DirectD3D11Renderer {
                        DXGI_COLOR_SPACE_TYPE hdrColorSpace = DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020) {
         reset();
         hdrInputColorSpace = hdrColorSpace;
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+        scrgbOutput = g_useScrgbPrototype && pixelFormat == VideoPixelFormat::P010 && hdrInputMetadataAvailable;
+#endif
         if (llcv::presentation::IsCompatibility(g_settings.presentationMode) &&
             pixelFormat == VideoPixelFormat::P010 && hdrInputMetadataAvailable) {
             fwprintf(stderr, L"[video] HDR10 is not supported by Blt compatibility output; "
@@ -2058,9 +2129,12 @@ struct DirectD3D11Renderer {
         if (llcv::presentation::IsCompatibility(g_settings.presentationMode)) {
             allowTearing = false;
         }
-        const auto swapDesc = llcv::presentation::Description(
+        auto swapDesc = llcv::presentation::Description(
             g_settings.presentationMode, outputWidth, outputHeight,
             hdrOutput, allowTearing);
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+        if (scrgbOutput) swapDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+#endif
         hr = factory->CreateSwapChainForHwnd(device, hwnd, &swapDesc, nullptr,
                                              nullptr, &swapChain);
         factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
@@ -2082,18 +2156,22 @@ struct DirectD3D11Renderer {
         if (FAILED(hr)) return hr;
 
         if (hdrOutput) {
+            auto outputColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+            if (scrgbOutput) outputColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+#endif
             IDXGISwapChain3* swapChain3 = nullptr;
             hr = swapChain->QueryInterface(IID_PPV_ARGS(&swapChain3));
             if (SUCCEEDED(hr)) {
                 UINT support = 0;
                 hr = swapChain3->CheckColorSpaceSupport(
-                    DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support);
+                    outputColorSpace, &support);
                 if (SUCCEEDED(hr) && !(support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT))
                     hr = DXGI_ERROR_UNSUPPORTED;
             }
             if (SUCCEEDED(hr)) {
                 hr = swapChain3->SetColorSpace1(
-                    DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+                    outputColorSpace);
             }
             SafeRelease(swapChain3);
             if (FAILED(hr)) {
@@ -2113,6 +2191,11 @@ struct DirectD3D11Renderer {
                          static_cast<unsigned>(metadataHr));
                 SafeRelease(swapChain4);
             }
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+            if (scrgbOutput) fwprintf(stderr,
+                L"[hdr] DIRECT P010 shader -> FP16 scRGB (linear BT.709, 1=80 nits); one draw, no tone mapping.\n");
+            else
+#endif
             fwprintf(stderr,
                      L"[hdr] HDR10 swapchain configured: P010 -> "
                      L"BT.2020 PQ 10-bit swap chain; no frame queue.\n");
@@ -2142,12 +2225,18 @@ struct DirectD3D11Renderer {
         textureDesc.Format = inputFormat;
         textureDesc.SampleDesc.Count = 1;
         textureDesc.Usage = D3D11_USAGE_DEFAULT;
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+        if (scrgbOutput) textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+#endif
         for (UINT i = 0; i < kUploadSurfaceCount; ++i) {
             hr = device->CreateTexture2D(&textureDesc, nullptr,
                                          &nv12Textures[i]);
             if (FAILED(hr)) return hr;
         }
 
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+        if (!scrgbOutput) {
+#endif
         D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
         content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
         content.InputFrameRate = {static_cast<UINT>(fps), 1};
@@ -2214,13 +2303,29 @@ struct DirectD3D11Renderer {
                 nv12Textures[i], enumerator, &inputDesc, &inputViews[i]);
             if (FAILED(hr)) return hr;
         }
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+        } else {
+            hr = scrgbPipeline.Initialize(device, nv12Textures);
+            if (FAILED(hr)) {
+                LogHr(L"Direct P010/scRGB shader initialization", hr);
+                return hr;
+            }
+            fwprintf(stderr, L"[hdr] scRGB prototype uses bilinear scaling; VP sharp filter is not applied.\n");
+        }
+#endif
         hr = swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
         if (FAILED(hr)) return hr;
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+        if (!scrgbOutput) {
+#endif
         D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputDesc{};
         outputDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
         hr = videoDevice->CreateVideoProcessorOutputView(
             backBuffer, enumerator, &outputDesc, &outputView);
         if (FAILED(hr)) return hr;
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+        }
+#endif
         hr = device->CreateRenderTargetView(
             backBuffer, nullptr, &backBufferRenderTarget);
         if (FAILED(hr)) return hr;
@@ -2285,6 +2390,9 @@ struct DirectD3D11Renderer {
         SafeRelease(shaderErrors);
         if (SUCCEEDED(hr)) {
             const char* pixelSource = hdrOutput ? llcv::hdr::kOverlayShader : overlayPixelSource;
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+            if (scrgbOutput) pixelSource = llcv::scrgb::kOverlayShader;
+#endif
             hr = D3DCompile(pixelSource,
                             strlen(pixelSource), nullptr, nullptr,
                             nullptr, "main", "ps_4_0", 0, 0, &pixelBlob,
@@ -2398,8 +2506,12 @@ struct DirectD3D11Renderer {
             IsEnglishUi() ? L"en-US" : L"ko-KR", &audioTextFormat);
         if (FAILED(hr)) return hr;
         if (SUCCEEDED(hr)) {
+            // HDR diagnostics: neutral black, 90% opaque (10% scene light).
+            // Keep the SDR theme and text luminance unchanged. A tinted brush
+            // adds UI-white-dependent light even over a black HDR scene.
             hr = osdCacheTarget->CreateSolidColorBrush(
-                D2D1::ColorF(0.055f, 0.063f, 0.078f, 0.90f),
+                hdrOutput ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.90f)
+                          : D2D1::ColorF(0.055f, 0.063f, 0.078f, 0.90f),
                 &osdCacheBackgroundBrush);
         }
         if (SUCCEEDED(hr)) {
@@ -2531,6 +2643,13 @@ struct DirectD3D11Renderer {
                 videoRect.right != outputRect.right ||
                 videoRect.bottom != outputRect.bottom;
         }
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+        if (scrgbOutput) {
+            scrgbPipeline.Configure(context, static_cast<UINT>(width), static_cast<UINT>(height),
+                outputWidth, outputHeight, sourceRect, videoRect,
+                hdrInputColorSpace == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020);
+        } else {
+#endif
         videoContext->VideoProcessorSetStreamSourceRect(processor, 0, TRUE,
                                                         &sourceRect);
         videoContext->VideoProcessorSetStreamDestRect(processor, 0, TRUE,
@@ -2555,6 +2674,9 @@ struct DirectD3D11Renderer {
             videoContext->VideoProcessorSetStreamColorSpace(processor, 0,
                                                             &inputColor);
         }
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+        }
+#endif
         g_hdrOutputActive.store(hdrOutput, std::memory_order_release);
         return S_OK;
     }
@@ -2759,6 +2881,9 @@ struct DirectD3D11Renderer {
             desc.Height = kOsdOverlayHeight;
             desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
             desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+            if (scrgbOutput) desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+#endif
             desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
             HRESULT hr = device->CreateTexture2D(&desc, nullptr, &hdrOverlayBackground);
             if (FAILED(hr)) return hr;
@@ -2916,14 +3041,22 @@ struct DirectD3D11Renderer {
 #ifdef LLCV_GPU_DIAGNOSTICS
         const auto diagnosticStart = std::chrono::steady_clock::now();
 #endif
-        HRESULT hr = videoContext->VideoProcessorBlt(
-            processor, outputView, 0, 1, &stream);
+        HRESULT hr;
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+        if (scrgbOutput) hr = scrgbPipeline.Draw(context, backBufferRenderTarget,
+                                               outputWidth, outputHeight, activeUploadSurface);
+        else
+#endif
+        hr = videoContext->VideoProcessorBlt(processor, outputView, 0, 1, &stream);
 #ifdef LLCV_GPU_DIAGNOSTICS
         const auto diagnosticVideoEnd = std::chrono::steady_clock::now();
         diagnosticVideoUs = std::chrono::duration<double, std::micro>(
             diagnosticVideoEnd - diagnosticStart).count();
 #endif
         if (FAILED(hr)) return hr;
+#ifdef LLCV_HDR_FRAME_AUDIT
+        saveRequestedFrameAudit();
+#endif
         hr = drawOverlayQuads();
 #ifdef LLCV_GPU_DIAGNOSTICS
         const auto diagnosticOverlayEnd = std::chrono::steady_clock::now();
@@ -3332,6 +3465,16 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                                     &grabberOut))) break;
         if (FAILED(hr = GetFirstPin(nullRenderer, PINDIR_INPUT,
                                     &nullIn))) break;
+#ifdef LLCV_EXPERIMENTAL_HARDWARE_TONEMAP
+        // Not enabled in normal builds: command acceptance did not establish
+        // a fix, and actual device/driver safety still needs investigation.
+        // Configure only this selected video device, once per graph start.
+        // Optional vendor control must not make unsupported devices fail to
+        // start. Do not restore at shutdown: that could overwrite another
+        // application's setting. SDR graph starts explicitly request SDR.
+        llcv::capture::ConfigureHardwareToneMapping(
+            capture, g_activeCaptureDeviceName, configuredFormat, LogModuleMessage);
+#endif
         if (FAILED(hr = graph->ConnectDirect(videoPin, grabberIn,
                                              nullptr))) break;
         // Some drivers expose color information only on the negotiated
@@ -3413,9 +3556,16 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         if (FAILED(hr)) break;
         if (configuredFormat == VideoPixelFormat::P010) {
             initializationStage = L"validate connected P010 color / HDR10 conversion";
-            const auto input = llcv::hdr::ResolveInput(directShowColorInfo, g_settings.forceHdr10);
+            const auto input = llcv::hdr::ResolveInput(directShowColorInfo, g_settings.forceHdr10,
+                g_settings.hdrChromaLocation);
             LogDirectShowColorMetadata(L"P010 effective metadata", directShowColorInfo);
             fwprintf(stderr, L"[hdr] input decision: %s\n", input.reason);
+            if (input.kind == llcv::hdr::InputKind::Hdr10)
+                fwprintf(stderr, L"[hdr] chroma placement: reported=%u selection=%s effective=%s overridden=%u\n",
+                    directShowColorInfo.present ? directShowColorInfo.chromaSubsampling : 0,
+                    llcv::hdr::ChromaLocationName(g_settings.hdrChromaLocation),
+                    input.colorSpace == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020 ? L"Left" : L"TopLeft",
+                    input.chromaOverridden ? 1u : 0u);
             if (input.kind == llcv::hdr::InputKind::Unsupported) {
                 g_hdrFailureDetail.store(input.reason, std::memory_order_release);
                 hr = DXGI_ERROR_UNSUPPORTED;
@@ -3433,6 +3583,9 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             if (FAILED(hr)) break;
         }
         g_videoConfiguredFps.store(configuredFps, std::memory_order_release);
+#ifdef LLCV_HDR_FRAME_AUDIT
+        renderer.auditMetadata = directShowColorInfo;
+#endif
         UpdateConfiguredVideoTitle(host, configuredFps);
         fwprintf(stderr, L"[video] connected layout verified: %s %dx%d @ %d stride=%u bytes=%lu\n",
                  PixelFormatName(configuredFormat), preset.width, preset.height,
@@ -4859,6 +5012,15 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             g_settings.pixelFormat == VideoPixelFormat::P010 &&
             SendMessageW(state->forceHdr10Check, BM_GETCHECK, 0, 0) ==
                 BST_CHECKED;
+        g_settings.hdrChromaLocation = llcv::hdr::ChromaLocation::Auto;
+        if (g_settings.pixelFormat == VideoPixelFormat::P010) {
+            const LRESULT selection = SendMessageW(state->hdrChromaCombo, CB_GETCURSEL, 0, 0);
+            const LRESULT value = selection == CB_ERR ? CB_ERR :
+                SendMessageW(state->hdrChromaCombo, CB_GETITEMDATA, selection, 0);
+            if (value == static_cast<LRESULT>(llcv::hdr::ChromaLocation::TopLeft) ||
+                value == static_cast<LRESULT>(llcv::hdr::ChromaLocation::Left))
+                g_settings.hdrChromaLocation = static_cast<llcv::hdr::ChromaLocation>(value);
+        }
         g_settings.allowVolumeBoost = SendMessageW(
             state->volumeBoostCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (!g_settings.allowVolumeBoost &&
@@ -5338,6 +5500,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 hwnd,
                 SettingsHelpText(SettingsHelpTopic::MjpegColor),
                 UI_TEXT(L"MJPEG 색상 해석"), MB_OK | MB_ICONINFORMATION);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_HDR_CHROMA_HELP &&
+            HIWORD(wParam) == BN_CLICKED) {
+            MessageBoxW(hwnd, SettingsHelpText(SettingsHelpTopic::HdrChroma),
+                UI_TEXT(L"HDR 색차 배치"), MB_OK | MB_ICONINFORMATION);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_PCM_QUEUE_HELP &&
@@ -6310,6 +6478,9 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         : compressedVideo
         ? L"DirectShow → Media Foundation → D3D11"
         : L"DirectShow → D3D11";
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+    if (hdrVideo && g_useScrgbPrototype) videoPath = L"DirectShow P010 → Shader → scRGB (test)";
+#endif
     const int configuredFps =
         g_videoConfiguredFps.load(std::memory_order_acquire) > 0
             ? g_videoConfiguredFps.load(std::memory_order_relaxed)
@@ -7201,6 +7372,9 @@ static void RelaunchWithSettings() {
     std::wstring commandLine = L"\"";
     commandLine += executable;
     commandLine += L"\" --force-settings";
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+    commandLine += g_useScrgbPrototype ? L" --hdr-output scrgb" : L" --hdr-output hdr10";
+#endif
     std::vector<wchar_t> mutableCommand(commandLine.begin(),
                                         commandLine.end());
     mutableCommand.push_back(L'\0');
@@ -7247,7 +7421,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     g_suppressSettingsSave = commandLine &&
         (wcsstr(commandLine, L"--smoke-test") != nullptr ||
          wcsstr(commandLine, L"--exclusive-probe") != nullptr);
+#ifdef LLCV_HDR_FRAME_AUDIT
+    g_suppressSettingsSave = true;
+#endif
     LoadSettings();
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+    g_useScrgbPrototype = CommandLineOptionValue(L"--hdr-output") != L"hdr10";
+#endif
     const std::wstring asioSmokeDriver =
         CommandLineOptionValue(L"--smoke-test-asio");
     if (!asioSmokeDriver.empty()) {
@@ -7272,6 +7452,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         wcsstr(commandLine, L"--exclusive-probe") != nullptr;
     const bool exclusiveProbe = exclusiveProbeAll || exclusiveProbeSelected;
     g_suppressSettingsSave = smokeTest || exclusiveProbe;
+#ifdef LLCV_HDR_FRAME_AUDIT
+    g_suppressSettingsSave = true;
+#endif
     if (!smokeTest && !exclusiveProbe &&
         g_settings.audioMode == AudioMode::WasapiExclusive) {
         const std::wstring endpointId =
@@ -7323,6 +7506,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     }
 
     // Allocate a console for prototype diagnostics.
+#ifdef LLCV_HDR_FRAME_AUDIT
+    // Diagnostic settings are session-only; never migrate/save the user's profile.
+    g_settings.saveLog = true;
+    g_settings.showDiagnosticConsole = true;
+    g_settings.checkForUpdates = false;
+    EnsureUserDataDirectory();
+    g_hdrFrameAuditDirectory = LogDirectory();
+    CreateDirectoryW(g_hdrFrameAuditDirectory.c_str(), nullptr);
+#endif
     const BOOL allocatedConsole = AllocConsole();
     if (allocatedConsole && !g_settings.showDiagnosticConsole) {
         const HWND console = GetConsoleWindow();
@@ -7358,6 +7550,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         g_settings.saveLog = true;
     }
     if (!smokeTest) OpenSavedLog();
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+    fwprintf(stderr, L"[hdr-compare] Selected path: %s. P010 and HDR input/Force HDR10 are still required.\n",
+             g_useScrgbPrototype ? L"direct shader/scRGB" : L"original VP/HDR10");
+#endif
+#ifdef LLCV_HDR_FRAME_AUDIT
+    fwprintf(stderr, L"[hdr-audit] Private diagnostic build. With P010 selected, press F8 once "
+             L"in the viewer to save a matching input/output frame pair. Readback may briefly "
+             L"stall video. Local files only; settings are not saved. Directory: %s\n",
+             g_hdrFrameAuditDirectory.c_str());
+#endif
     if (g_exclusiveStartupFallback) {
         fwprintf(stderr,
                  L"[audio] saved Exclusive profile was not verified for the "
@@ -7659,6 +7861,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
             SendMessageW(hwnd, WM_RESTORE_ONE_TO_ONE, 0, 0);
             continue;
         }
+#ifdef LLCV_HDR_FRAME_AUDIT
+        if (m.message == WM_KEYDOWN && m.wParam == VK_F8) {
+            if (!(m.lParam & (1LL << 30))) {
+                g_hdrFrameAuditRequested.store(true);
+                fwprintf(stderr, L"[hdr-audit] One frame requested; waiting for a video frame.\n");
+            }
+            continue;
+        }
+#endif
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }

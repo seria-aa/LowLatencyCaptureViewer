@@ -247,6 +247,11 @@ LoadResult LoadFromIni(const std::wstring& path) {
     }
 
     settings.forceHdr10 = ReadBool(path, L"Video", L"ForceHdr10");
+    const auto hdrChroma = ReadString(path, L"Video", L"HdrChromaLocation", L"Auto");
+    settings.hdrChromaLocation = _wcsicmp(hdrChroma.c_str(), L"TopLeft") == 0
+        ? hdr::ChromaLocation::TopLeft
+        : _wcsicmp(hdrChroma.c_str(), L"Left") == 0
+            ? hdr::ChromaLocation::Left : hdr::ChromaLocation::Auto;
     settings.mjpegColorOverride = ParseMjpegColorOverride(
         ReadString(path, L"Video", L"MjpegColor", L"Auto"));
     settings.captureDeviceId =
@@ -396,6 +401,8 @@ void SaveToIni(const std::wstring& path, const AppSettings& settings) {
     }
 
     WriteInt(path, L"Video", L"ForceHdr10", settings.forceHdr10 ? 1 : 0);
+    WriteString(path, L"Video", L"HdrChromaLocation",
+                hdr::ChromaLocationName(settings.hdrChromaLocation));
     WriteString(path, L"Video", L"MjpegColor",
                 MjpegColorOverrideSettingName(settings.mjpegColorOverride));
     int width = 0;

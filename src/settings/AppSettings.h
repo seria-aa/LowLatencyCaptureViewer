@@ -1,6 +1,7 @@
 #pragma once
 
 #include "video/VideoColor.h"
+#include "video/HdrChroma.h"
 
 #include <cstdint>
 #include <string>
@@ -116,6 +117,7 @@ struct AppSettings {
     bool checkForUpdates = true;
     bool audioOnly = false;
     bool forceHdr10 = false;
+    hdr::ChromaLocation hdrChromaLocation = hdr::ChromaLocation::Auto;
     video_color::Override mjpegColorOverride = video_color::Override::Auto;
     bool pixelPerfect = true;
     bool relativeWindowSize = false;

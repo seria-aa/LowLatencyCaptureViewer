@@ -41,6 +41,8 @@ void TestDefaults(const std::wstring& path) {
           "default resolution");
     Check(loaded.settings.checkForUpdates,
           "automatic update check defaults on");
+    Check(loaded.settings.hdrChromaLocation == llcv::hdr::ChromaLocation::Auto,
+          "old and fresh profiles keep automatic HDR chroma");
 }
 
 void TestRoundTrip(const std::wstring& path) {
@@ -76,6 +78,7 @@ void TestRoundTrip(const std::wstring& path) {
     saved.scalingMode = ScalingMode::Sharp;
     saved.fullscreenCursorMode = FullscreenCursorMode::AlwaysVisible;
     saved.forceHdr10 = true;
+    saved.hdrChromaLocation = llcv::hdr::ChromaLocation::TopLeft;
     saved.mjpegColorOverride = llcv::video_color::Override::Bt709Full;
     saved.pixelPerfect = false;
     saved.relativeWindowSize = true;
@@ -91,6 +94,7 @@ void TestRoundTrip(const std::wstring& path) {
     SaveToIni(path, saved);
     const LoadResult result = LoadFromIni(path);
     const AppSettings& loaded = result.settings;
+    Check(loaded.hdrChromaLocation == saved.hdrChromaLocation, "HDR chroma round trip");
     Check(loaded.preferredDisplayMonitor == saved.preferredDisplayMonitor, "display monitor round trip");
     Check(loaded.uiLanguage == saved.uiLanguage, "language round trip");
     Check(loaded.audioMode == saved.audioMode, "audio mode round trip");
@@ -215,6 +219,29 @@ void TestLegacyPcmMigration(const std::wstring& path) {
           "migration must not create a settings file for a fresh install");
 }
 
+void TestHdrChroma(const std::wstring& path) {
+    using namespace llcv;
+    for (auto mode : {hdr::ChromaLocation::Auto, hdr::ChromaLocation::TopLeft, hdr::ChromaLocation::Left}) {
+        settings::AppSettings saved{};
+        saved.pixelFormat = settings::VideoPixelFormat::P010;
+        saved.hdrChromaLocation = mode;
+        settings::SaveToIni(path, saved);
+        Check(settings::LoadFromIni(path).settings.hdrChromaLocation == mode,
+              "each HDR placement survives save/load");
+    }
+    for (const wchar_t* value : {L"garbage", L"6", L"-1", L"999", L""}) {
+        WritePrivateProfileStringW(L"Video", L"HdrChromaLocation", value, path.c_str());
+        Check(settings::LoadFromIni(path).settings.hdrChromaLocation == hdr::ChromaLocation::Auto,
+              "invalid HDR placement never enables an override");
+    }
+    WritePrivateProfileStringW(L"Video", L"HdrChromaLocation", L"topleft", path.c_str());
+    Check(settings::LoadFromIni(path).settings.hdrChromaLocation == hdr::ChromaLocation::TopLeft,
+          "placement string is case insensitive");
+    WritePrivateProfileStringW(L"Video", L"HdrChromaLocation", nullptr, path.c_str());
+    Check(settings::LoadFromIni(path).settings.hdrChromaLocation == hdr::ChromaLocation::Auto,
+          "missing placement from legacy profile stays Auto");
+}
+
 }  // namespace
 
 int main() {
@@ -225,6 +252,7 @@ int main() {
     }
     TestDefaults(path);
     TestRoundTrip(path);
+    TestHdrChroma(path);
     TestPresentationModes(path);
     TestPcmDefaultAndPreservation(path);
     TestLegacyPcmMigration(path);

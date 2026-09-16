@@ -1,17 +1,73 @@
 // Actual app renderer + synthetic P010 + GPU readback. No capture/audio device,
 // HDR display, display-mode changes, settings writes or visible test window.
 #define LLCV_GPU_DIAGNOSTICS
+#ifndef LLCV_HDR_FRAME_AUDIT
+#define LLCV_HDR_FRAME_AUDIT
+#endif
+#ifndef LLCV_HDR_SCRGB_PROTOTYPE
+#define LLCV_HDR_SCRGB_PROTOTYPE
+#endif
 #include "../src/main.cpp"
 #undef fwprintf
 #include "../src/audio/AsioOutput.cpp"
 #include <d3d11sdklayers.h>
 #include <array>
+#include <filesystem>
+#include <fstream>
+#include <DirectXPackedVector.h>
 
 static void Require(bool ok, const char* name) {
     if (!ok) { std::printf("FAIL: %s\n", name); std::exit(1); }
 }
 static void Check(HRESULT hr, const char* name) {
     if (FAILED(hr)) { std::printf("FAIL %s: %08lX\n", name, static_cast<unsigned long>(hr)); std::exit(1); }
+}
+
+static void VerifyFrameAudit(DirectD3D11Renderer& r, const std::vector<unsigned short>& p) {
+    namespace fs = std::filesystem;
+    GUID id{}; Check(CoCreateGuid(&id), "audit test GUID");
+    wchar_t suffix[40]{}, temp[MAX_PATH]{};
+    Require(StringFromGUID2(id, suffix, 40) != 0 && GetTempPathW(MAX_PATH, temp) != 0, "audit temp path");
+    const fs::path root = fs::path(temp) / (std::wstring(L"llcv-hdr-audit-test-") + suffix);
+    Require(CreateDirectoryW(root.c_str(), nullptr) != 0, "new private test directory");
+    const auto pair = root / L"pair";
+    Check(llcv::hdr_audit::SavePair(r.context, r.nv12Textures[r.activeUploadSurface],
+        r.backBuffer, pair.wstring(), {}), "save matching raw/GPU pair");
+    auto bytes = [](const fs::path& path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::vector<unsigned char>(std::istreambuf_iterator<char>(file), {});
+    };
+    const auto raw = bytes(pair / L"input.p010");
+    Require(raw.size() == p.size()*sizeof(unsigned short) &&
+        memcmp(raw.data(), p.data(), raw.size()) == 0, "saved P010 equals uploaded frame byte-for-byte");
+    llcv::hdr_audit::Image output;
+    Check(llcv::hdr_audit::Read(r.context, r.backBuffer, output), "reference output readback");
+    Require(bytes(pair / L"output.raw") == output.bytes, "saved output equals same GPU frame");
+    const auto manifest = bytes(pair / L"metadata.json");
+    const std::string json(manifest.begin(), manifest.end());
+    Require(json.find("\"complete\": true") != std::string::npos, "completion marker written last");
+    Require(json.find("\"hdr_chroma_selection\": 0") != std::string::npos,
+        "audit records requested chroma interpretation separately from reported metadata");
+    Require(FAILED(llcv::hdr_audit::SavePair(r.context, r.nv12Textures[r.activeUploadSurface],
+        r.backBuffer, pair.wstring(), {})), "existing pair cannot be overwritten");
+    Require(bytes(pair / L"input.p010") == raw, "refusal preserves existing data");
+    Require(FAILED(llcv::hdr_audit::SavePair(r.context, r.nv12Textures[r.activeUploadSurface],
+        r.backBuffer, (root / L"missing-parent" / L"pair").wstring(), {})), "missing destination handled");
+    auto count = [&] { return std::distance(fs::directory_iterator(root), fs::directory_iterator()); };
+    g_hdrFrameAuditDirectory = root.wstring();
+    g_hdrFrameAuditRequested = false;
+    r.saveRequestedFrameAudit(); Require(count() == 1, "no files without explicit request");
+    g_hdrFrameAuditRequested = true;
+    r.saveRequestedFrameAudit(); Require(count() == 2 && !g_hdrFrameAuditRequested, "one request one pair");
+    r.saveRequestedFrameAudit(); Require(count() == 2, "no repeated capture after request consumed");
+    // Only remove the three files created in this unique test-owned directory.
+    for (const auto& entry : fs::directory_iterator(root)) {
+        for (const wchar_t* name : {L"input.p010", L"output.raw", L"metadata.json"})
+            Require(DeleteFileW((entry.path() / name).c_str()) != 0, "remove test artifact");
+        Require(RemoveDirectoryW(entry.path().c_str()) != 0, "remove empty pair directory");
+    }
+    Require(RemoveDirectoryW(root.c_str()) != 0, "remove empty test directory");
+    g_hdrFrameAuditDirectory.clear();
 }
 static double Pq(double nits) {
     // Independent CPU reference from BT.2100-3 Table 4, not shader evaluation.
@@ -42,6 +98,83 @@ static std::array<unsigned, 3> Read(DirectD3D11Renderer& r, UINT x = 100, UINT y
     if (d.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
         return {v & 1023, (v >> 10) & 1023, (v >> 20) & 1023};
     return {(v >> 16) & 255, (v >> 8) & 255, v & 255};
+}
+static std::array<double, 3> ReadFloat(DirectD3D11Renderer& r, UINT x=400, UINT y=250) {
+    D3D11_TEXTURE2D_DESC d{}; r.backBuffer->GetDesc(&d);
+    Require(d.Format==DXGI_FORMAT_R16G16B16A16_FLOAT,"FP16 scRGB output");
+    d.Width=d.Height=1; d.Usage=D3D11_USAGE_STAGING;
+    d.BindFlags=d.MiscFlags=0; d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* copy=nullptr; Check(r.device->CreateTexture2D(&d,nullptr,&copy),"FP16 readback texture");
+    r.context->OMSetRenderTargets(0,nullptr,nullptr);
+    D3D11_BOX box{x,y,0,x+1,y+1,1};
+    r.context->CopySubresourceRegion(copy,0,0,0,0,r.backBuffer,0,&box);
+    D3D11_MAPPED_SUBRESOURCE map{}; Check(r.context->Map(copy,0,D3D11_MAP_READ,0,&map),"FP16 map");
+    const auto* half=static_cast<const unsigned short*>(map.pData);
+    std::array<double,3> value{};
+    for(int i=0;i<3;++i) value[i]=DirectX::PackedVector::XMConvertHalfToFloat(half[i]);
+    r.context->Unmap(copy,0); copy->Release(); return value;
+}
+static unsigned ReadOsdCachePixel(DirectD3D11Renderer& r, UINT x, UINT y) {
+    D3D11_TEXTURE2D_DESC d{}; r.osdOverlayTexture->GetDesc(&d);
+    Require(d.Format == DXGI_FORMAT_B8G8R8A8_UNORM, "BGRA8 OSD cache");
+    d.Width = d.Height = 1; d.Usage = D3D11_USAGE_STAGING;
+    d.BindFlags = d.MiscFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* copy = nullptr;
+    Check(r.device->CreateTexture2D(&d, nullptr, &copy), "OSD cache readback texture");
+    const D3D11_BOX box{x, y, 0, x+1, y+1, 1};
+    r.context->CopySubresourceRegion(copy, 0, 0, 0, 0, r.osdOverlayTexture, 0, &box);
+    D3D11_MAPPED_SUBRESOURCE map{};
+    Check(r.context->Map(copy, 0, D3D11_MAP_READ, 0, &map), "OSD cache readback");
+    const unsigned pixel = *static_cast<const unsigned*>(map.pData);
+    r.context->Unmap(copy, 0); copy->Release();
+    return pixel;
+}
+static std::array<double,3> ScRgbReference(std::array<double,3> pq) {
+    const double r=Nits(std::clamp(pq[0],0.0,1.0));
+    const double g=Nits(std::clamp(pq[1],0.0,1.0));
+    const double b=Nits(std::clamp(pq[2],0.0,1.0));
+    return {(1.660491*r-.587641*g-.072850*b)/80,
+        (-.124550*r+1.132900*g-.008350*b)/80,
+        (-.018151*r-.100579*g+1.118730*b)/80};
+}
+static void NearFloat(std::array<double,3> actual, std::array<double,3> expected, const char* name) {
+    for(size_t i=0;i<3;++i) {
+        const double tolerance=.0025+.0015*std::abs(expected[i]);
+        if(!std::isfinite(actual[i]) || std::abs(actual[i]-expected[i])>tolerance) {
+            std::printf("%s channel=%zu actual=%.8f expected=%.8f\n",name,i,actual[i],expected[i]);
+            Require(false,name);
+        }
+    }
+}
+static double BenchmarkVideo(DirectD3D11Renderer& r) {
+    ID3D11Query *disjoint=nullptr,*start=nullptr,*end=nullptr;
+    D3D11_QUERY_DESC desc{D3D11_QUERY_TIMESTAMP_DISJOINT,0};
+    Check(r.device->CreateQuery(&desc,&disjoint),"video benchmark disjoint");
+    desc.Query=D3D11_QUERY_TIMESTAMP;
+    Check(r.device->CreateQuery(&desc,&start),"video benchmark start");
+    Check(r.device->CreateQuery(&desc,&end),"video benchmark end");
+    auto draw=[&] {
+        if(r.scrgbOutput) Check(r.scrgbPipeline.Draw(r.context,r.backBufferRenderTarget,
+            r.outputWidth,r.outputHeight,r.activeUploadSurface),"benchmark direct shader");
+        else {
+            D3D11_VIDEO_PROCESSOR_STREAM s{}; s.Enable=TRUE; s.pInputSurface=r.inputViews[r.activeUploadSurface];
+            Check(r.videoContext->VideoProcessorBlt(r.processor,r.outputView,0,1,&s),"benchmark VP");
+        }
+    };
+    for(int i=0;i<20;++i) draw();
+    r.context->Begin(disjoint); r.context->End(start);
+    for(int i=0;i<100;++i) draw();
+    r.context->End(end); r.context->End(disjoint); r.context->Flush();
+    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT data{};
+    const auto deadline=GetTickCount64()+5000;
+    HRESULT hr;
+    while((hr=r.context->GetData(disjoint,&data,sizeof(data),0))==S_FALSE && GetTickCount64()<deadline) Sleep(1);
+    Require(hr==S_OK && !data.Disjoint && data.Frequency,"video benchmark completes");
+    UINT64 a=0,b=0;
+    Require(r.context->GetData(start,&a,sizeof(a),0)==S_OK &&
+            r.context->GetData(end,&b,sizeof(b),0)==S_OK,"video benchmark timestamps");
+    end->Release(); start->Release(); disjoint->Release();
+    return double(b-a)/double(data.Frequency)*1e6/100;
 }
 static void Near(unsigned value, double expected, double tolerance, const char* name) {
     if (std::abs(value - expected) > tolerance) {
@@ -146,6 +279,27 @@ int main() {
             stream.pInputSurface = r.inputViews[r.activeUploadSurface];
             Check(r.videoContext->VideoProcessorBlt(r.processor, r.outputView, 0, 1, &stream), "HDR VP blit");
         };
+        blit(); VerifyFrameAudit(r, p); RequireCleanGpu(r);
+        llcv::video::CaptureColorMetadata reportedChroma6{};
+        reportedChroma6.present = true;
+        reportedChroma6.chromaSubsampling = 6;
+        reportedChroma6.nominalRange = 2;
+        reportedChroma6.primaries = 2;
+        reportedChroma6.transferMatrix = 1;
+        for (auto placement : {llcv::hdr::ChromaLocation::TopLeft, llcv::hdr::ChromaLocation::Left}) {
+            const auto resolved = llcv::hdr::ResolveInput(reportedChroma6, true, placement);
+            Require(resolved.kind == llcv::hdr::InputKind::Hdr10 && resolved.chromaOverridden,
+                "explicit chroma selection resolves reported tuple");
+            Check(r.initialize(hwnd,64,64,30,VideoPixelFormat::P010,true,{},resolved.colorSpace),
+                "manual placement enters native HDR10 conversion");
+            DXGI_COLOR_SPACE_TYPE actual{};
+            r.videoContext1->VideoProcessorGetStreamColorSpace1(r.processor,0,&actual);
+            Require(actual == resolved.colorSpace, "chosen placement reaches GPU stream state");
+            blit();
+            for (unsigned channel : Read(r,400,250))
+                Near(channel,(512.-64)/876.*1023,3,"placement override preserves neutral PQ luminance");
+            RequireCleanGpu(r);
+        }
         // Table 9: Y [64,940], neutral chroma 512, chroma excursion 896.
         // Exhaust the entire ten-bit container, including clipping boundaries.
         unsigned previous = 0;
@@ -166,6 +320,86 @@ int main() {
             const double green = (y-0.2627*red-0.0593*blue)/0.6780;
             Near(rgb[0], red*1023, 4, "2020 red"); Near(rgb[1], green*1023, 4, "2020 green"); Near(rgb[2], blue*1023, 4, "2020 blue");
         }
+        // Audit high-saturation colors as well as neutral ramps. Generate valid
+        // BT.2020 NCL P010 from known nonlinear RGB, then compare GPU output to
+        // an independent inverse of the quantized input. No tone mapping here.
+        DXGI_COLOR_SPACE_TYPE outputSpace{};
+        r.videoContext1->VideoProcessorGetOutputColorSpace1(r.processor, &outputSpace);
+        Require(outputSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+                "video processor output remains full-range BT2020 PQ");
+        auto encodePatch = [&](const std::array<double, 3>& rgb) {
+            const double y = 0.2627*rgb[0] + 0.6780*rgb[1] + 0.0593*rgb[2];
+            const int yc = static_cast<int>(std::lround(64 + 876*y));
+            const int uc = static_cast<int>(std::lround(512 + 896*(rgb[2]-y)/1.8814));
+            const int vc = static_cast<int>(std::lround(512 + 896*(rgb[0]-y)/1.4746));
+            std::fill(p.begin(), p.begin()+4096, static_cast<unsigned short>(yc << 6));
+            for (size_t i = 4096; i < p.size(); i += 2) {
+                p[i] = static_cast<unsigned short>(uc << 6);
+                p[i+1] = static_cast<unsigned short>(vc << 6);
+            }
+            const double luma = (yc-64.0)/876, cb = (uc-512.0)/896, cr = (vc-512.0)/896;
+            const double red = luma + 1.4746*cr, blue = luma + 1.8814*cb;
+            return std::array<double, 3>{red, (luma-0.2627*red-0.0593*blue)/0.6780, blue};
+        };
+        unsigned patchCount = 0;
+        double maxCodeError = 0;
+        for (double red : {0.0, 0.02, 0.10, 0.25, 0.50, 0.58, 0.75, 0.90, 1.0})
+            for (double green : {0.0, 0.02, 0.10, 0.25, 0.50, 0.58, 0.75, 0.90, 1.0})
+                for (double blue : {0.0, 0.02, 0.10, 0.25, 0.50, 0.58, 0.75, 0.90, 1.0}) {
+                    const auto expected = encodePatch({red, green, blue});
+                    blit();
+                    const auto actual = Read(r, 400, 250);
+                    for (size_t c = 0; c < 3; ++c) {
+                        const double code = std::clamp(expected[c], 0.0, 1.0)*1023;
+                        maxCodeError = (std::max)(maxCodeError, std::abs(actual[c]-code));
+                        Near(actual[c], code, 4, "HDR saturated RGB cube");
+                    }
+                    ++patchCount;
+                }
+        std::printf("HDR color cube: %u patches, max error %.3f/1023 codes\n",
+                    patchCount, maxCodeError);
+        for (double nits : {0.1, 1.0, 10.0, 80.0, 100.0, 203.0, 280.0, 1000.0, 4000.0, 10000.0}) {
+            const auto expected = encodePatch({Pq(nits), Pq(nits), Pq(nits)});
+            blit();
+            const auto beforeUiWhite = Read(r, 400, 250);
+            for (unsigned c : beforeUiWhite)
+                Near(c, expected[0]*1023, 3, "HDR absolute luminance encoding");
+            for (float white : {80.0f, 280.0f, 1000.0f}) {
+                g_hdrUiWhiteNits = white;
+                Check(r.drawOverlayQuads(), "hidden UI with different Windows white");
+                Require(Read(r, 400, 250) == beforeUiWhite, "UI white cannot alter video");
+            }
+            std::printf("Known HDR white %.1f nit -> RGB10 %u (decoded %.2f nit)\n",
+                        nits, beforeUiWhite[0], Nits(beforeUiWhite[0]/1023.0));
+        }
+        // Real capture rows can have padding. Poison it and exercise every ring
+        // surface with a two-color image to catch stride/UV-plane offset errors.
+        const UINT paddedStride = 160;
+        std::vector<unsigned short> padded(paddedStride/2*96, 0xffff);
+        const auto top = encodePatch({Pq(203), Pq(40), Pq(10)});
+        const auto firstPatch = p;
+        const auto bottom = encodePatch({Pq(10), Pq(40), Pq(203)});
+        for (size_t y = 0; y < 64; ++y)
+            std::copy_n((y < 32 ? firstPatch : p).data()+y*64, 64,
+                        padded.data()+y*(paddedStride/2));
+        for (size_t y = 0; y < 32; ++y)
+            std::copy_n((y < 16 ? firstPatch : p).data()+4096+y*64, 64,
+                        padded.data()+(64+y)*(paddedStride/2));
+        for (unsigned frame = 0; frame < 9; ++frame) {
+            r.upload(reinterpret_cast<const BYTE*>(padded.data()), paddedStride);
+            stream.pInputSurface = r.inputViews[r.activeUploadSurface];
+            Check(r.videoContext->VideoProcessorBlt(r.processor, r.outputView, 0, 1, &stream), "padded HDR upload");
+            const auto a = Read(r, 400, 100), b = Read(r, 400, 400);
+            for (size_t c = 0; c < 3; ++c) {
+                Near(a[c], std::clamp(top[c], 0.0, 1.0)*1023, 4, "padded HDR top");
+                Near(b[c], std::clamp(bottom[c], 0.0, 1.0)*1023, 4, "padded HDR bottom");
+            }
+        }
+        std::puts("Padded P010 two-color upload: 9 frames / 3 ring surfaces passed");
+        std::vector<unsigned short> packed(64*96);
+        for (size_t row = 0; row < 96; ++row)
+            std::copy_n(padded.data()+row*(paddedStride/2), 64, packed.data()+row*64);
+        VerifyFrameAudit(r, packed); RequireCleanGpu(r);
         g_hdrUiWhiteNits = 203.0f;
         // Test every sRGB grey code across the piecewise transfer-function knee.
         // Byte-exact values avoid mistaking BGRA8 quantization for shader error.
@@ -232,20 +466,51 @@ int main() {
         for (auto* panelBrush : {r.osdCacheBackgroundBrush, r.volumeCacheBackgroundBrush,
                             r.audioCacheBackgroundBrush})
             Require(std::abs(panelBrush->GetColor().a - 0.90f) < 0.0001f, "HDR panel opacity");
+        const auto hdrPanelColor = r.osdCacheBackgroundBrush->GetColor();
+        Require(hdrPanelColor.r == 0 && hdrPanelColor.g == 0 && hdrPanelColor.b == 0,
+            "HDR Tab panel uses neutral black, not tinted UI light");
         Require(r.osdCacheTextBrush->GetColor().a == 1.0f, "HDR text opacity unchanged");
         r.osdCacheTarget->BeginDraw();
         r.osdCacheTarget->Clear(D2D1::ColorF(0, 0.0f));
         r.osdCacheTarget->FillRectangle(D2D1::RectF(0, 0, 700, 440), r.osdCacheBackgroundBrush);
         Check(r.osdCacheTarget->EndDraw(), "actual dark HDR panel");
-        for (double sceneNits : {100.0, 1000.0}) {
+        for (double sceneNits : {0.0, 0.1, 10.0, 100.0, 1000.0, 4000.0, 10000.0}) {
             ClearVideo(r, sceneNits); DrawUi(r);
             const auto panel = Read(r);
+            const double storedScene = Nits(std::round(Pq(sceneNits)*1023)/1023.0);
+            const double storedAlpha = (ReadOsdCachePixel(r, 8, 100) >> 24)/255.0;
             for (unsigned channel : panel)
-                Require(Nits(channel/1023.0) > sceneNits*0.08 &&
-                        Nits(channel/1023.0) < sceneNits*0.11 + 3.0,
-                        "HDR panel retains about 10% scene light");
+                Near(channel, Pq(storedScene*(1-storedAlpha))*1023, 2,
+                    "HDR black panel retains quantized 10% scene light");
             Near(Read(r, 799, 499)[0], Pq(sceneNits)*1023, 2, "panel leaves outside video unchanged");
         }
+        // Exercise the real Tab path, including D2D rounded panel/text cache,
+        // cache refresh and hide/show. Always start from a fresh video frame:
+        // reopening Tab must not repeatedly darken the previous UI frame.
+        g_osdVisible = true;
+        for (unsigned repeat = 0; repeat < 12; ++repeat) {
+            g_hdrUiWhiteNits = repeat % 2 ? 80.0f : 1000.0f;
+            if (repeat % 3 == 0) g_overlayGeneration.fetch_add(1);
+            ClearVideo(r, 1000);
+            Check(r.drawOverlayQuads(), "production HDR Tab overlay");
+            const unsigned cache = ReadOsdCachePixel(r, 8, 100); // left padding, no text
+            const unsigned alpha = cache >> 24;
+            Require((cache & 0x00ffffffu) == 0 && (alpha == 229 || alpha == 230),
+                "actual D2D Tab cache is black with 90% opacity within BGRA8 precision");
+            const double background = Nits(std::round(Pq(1000)*1023)/1023.0);
+            const auto panel = Read(r, 24, 116); // production panel starts at (16,16)
+            for (unsigned channel : panel)
+                Near(channel, Pq(background*(1-alpha/255.0))*1023, 2,
+                    "Tab opacity independent of UI white/cache refresh");
+            Require(panel[0] == panel[1] && panel[1] == panel[2], "neutral scene has no panel color cast");
+            Near(Read(r, 799, 499)[0], Pq(1000)*1023, 2, "real Tab does not alter outside video");
+            g_osdVisible = false;
+            ClearVideo(r, 1000); const auto untouched = Read(r, 24, 116);
+            Check(r.drawOverlayQuads(), "hidden Tab has no blend");
+            Require(Read(r, 24, 116) == untouched, "hiding Tab restores unmodified video");
+            g_osdVisible = true;
+        }
+        g_osdVisible = false; g_hdrUiWhiteNits = 203.0f;
         Benchmark(r); RequireCleanGpu(r);
         r.reset(); Require(!r.hdrOverlayBackground && !r.hdrOverlayConstants && !g_hdrOutputActive.load(), "HDR reset");
         Check(r.initialize(hwnd, 64, 64, 30, VideoPixelFormat::Nv12), "SDR reinitialize");
@@ -254,14 +519,101 @@ int main() {
                 std::abs(r.volumeCacheBackgroundBrush->GetColor().a - 0.90f) < 0.0001f &&
                 std::abs(r.audioCacheBackgroundBrush->GetColor().a - 0.92f) < 0.0001f,
                 "SDR panel opacity unchanged");
+        const auto sdrPanelColor = r.osdCacheBackgroundBrush->GetColor();
+        Require(sdrPanelColor.r == 0.055f && sdrPanelColor.g == 0.063f && sdrPanelColor.b == 0.078f,
+            "HDR-to-SDR reinitialization restores original SDR panel tint");
         ClearUi(r, 1, 1, 1, 1); DrawUi(r); Require(Read(r)[0] == 255, "SDR white unchanged");
         ClearUi(r, 0, 0, 0, 0.5f); Benchmark(r); RequireCleanGpu(r);
+        // Force off does not tone-map unknown P010. Feed a known PQ white to
+        // the actual SDR path and record the encoded SDR result; a darker SDR
+        // preview alone therefore cannot establish the source transfer function.
+        Check(r.initialize(hwnd, 64, 64, 30, VideoPixelFormat::P010, false), "P010 SDR comparison");
+        encodePatch({Pq(203), Pq(203), Pq(203)});
+        blit();
+        const auto sdrPqWhite = Read(r, 400, 250);
+        VerifyFrameAudit(r, p);
+        for (unsigned c : sdrPqWhite)
+            Near(c, Pq(203)*255, 3, "unknown P010 SDR path does not apply HDR tone mapping");
+        std::printf("Same known 203-nit PQ white with force off -> SDR RGB8 %u; not an HDR-to-SDR tone map\n",
+                    sdrPqWhite[0]);
+        RequireCleanGpu(r);
         Check(r.initialize(hwnd, 64, 64, 30, VideoPixelFormat::P010, true, {},
             DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020), "left-chroma HDR");
         DXGI_COLOR_SPACE_TYPE input{};
         r.videoContext1->VideoProcessorGetStreamColorSpace1(r.processor, 0, &input);
         Require(input == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020, "left metadata reaches actual VP");
         RequireCleanGpu(r);
+        g_useScrgbPrototype=true;
+        Check(r.initialize(hwnd,64,64,30,VideoPixelFormat::P010,true),"direct scRGB initialize");
+        Require(r.scrgbOutput && r.processor==nullptr && r.outputView==nullptr,"direct path has no VP/intermediate");
+        auto direct=[&] {
+            r.upload(reinterpret_cast<const BYTE*>(p.data()),128);
+            Check(r.scrgbPipeline.Draw(r.context,r.backBufferRenderTarget,r.outputWidth,r.outputHeight,
+                                      r.activeUploadSurface),"direct scRGB draw");
+        };
+        for(double nits : {.0,.1,1.,10.,80.,203.,280.,1000.,4000.,10000.}) {
+            const auto ref=encodePatch({Pq(nits),Pq(nits),Pq(nits)}); direct();
+            NearFloat(ReadFloat(r),ScRgbReference(ref),"scRGB absolute luminance");
+        }
+        for(auto color : {std::array<double,3>{.75,.1,.1},{.1,.75,.1},{.1,.1,.75},
+                          {.4,.7,.2},{.7,.4,.8},{.02,.9,.5}}) {
+            const auto ref=encodePatch(color); direct();
+            NearFloat(ReadFloat(r),ScRgbReference(ref),"scRGB wide gamut");
+        }
+        encodePatch({.75,.1,.1}); direct();
+        Require(ReadFloat(r)[1]<0 && ReadFloat(r)[0]>1,"negative and HDR channels are not clipped");
+        VerifyFrameAudit(r,p);
+        const auto beforeUi=ReadFloat(r);
+        ClearUi(r,0,0,0,128.0f/255); DrawUi(r);
+        auto halfExpected=beforeUi;
+        for(auto& c:halfExpected) c*=1-128.0/255;
+        NearFloat(ReadFloat(r),halfExpected,"scRGB UI dark panel linear blend");
+        g_hdrUiWhiteNits=280;
+        ClearUi(r,1,1,1,1); DrawUi(r);
+        NearFloat(ReadFloat(r),{3.5,3.5,3.5},"scRGB UI uses Windows white divided by 80");
+        ClearUi(r,0,0,0,0); direct(); DrawUi(r);
+        NearFloat(ReadFloat(r),beforeUi,"transparent scRGB UI preserves video");
+        RequireCleanGpu(r);
+        g_osdVisible=true;
+        Check(r.presentUploaded(),"production scRGB render/overlay/Present path");
+        g_osdVisible=false;
+        RequireCleanGpu(r);
+        Require(SetWindowPos(hwnd,nullptr,0,0,64,64,SWP_NOZORDER|SWP_NOACTIVATE)!=0,"chroma test 1:1 size");
+        std::fill(p.begin(),p.begin()+4096,static_cast<unsigned short>(512<<6));
+        for(unsigned cy=0;cy<32;++cy) for(unsigned cx=0;cx<32;++cx) {
+            p[4096+(cy*32+cx)*2]=static_cast<unsigned short>((480+2*cx)<<6);
+            p[4097+(cy*32+cx)*2]=static_cast<unsigned short>((400+12*cy)<<6);
+        }
+        for(bool topLeft : {true,false}) {
+            llcv::video::CaptureColorMetadata reported{};
+            reported.present=true; reported.chromaSubsampling=6; reported.nominalRange=2;
+            const auto resolved=llcv::hdr::ResolveInput(reported,true,topLeft ?
+                llcv::hdr::ChromaLocation::TopLeft : llcv::hdr::ChromaLocation::Left);
+            Check(r.initialize(hwnd,64,64,30,VideoPixelFormat::P010,true,{},resolved.colorSpace),
+                "scRGB chroma override initialize");
+            direct();
+            const double y=(512.-64)/876,cb=(500.-512)/896,cr=((topLeft?520.:517.)-512)/896;
+            const double red=y+1.4746*cr,blue=y+1.8814*cb,green=(y-.2627*red-.0593*blue)/.678;
+            NearFloat(ReadFloat(r,20,20),ScRgbReference({red,green,blue}),"left/top-left chroma interpolation");
+            RequireCleanGpu(r);
+        }
+        // Measure GPU video work only, excluding capture/upload, Present and readback.
+        Require(SetWindowPos(hwnd,nullptr,0,0,2560,1440,SWP_NOZORDER|SWP_NOACTIVATE)!=0,"benchmark window size");
+        std::vector<unsigned short> frame(2560*1440*3/2,512<<6);
+        for(bool directPath : {false,true,false,true}) {
+            g_useScrgbPrototype=directPath;
+            Check(r.initialize(hwnd,2560,1440,60,VideoPixelFormat::P010,true),"benchmark path initialize");
+            r.upload(reinterpret_cast<const BYTE*>(frame.data()),5120);
+            const double timeUs=BenchmarkVideo(r);
+            if(!directPath && timeUs<.01)
+                std::puts("Video GPU VP HDR10: timestamp result unusable; NOT zero-cost and not comparable");
+            else std::printf("Video GPU 2560x1440 %s: %.2f us/frame (100 draws, no Present)\n",
+                             directPath?"direct scRGB":"VP HDR10",timeUs);
+            RequireCleanGpu(r);
+        }
+        g_useScrgbPrototype=false;
+        Check(r.initialize(hwnd,64,64,30,VideoPixelFormat::Nv12),"scRGB -> SDR transition");
+        Require(!r.scrgbOutput && !r.scrgbPipeline.ps,"scRGB resources released on SDR transition");
     }
     DestroyWindow(hwnd); CoUninitialize(); std::puts("HDR pixel/overlay/transition tests passed");
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CaptureColorMetadata.h"
+#include "HdrChroma.h"
 #include <dxgicommon.h>
 
 namespace llcv::hdr {
@@ -10,6 +11,7 @@ struct Input {
     InputKind kind = InputKind::Unknown;
     DXGI_COLOR_SPACE_TYPE colorSpace = DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020;
     bool assumed = false;
+    bool chromaOverridden = false;
     const wchar_t* reason = L"P010 without color metadata; SDR assumed (not tone-mapped)";
 };
 
@@ -17,7 +19,8 @@ struct Input {
 // our HDR10 path. Unspecified fields in a known PQ signal use HDR10 defaults;
 // contradictory fields never silently fall back to BT.709.
 // Defaults: BT.2100-3 Tables 8/9 specify top-left cosited/narrow range.
-inline Input ResolveInput(const video::CaptureColorMetadata& m, bool force) {
+inline Input ResolveInput(const video::CaptureColorMetadata& m, bool force,
+                          ChromaLocation location = ChromaLocation::Auto) {
     Input result;
     const UINT transfer = m.present ? m.transferFunction : 0;
     const UINT primaries = m.present ? m.primaries : 0;
@@ -46,19 +49,32 @@ inline Input ResolveInput(const video::CaptureColorMetadata& m, bool force) {
         return result;
     }
     const UINT chroma = m.present ? m.chromaSubsampling : 0;
-    // DXVA: 5=MPEG2 (left), 7=cosited (top-left); bit 8=progressive.
-    if (chroma && (chroma & 7) != 5 && (chroma & 7) != 7) {
-        result.reason = L"HDR10 chroma placement is not supported (expected left or top-left)";
+    if (location != ChromaLocation::Auto && location != ChromaLocation::TopLeft &&
+        location != ChromaLocation::Left) {
+        result.reason = L"Invalid HDR chroma placement override; select Auto, Top-left or Left";
         return result;
     }
-    result.colorSpace = chroma && (chroma & 7) == 5
+    const bool overrideChroma = location != ChromaLocation::Auto;
+    // DXVA: 5=MPEG2 (left), 7=cosited (top-left); bit 8=progressive.
+    if (!overrideChroma && chroma && (chroma & 7) != 5 && (chroma & 7) != 7) {
+        result.reason = L"HDR10 chroma placement is not supported; select Top-left or Left in HDR chroma placement only if the device metadata is incorrect";
+        return result;
+    }
+    const bool left = overrideChroma ? location == ChromaLocation::Left
+                                     : chroma && (chroma & 7) == 5;
+    result.colorSpace = left
         ? DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020
         : DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020;
     result.kind = InputKind::Hdr10;
-    result.assumed = force || !primaries || !matrix || !m.nominalRange || !chroma;
+    result.chromaOverridden = overrideChroma;
+    result.assumed = force || overrideChroma || !primaries || !matrix || !m.nominalRange || !chroma;
     result.reason = force ? L"user-forced PQ/BT.2020; range/chroma still validated"
         : result.assumed ? L"PQ/BT.2020; unspecified fields use HDR10 Limited/top-left defaults"
                          : L"explicit PQ/BT.2020 HDR10 metadata";
+    if (overrideChroma)
+        result.reason = force
+            ? L"user-forced PQ/BT.2020 with explicit chroma placement; range still validated"
+            : L"PQ/BT.2020 with explicit chroma placement override; range still validated";
     return result;
 }
 

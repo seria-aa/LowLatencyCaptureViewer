@@ -231,6 +231,9 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     // relevant to the selected input format is made visible.
     PlaceSettingsControl(state->forceHdr10Check, 34, 374, 360, 28, dpi);
     PlaceSettingsControl(state->forceHdr10Help, 402, 370, 24, 24, dpi);
+    PlaceSettingsControl(state->hdrChromaLabel, 34, 414, 140, 24, dpi);
+    PlaceSettingsControl(state->hdrChromaCombo, 190, 410, 240, 150, dpi);
+    PlaceSettingsControl(state->hdrChromaHelp, 438, 410, 24, 24, dpi);
     PlaceSettingsControl(state->mjpegColorLabel, 34, 374, 140, 24, dpi);
     PlaceSettingsControl(state->mjpegColorCombo, 190, 370, 240, 150, dpi);
     PlaceSettingsControl(state->mjpegColorHelp, 438, 370, 24, 24, dpi);
@@ -347,6 +350,9 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
         VideoPixelFormat::Mjpeg;
     SetSettingsControlVisible(state->forceHdr10Check, video && p010Selected);
     SetSettingsControlVisible(state->forceHdr10Help, video && p010Selected);
+    SetSettingsControlVisible(state->hdrChromaLabel, video && p010Selected);
+    SetSettingsControlVisible(state->hdrChromaCombo, video && p010Selected);
+    SetSettingsControlVisible(state->hdrChromaHelp, video && p010Selected);
     SetSettingsControlVisible(state->mjpegColorLabel, video && mjpegSelected);
     SetSettingsControlVisible(state->mjpegColorCombo, video && mjpegSelected);
     SetSettingsControlVisible(state->mjpegColorHelp, video && mjpegSelected);
@@ -413,6 +419,7 @@ bool IsSettingsHelpControl(const SettingsControls* state,
                       target == state->presentationHelp ||
                       target == state->volumeBoostHelp ||
                       target == state->forceHdr10Help ||
+                      target == state->hdrChromaHelp ||
                       target == state->mjpegColorHelp);
 }
 
@@ -462,6 +469,15 @@ const wchar_t* SettingsHelpText(SettingsHelpTopic topic, bool english) {
                    L"If the source is SDR, or the monitor is not handling HDR correctly, colors can look strongly "
                    L"oversaturated or otherwise wrong. Turn it off in that case. This does not add a frame queue; "
                    L"it only changes the output color interpretation.";
+        case SettingsHelpTopic::HdrChroma:
+            return L"HDR chroma placement\n\n"
+                   L"Auto follows the device metadata and rejects unsupported placements. Use Top-left or Left "
+                   L"only for a P010 HDR device with missing or incorrect chroma metadata. Compare fine colored "
+                   L"edges and text against a reference.\n\n"
+                   L"This overrides the declared chroma placement; it does not repair genuinely staggered Cb/Cr "
+                   L"planes or guarantee that placement 6 is supported. It does not change brightness, saturation, "
+                   L"PQ interpretation or range validation, and adds no frame queue or processing pass. "
+                   L"For missing HDR metadata, Force HDR10 is a separate setting.";
         case SettingsHelpTopic::MjpegColor:
             return L"MJPEG color interpretation\n\n"
                    L"Auto uses decoder metadata first, then DirectShow metadata. If neither identifies "
@@ -508,6 +524,14 @@ const wchar_t* SettingsHelpText(SettingsHelpTopic topic, bool english) {
                L"P010을 BT.2020/PQ로 처리하고 HDR10 출력으로 표시합니다.\n\n"
                L"입력이 SDR이거나 모니터의 HDR 처리가 맞지 않으면 색상이 과포화되거나 부정확해질 수 있습니다. "
                L"그 경우 이 옵션을 끄세요. 프레임 큐를 추가하지 않으므로 표시 지연은 늘지 않고 출력 색상 해석만 바뀝니다.";
+    case SettingsHelpTopic::HdrChroma:
+        return L"HDR 색차 배치 안내\n\n"
+               L"자동은 장치 메타데이터를 따르며 지원하지 않는 배치는 차단합니다. P010 HDR 장치의 "
+               L"색차 배치 정보가 없거나 잘못된 경우에만 Top-left 또는 Left를 선택하고, 가는 색 경계와 "
+               L"글자를 기준 화면과 비교하세요.\n\n"
+               L"이 옵션은 배치 정보의 해석을 바꿉니다. 실제 Cb/Cr가 서로 어긋난 데이터를 복원하거나 "
+               L"배치 값 6의 지원을 보장하지 않습니다. 밝기·채도·PQ 해석·색 범위 검증은 바꾸지 않으며 "
+               L"프레임 큐나 처리 단계를 추가하지 않습니다. HDR 메타데이터가 없다면 HDR10 강제는 별도로 설정하세요.";
     case SettingsHelpTopic::MjpegColor:
         return L"MJPEG 색상 해석 안내\n\n"
                L"자동은 디코더 메타데이터를 먼저 사용하고, 없으면 DirectShow 정보를 확인합니다. 양쪽 모두 "
