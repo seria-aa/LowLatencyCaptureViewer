@@ -66,6 +66,9 @@ struct SettingsControls {
     HWND audioOnlyCheck = nullptr;
     HWND forceHdr10Check = nullptr;
     HWND forceHdr10Help = nullptr;
+    HWND hdrChromaLabel = nullptr;
+    HWND hdrChromaCombo = nullptr;
+    HWND hdrChromaHelp = nullptr;
     HWND mjpegColorLabel = nullptr;
     HWND mjpegColorCombo = nullptr;
     HWND mjpegColorHelp = nullptr;
@@ -108,6 +111,7 @@ enum class SettingsHelpTopic {
     Presentation,
     VolumeBoost,
     ForceHdr10,
+    HdrChroma,
     MjpegColor,
 };
 

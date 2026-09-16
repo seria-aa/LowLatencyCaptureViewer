@@ -1,4 +1,13 @@
-Low Latency Capture Viewer v1.2.8 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.9 x64 (continued from the v0.14.2 rework)
+
+v1.2.9 HDR chroma compatibility and diagnostics panel
+----------------------------------------------------
+- Adds optional Auto / Top-left / Left interpretation for P010 HDR chroma.
+- Auto remains the default; manual choices do not bypass HDR range validation.
+- HDR Tab diagnostics use neutral black at 90% opacity; SDR appearance is retained.
+- Existing video/audio pipelines and defaults remain unchanged, with no new queue.
+- Private frame audit, scRGB and vendor controls are disabled in release builds.
+- P010 HDR10 remains experimental; physical-device color correctness is unverified.
 
 v1.2.8 HDR10 refinement
 ----------------------

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 1.2.8 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 1.2.9 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,6 +41,28 @@ target_include_directories(LowLatencyCaptureViewer PRIVATE
     third_party/asio/host
     third_party/asio/host/pc
 )
+
+option(LLCV_HDR_FRAME_AUDIT "Build a private F8 single-frame HDR diagnostic (not for release)" OFF)
+option(LLCV_HDR_SCRGB_PROTOTYPE "Private direct P010 shader/scRGB comparison (not for release)" OFF)
+option(LLCV_EXPERIMENTAL_HARDWARE_TONEMAP "Private vendor HDR control experiment (not for release)" OFF)
+if (LLCV_HDR_SCRGB_PROTOTYPE)
+    set(LLCV_HDR_FRAME_AUDIT ON)
+    target_compile_definitions(LowLatencyCaptureViewer PRIVATE LLCV_HDR_SCRGB_PROTOTYPE)
+endif()
+if (LLCV_EXPERIMENTAL_HARDWARE_TONEMAP)
+    if (NOT LLCV_HDR_FRAME_AUDIT)
+        message(FATAL_ERROR "Experimental vendor HDR control requires LLCV_HDR_FRAME_AUDIT=ON; it must not enter a release build.")
+    endif()
+    target_sources(LowLatencyCaptureViewer PRIVATE src/capture/HardwareToneMapping.cpp)
+    target_compile_definitions(LowLatencyCaptureViewer PRIVATE LLCV_EXPERIMENTAL_HARDWARE_TONEMAP)
+endif()
+if (LLCV_HDR_FRAME_AUDIT)
+    target_compile_definitions(LowLatencyCaptureViewer PRIVATE LLCV_HDR_FRAME_AUDIT)
+    set_target_properties(LowLatencyCaptureViewer PROPERTIES OUTPUT_NAME "LowLatencyCaptureViewer_HDR_Audit")
+endif()
+if (LLCV_HDR_SCRGB_PROTOTYPE)
+    set_target_properties(LowLatencyCaptureViewer PROPERTIES OUTPUT_NAME "LowLatencyCaptureViewer_HDR_Compare")
+endif()
 
 # Steinberg's host-side ASIO helper is compiled into the optional backend.
 # Driver DLLs are not bundled; installed ASIO drivers are discovered at runtime.
@@ -90,6 +112,17 @@ endif()
 
 include(CTest)
 if (BUILD_TESTING)
+    add_executable(HardwareToneMappingTests tests/HardwareToneMappingTests.cpp
+        src/capture/HardwareToneMapping.cpp)
+    target_include_directories(HardwareToneMappingTests PRIVATE src)
+    target_compile_definitions(HardwareToneMappingTests PRIVATE
+        UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(HardwareToneMappingTests PRIVATE strmiids uuid)
+    set_target_properties(HardwareToneMappingTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    if (MSVC)
+        target_compile_options(HardwareToneMappingTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    endif()
+    add_test(NAME HardwareToneMappingTests COMMAND HardwareToneMappingTests)
     add_executable(HdrPolicyTests tests/HdrPolicyTests.cpp)
     target_include_directories(HdrPolicyTests PRIVATE src)
     target_compile_definitions(HdrPolicyTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -132,6 +165,11 @@ if (BUILD_TESTING)
     set_tests_properties(LatestVideoSampleTests PROPERTIES TIMEOUT 15)
     # Exercise application callbacks and the ASIO notification protocol without
     # enumerating/opening hardware. This target is never installed.
+    # These test translation units include the implementation directly. Keep
+    # that dependency explicit even when a localized MSVC include scan misses it.
+    set_property(SOURCE tests/AudioCallbackTests.cpp tests/HdrPipelineTests.cpp
+        tests/MonitorMoveTests.cpp tests/SharedReplayTests.cpp
+        APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
     get_target_property(audio_callback_sources LowLatencyCaptureViewer SOURCES)
     list(FILTER audio_callback_sources EXCLUDE REGEX "src/(main.cpp|app.rc|audio/AsioOutput.cpp)$")
     add_executable(AudioCallbackTests tests/AudioCallbackTests.cpp ${audio_callback_sources})
