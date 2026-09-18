@@ -40,11 +40,35 @@ STDMETHODIMP AudioSampleGrabberCallback::SampleCB(
     double, IMediaSample* sample) {
     if (!sample) return E_POINTER;
 
+    if (format_.path == capture_audio::Path::ConvertToSurround51) {
+        // A six/eight-channel packet interpreted with a stale stride produces
+        // severe noise. Latch rejection until the graph is rebuilt; do not guess.
+        if (surroundFormatChanged_) return VFW_E_TYPE_NOT_ACCEPTED;
+        AM_MEDIA_TYPE* changed = nullptr;
+        const HRESULT typeHr = sample->GetMediaType(&changed);
+        const bool matches = typeHr == S_FALSE || (typeHr == S_OK && changed &&
+            capture_audio::MatchesSurroundFormat(*changed, format_));
+        if (changed) {
+            CoTaskMemFree(changed->pbFormat);
+            if (changed->pUnk) changed->pUnk->Release();
+            CoTaskMemFree(changed);
+        }
+        if (!matches || ring_.Channels() != 6) {
+            surroundFormatChanged_ = true;
+            if (telemetry_.surroundFormatRejected)
+                telemetry_.surroundFormatRejected->store(true, std::memory_order_release);
+            return VFW_E_TYPE_NOT_ACCEPTED;
+        }
+    }
+
     BYTE* data = nullptr;
     const HRESULT result = sample->GetPointer(&data);
     if (FAILED(result) || !data) return result;
 
     const long bytes = sample->GetActualDataLength();
+    // Validate multichannel driver packets before reading any sample bytes.
+    if (format_.path == capture_audio::Path::ConvertToSurround51 && bytes > sample->GetSize())
+        return E_INVALIDARG;
     if (bytes <= 0 || format_.blockAlign == 0 ||
         bytes % format_.blockAlign != 0) {
         return S_OK;

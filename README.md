@@ -62,12 +62,17 @@ source and capture device actually support.
 | Output buffer | The value marked as recommended in settings |
 | PCM buffer target | **25 ms** |
 | Clock-drift correction | **Auto** |
+| Console LPCM 5.1 | **Off (default)**. Experimental, WASAPI Shared only; requires multichannel capture and playback equipment |
 
 WASAPI Shared is the default mode for compatibility with other applications
 and Windows effects. ASIO is experimental and appears only when an ASIO driver
 is installed. WASAPI Exclusive is available only on output devices that pass
 the app's playback-event check. Use WASAPI Shared unless you have a specific
 reason to choose another mode.
+
+For 5.1, set the console to **5.1 LPCM** and use a capture card that exposes
+multichannel PCM to the PC. Dolby/DTS bitstreams are not supported.
+See the [5.1 audio guide](docs/AUDIO.md) for requirements and setup.
 
 If sound occasionally breaks up, open the Tab diagnostics overlay. Raise the
 PCM target in 5 ms steps from its current value (e.g. `20 → 25 → 30 ms`) only when **buffer shortage** or **resampler

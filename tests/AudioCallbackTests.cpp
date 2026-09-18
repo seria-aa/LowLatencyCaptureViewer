@@ -547,6 +547,47 @@ int TestPresentationDebug() {
 
 #include "VideoTransitionStress.inl"
 
+static void TestSurroundWasapiFill() {
+    const auto settings = g_settings;
+    g_settings.audioMode = AudioMode::WasapiShared;
+    g_volumePercent.store(100);
+    g_leftVolumePercent.store(100);
+    g_rightVolumePercent.store(100);
+    g_backgroundAudioMuted.store(false);
+    g_audioTrackingStartMs.store(UINT64_MAX);
+    g_ring.ConfigureChannels(6);
+    for (auto correction : {DriftCorrectionMode::Off, DriftCorrectionMode::Resample}) {
+        g_settings.driftCorrection = correction;
+        g_ring.Clear();
+        WasapiRenderState state;
+        state.queueTargetFrames = 1200;
+        state.driftResampler.Prepare(480);
+        std::vector<int16_t> input(2400 * 6);
+        for (size_t f = 0; f < 2400; ++f) for (size_t c = 0; c < 6; ++c)
+            input[f * 6 + c] = static_cast<int16_t>((c + 1) * 1000);
+        g_ring.Push(input.data(), 2400);
+        std::array<int16_t, 480 * 6 + 2> output{};
+        output.front() = 111; output.back() = 222;
+        auto result = FillWasapiPcm(&state, output.data() + 1, 480);
+        Require(result.writtenFrames == 480 && result.availableBeforeRender == 2400,
+            "production 5.1 fill uses frames, not samples, for reserve accounting");
+        for (size_t f = 0; f < 480; ++f) for (size_t c = 0; c < 6; ++c)
+            Require(output[1 + f * 6 + c] == (c + 1) * 1000,
+                "production callback preserves all channels with drift off/on");
+        Require(output.front() == 111 && output.back() == 222, "5.1 fill bounds");
+        g_backgroundAudioMuted.store(true);
+        FillWasapiPcm(&state, output.data() + 1, 480); // click-free ramp
+        result = FillWasapiPcm(&state, output.data() + 1, 480);
+        Require(result.writtenFrames == 480, "5.1 mute does not stop consuming capture");
+        for (size_t i = 1; i <= 480 * 6; ++i)
+            Require(output[i] == 0, "background mute includes center and LFE");
+        g_backgroundAudioMuted.store(false);
+    }
+    g_ring.ConfigureChannels(2);
+    g_settings = settings;
+    std::puts("Production WASAPI fill: six speakers, drift off/on, mute and guard samples passed.");
+}
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--transition-stress") return RunTransitionStress(false);
     if (argc == 2 && std::string(argv[1]) == "--transition-faults") return RunTransitionStress(true);
@@ -564,6 +605,7 @@ int main(int argc, char** argv) {
     TestSettingsCapabilityRefresh();
     TestExclusiveScanResultLifetime();
     TestOutputTransitions();
+    TestSurroundWasapiFill();
     g_settings.driftCorrection = DriftCorrectionMode::Off;
     g_audioQueueTargetFrames.store(960);
     g_audioTrackingStartMs.store(UINT64_MAX);

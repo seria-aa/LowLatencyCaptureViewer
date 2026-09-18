@@ -12,7 +12,7 @@
 
 namespace llcv::audio {
 
-// Fixed-stereo PCM mailbox with bounded storage. Capture never waits for
+// Session-fixed PCM mailbox with bounded storage. Capture never waits for
 // render: when full, the oldest frames are discarded.
 class PcmRing {
 public:
@@ -23,6 +23,10 @@ public:
                      OverrunObserver overrunObserver = nullptr,
                      void* observerContext = nullptr);
 
+    // Startup only: no producer/consumer or resampler may be running.
+    void ConfigureChannels(size_t channels);
+    size_t Channels() const noexcept { return channels_; }
+
     void Push(const int16_t* samples, size_t frames);
     void PushConverted(const BYTE* source, size_t frames,
                        const capture_audio::Format& format);
@@ -32,7 +36,7 @@ public:
     uint64_t Overruns() const noexcept;
 
 private:
-    static constexpr size_t kChannels = 2;
+    size_t channels_ = 2;
 
     size_t PrepareWrite(size_t frames);
     void PublishAvailable() noexcept;
@@ -63,7 +67,7 @@ public:
     size_t BufferedFrames() const noexcept;
 
 private:
-    static constexpr size_t kChannels = 2;
+    const size_t channels_;
     static constexpr int kHalfTaps = 8;
     static constexpr int kHistoryFrames = kHalfTaps * 2;
     static constexpr double kPi = 3.14159265358979323846;

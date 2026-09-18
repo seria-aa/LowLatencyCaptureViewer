@@ -143,6 +143,7 @@ LoadResult LoadFromIni(const std::wstring& path) {
     settings.checkForUpdates =
         ReadBool(path, L"General", L"CheckForUpdates", true);
     settings.audioOnly = ReadBool(path, L"General", L"AudioOnly");
+    settings.consoleSurround51 = ReadBool(path, L"Audio", L"ConsoleSurround51");
 
     const std::wstring audioMode =
         ReadString(path, L"Audio", L"Mode", L"Shared");
@@ -334,6 +335,7 @@ void SaveToIni(const std::wstring& path, const AppSettings& settings) {
     WriteInt(path, L"General", L"CheckForUpdates",
              settings.checkForUpdates ? 1 : 0);
     WriteInt(path, L"General", L"AudioOnly", settings.audioOnly ? 1 : 0);
+    WriteInt(path, L"Audio", L"ConsoleSurround51", settings.consoleSurround51 ? 1 : 0);
 
     const wchar_t* audioMode = L"Shared";
     if (settings.audioMode == AudioMode::WasapiExclusive) {

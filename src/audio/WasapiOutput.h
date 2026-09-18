@@ -17,6 +17,8 @@ enum class Mode {
 
 struct Configuration {
     Mode mode = Mode::Shared;
+    // Only Shared supports the opt-in six-channel PCM path.
+    bool surround51 = false;
     std::wstring endpointId;
     int bufferMilliseconds = 20;
     UINT32 sharedPeriodFrames = 0;

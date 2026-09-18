@@ -14,6 +14,32 @@ clocks. Over a long session this can move the PCM queue away from its target.
 Clock-drift correction is normally unnecessary for a device with a shared
 clock, but may be useful for separate USB video and audio paths.
 
+## Console LPCM 5.1 (experimental, since v1.2.10)
+
+Select **WASAPI Shared**, then enable **Console LPCM 5.1** in the Audio tab.
+It defaults off and has no effect in Exclusive or ASIO mode.
+
+- Set the console to **5.1 LPCM**. Dolby/DTS bitstream decoding and virtual surround
+  are not supported.
+- The capture device must expose **48 kHz six- or eight-channel PCM** to the PC.
+  HDMI surround passthrough alone does not establish capture support.
+- Configure the Windows playback speakers as 5.1 for discrete surround. Windows
+  downmixes when using a stereo playback endpoint.
+- Six-channel input retains center and LFE. Eight-channel input folds back and
+  side surrounds into 5.1 at -3 dB per contribution. Unknown/unsupported speaker
+  masks are rejected rather than guessed.
+- Master volume and mute affect every channel. L/R controls affect front and
+  surround speakers on that side; center and LFE use master only. The two meters
+  also include center/LFE peaks, not six independent channel readings.
+- Some output formats require the classic Shared compatibility path. Check the
+  actual output buffer in Tab diagnostics. PCM target and drift settings are unchanged.
+
+Physical capture/playback channel verification is still pending. Use the console
+speaker test to check center, surround and LFE routing, and attach diagnostic logs
+for failures. Do not open another capture app concurrently during testing.
+If the input channel count or format changes during playback, playback stops and
+settings reopen. Finalize the console audio settings before starting again.
+
 ## Audio-only mode
 
 Enable **Audio-only mode** to skip the video pin, D3D11 renderer, and video

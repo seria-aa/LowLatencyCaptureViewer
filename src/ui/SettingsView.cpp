@@ -158,6 +158,8 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
                          284, 24, 24, dpi);
     PlaceSettingsControl(state->muteBackgroundCheck, 34, 318, 500, 28, dpi);
     PlaceSettingsControl(state->audioOnlyCheck, 34, 354, 500, 28, dpi);
+    PlaceSettingsControl(state->surround51Check, 575, 242, 330, 28, dpi);
+    PlaceSettingsControl(state->surround51Hint, 575, 280, 330, 100, dpi);
     PlaceSettingsControl(state->audioStabilitySection, 34, 392, 250, 20, dpi);
     PlaceSettingsControl(state->driftLabel, 34, 416, 160, 24, dpi);
     PlaceSettingsControl(state->driftHelp, 170, 412, 24, 24, dpi);
@@ -311,6 +313,7 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
                          state->volumeHudLabel, state->volumeHudCombo,
                          state->volumeBoostCheck, state->volumeBoostHelp,
                          state->muteBackgroundCheck, state->audioOnlyCheck,
+                         state->surround51Check, state->surround51Hint,
                          state->driftLabel, state->driftHelp, state->driftCombo,
                          state->pcmQueueLabel, state->pcmQueueHelp,
                          state->pcmQueueCombo}) {
@@ -320,6 +323,9 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     // ASIO modes it is both irrelevant and misleading, even on the Audio tab.
     SetSettingsControlVisible(state->exclusiveTestButton,
                               audio && exclusive);
+    const bool shared = SendMessageW(state->audioCombo, CB_GETCURSEL, 0, 0) == 0;
+    EnableWindow(state->surround51Check, audio && shared);
+    EnableWindow(state->surround51Hint, audio && shared);
     for (HWND control : {state->videoCaptureSection,
                          state->videoDisplaySection,
                          state->videoWindowSection,

@@ -66,6 +66,8 @@ static constexpr Member kMembers[] = {
     {&SettingsControls::volumeHudCombo, "volumeHudCombo"},
     {&SettingsControls::muteBackgroundCheck, "muteBackgroundCheck"},
     {&SettingsControls::audioOnlyCheck, "audioOnlyCheck"},
+    {&SettingsControls::surround51Check, "surround51Check"},
+    {&SettingsControls::surround51Hint, "surround51Hint"},
     {&SettingsControls::forceHdr10Check, "forceHdr10Check"},
     {&SettingsControls::forceHdr10Help, "forceHdr10Help"},
     {&SettingsControls::hdrChromaLabel, "hdrChromaLabel"},
@@ -319,6 +321,7 @@ static void TestActualControlCreation() {
     {&SettingsControls::forceHdr10Help, 2034},
     {&SettingsControls::hdrChromaCombo, 2044},
     {&SettingsControls::hdrChromaHelp, 2045},
+    {&SettingsControls::surround51Check, 2046},
     {&SettingsControls::mjpegColorCombo, 2041},
     {&SettingsControls::mjpegColorHelp, 2042},
     {&SettingsControls::pixelCheck, 2003},
@@ -359,6 +362,7 @@ static void TestActualControlCreation() {
         settings.forceHdr10 = !settings.allowVolumeBoost;
         settings.muteWhenBackground = !settings.pixelPerfect;
         settings.audioOnly = !settings.relativeWindowSize;
+        settings.consoleSurround51 = profile % 2 != 0;
         settings.saveLog = !settings.borderlessWindow;
         settings.showDiagnosticConsole = !settings.windowSnap;
         settings.skipStartupSettings = settings.allowVolumeBoost;
@@ -420,6 +424,7 @@ static void TestActualControlCreation() {
             {state.forceHdr10Check, settings.forceHdr10},
             {state.muteBackgroundCheck, settings.muteWhenBackground},
             {state.audioOnlyCheck, settings.audioOnly},
+            {state.surround51Check, settings.consoleSurround51},
             {state.saveLogCheck, settings.saveLog},
             {state.showConsoleCheck, settings.showDiagnosticConsole},
             {state.skipStartupCheck, settings.skipStartupSettings},
@@ -440,6 +445,13 @@ static void TestActualControlCreation() {
         Check(SendMessageW(state.tooltipWindow, TTM_GETTOOLCOUNT, 0, 0) == 8, "seven help buttons and display monitor tooltip registered");
         ApplySettingsFont(&state, parent, 96);
         LayoutSettingsControls(&state, 96);
+        UpdateAdvancedControlVisibility(&state, settings.audioMode == AudioMode::WasapiExclusive,
+            VideoPixelFormat::Nv12);
+        // Missing ASIO drivers intentionally fall back to Shared in the dialog.
+        const bool surroundEnabled = state.activeTab == SettingsTab::Audio && audio == 0;
+        Check((IsWindowEnabled(state.surround51Check) != FALSE) == surroundEnabled &&
+              (IsWindowEnabled(state.surround51Hint) != FALSE) == surroundEnabled,
+              "5.1 option cannot be enabled in ASIO/Exclusive or hidden tabs");
         const RECT boost = ClientRectOf(parent, state.volumeBoostCheck);
         const RECT button = ClientRectOf(parent, state.volumeBoostHelp);
         Check(button.left > boost.right, "real checkbox/help hit targets do not overlap");
@@ -522,6 +534,8 @@ int main() {
             Check(IsSettingsHelpControl(&state, state.volumeBoostHelp) &&
                   !IsSettingsHelpControl(&state, state.volumeBoostCheck), "help routing distinct from option toggle");
             ExpectVisible(state.exclusiveTestButton, audio && exclusive);
+            Check(Visible(state.surround51Check) == audio && Visible(state.surround51Hint) == audio,
+                "surround settings only visible on audio tab");
             ExpectVisible(state.forceHdr10Check, video && format == VideoPixelFormat::P010);
             for (HWND control : {state.hdrChromaLabel, state.hdrChromaCombo, state.hdrChromaHelp})
                 ExpectVisible(control, video && format == VideoPixelFormat::P010);

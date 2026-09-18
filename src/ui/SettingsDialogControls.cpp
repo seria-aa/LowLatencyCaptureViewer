@@ -247,6 +247,22 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
     SendMessageW(state->audioOnlyCheck, BM_SETCHECK,
                  initial.settings.audioOnly ? BST_CHECKED : BST_UNCHECKED, 0);
 
+    state->surround51Check = CreateWindowExW(
+        0, L"BUTTON", text(L"콘솔 LPCM 5.1 (실험적 · Shared 전용)"),
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+        580, 244, 320, 28, hwnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_SURROUND51)),
+        instance, nullptr);
+    SendMessageW(state->surround51Check, BM_SETCHECK,
+        initial.settings.consoleSurround51 ? BST_CHECKED : BST_UNCHECKED, 0);
+    state->surround51Hint = CreateWindowExW(
+        0, L"STATIC", text(L"콘솔: 5.1 LPCM · 캡처: 6/8채널 PCM 필요\r\n"
+        L"Windows 출력 장치도 5.1로 설정하세요.\r\n"
+        L"스테레오 출력에서는 Windows가 다운믹스합니다.\r\n"
+        L"Dolby/DTS 및 가상 서라운드는 지원하지 않습니다."),
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        580, 280, 320, 100, hwnd, nullptr, instance, nullptr);
+
     state->languageLabel = makeLabel(
         text(L"언어 / Language"), 24, 392);
     state->languageCombo = CreateWindowExW(

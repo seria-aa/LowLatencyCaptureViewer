@@ -84,6 +84,8 @@ bool IsRunning(const Host& host) {
 RunResult Run(const Configuration& configuration, const Host& host,
               uint64_t* successfulRuntimeMilliseconds) {
     if (successfulRuntimeMilliseconds) *successfulRuntimeMilliseconds = 0;
+    if (configuration.surround51 && configuration.mode != Mode::Shared)
+        return RunResult::Failed;
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         LogHresult(host, L"CoInitializeEx(audio render)", hr);
@@ -170,11 +172,39 @@ RunResult Run(const Configuration& configuration, const Host& host,
             break;
         }
 
-        WAVEFORMATEX format = audio_device::PcmOutputFormat();
+        WAVEFORMATEXTENSIBLE extended{};
+        extended.Format = audio_device::PcmOutputFormat();
+        if (configuration.surround51) {
+            extended.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+            extended.Format.cbSize = sizeof(extended) - sizeof(WAVEFORMATEX);
+            extended.Format.nChannels = 6;
+            extended.Format.nBlockAlign = 12;
+            extended.Format.nAvgBytesPerSec = extended.Format.nSamplesPerSec * 12;
+            extended.Samples.wValidBitsPerSample = 16;
+            extended.dwChannelMask = 0x60f; // FL FR FC LFE SL SR
+            extended.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+            WAVEFORMATEX* mix = nullptr;
+            const HRESULT mixHr = client->GetMixFormat(&mix);
+            if (FAILED(mixHr) || !mix) {
+                if (mix) CoTaskMemFree(mix);
+                hr = FAILED(mixHr) ? mixHr : E_FAIL;
+                LogHresult(host, L"IAudioClient::GetMixFormat(console 5.1)", hr);
+                break;
+            }
+            diagnostics::LogMessage(host.log,
+                L"[audio] console 5.1: 6-channel PCM; Windows endpoint mix=%u ch "
+                L"(Windows performs speaker mapping/downmix).\n", mix->nChannels);
+            if (mix->nChannels < 6) diagnostics::LogMessage(host.log,
+                L"[audio] output is not configured for 5.1; Windows will downmix. "
+                L"Select a 5.1 playback device for discrete surround.\n");
+            CoTaskMemFree(mix);
+        }
+        WAVEFORMATEX& format = extended.Format;
         WAVEFORMATEX* closest = nullptr;
         const AUDCLNT_SHAREMODE shareMode = exclusive
             ? AUDCLNT_SHAREMODE_EXCLUSIVE : AUDCLNT_SHAREMODE_SHARED;
         hr = client->IsFormatSupported(shareMode, &format, &closest);
+        const bool exactFormat = hr == S_OK;
         if (exclusive) {
             if (closest) CoTaskMemFree(closest);
             closest = nullptr;
@@ -226,7 +256,7 @@ RunResult Run(const Configuration& configuration, const Host& host,
                     L"IAudioClient::GetMixFormat(exclusive diagnostic)",
                     mixHr);
             }
-        } else if (FAILED(hr)) {
+        } else if (FAILED(hr) && !(configuration.surround51 && hr == AUDCLNT_E_UNSUPPORTED_FORMAT)) {
             if (closest) CoTaskMemFree(closest);
             LogHresult(
                 host, L"IAudioClient::IsFormatSupported(shared)", hr);
@@ -245,6 +275,9 @@ RunResult Run(const Configuration& configuration, const Host& host,
                 properties.eCategory = AudioCategory_Media;
                 hr = client3->SetClientProperties(&properties);
             }
+            // Client3 does not do automatic channel/sample conversion. A
+            // non-exact six-channel format must use classic AUTOCONVERTPCM.
+            if (configuration.surround51 && !exactFormat) hr = AUDCLNT_E_UNSUPPORTED_FORMAT;
             if (SUCCEEDED(hr)) {
                 hr = client3->GetSharedModeEnginePeriod(
                     &format, &support.defaultFrames,
@@ -455,7 +488,7 @@ RunResult Run(const Configuration& configuration, const Host& host,
         }
 
         std::vector<int16_t> temp(
-            static_cast<size_t>(bufferFrames) * audio_device::kChannels);
+            static_cast<size_t>(bufferFrames) * format.nChannels);
         audio::SharedDeadlineMonitor deadline;
         LARGE_INTEGER qpcFrequency{};
         QueryPerformanceFrequency(&qpcFrequency);

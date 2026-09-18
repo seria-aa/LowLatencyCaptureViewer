@@ -83,6 +83,7 @@ struct ExclusiveEndpointCacheEntry {
 struct AppSettings {
     UiLanguage uiLanguage = UiLanguage::Auto;
     AudioMode audioMode = AudioMode::WasapiShared;
+    bool consoleSurround51 = false;
     int wasapiBufferMs = 20;
     uint32_t wasapiSharedPeriodFrames = 0;
     DriftCorrectionMode driftCorrection = DriftCorrectionMode::Auto;

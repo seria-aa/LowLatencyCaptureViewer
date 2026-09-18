@@ -1,4 +1,13 @@
-Low Latency Capture Viewer v1.2.9 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.10 x64 (continued from the v0.14.2 rework)
+
+v1.2.10 Console LPCM 5.1 (experimental)
+-------------------------------------
+- Adds an opt-in console LPCM 5.1 path for WASAPI Shared only.
+- Accepts explicit 48 kHz 6/8-channel PCM layouts; folds 7.1 transport to 5.1.
+- Preserves center/LFE, with channel-aware buffering, drift correction and volume.
+- Rejects incompatible or changed multichannel input instead of guessing layouts.
+- Keeps stereo as the default; ASIO/Exclusive remain stereo. No added codec/DLL.
+- Physical 5.1 capture/speaker placement is not verified; see docs/AUDIO.md.
 
 v1.2.9 HDR chroma compatibility and diagnostics panel
 ----------------------------------------------------
