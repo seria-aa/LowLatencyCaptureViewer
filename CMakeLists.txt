@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 1.2.9 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 1.2.10 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -112,6 +112,17 @@ endif()
 
 include(CTest)
 if (BUILD_TESTING)
+    add_executable(SurroundAudioTests tests/SurroundAudioTests.cpp
+        src/capture/AudioSampleGrabber.cpp
+        src/audio/CaptureAudioFormat.cpp src/audio/PcmPipeline.cpp src/audio/AudioMix.cpp)
+    target_include_directories(SurroundAudioTests PRIVATE src)
+    target_compile_definitions(SurroundAudioTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(SurroundAudioTests PRIVATE strmiids ole32)
+    set_target_properties(SurroundAudioTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    if (MSVC)
+        target_compile_options(SurroundAudioTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    endif()
+    add_test(NAME SurroundAudioTests COMMAND SurroundAudioTests)
     add_executable(HardwareToneMappingTests tests/HardwareToneMappingTests.cpp
         src/capture/HardwareToneMapping.cpp)
     target_include_directories(HardwareToneMappingTests PRIVATE src)
@@ -228,6 +239,8 @@ if (BUILD_TESTING)
         target_compile_options(SharedReplayTests PRIVATE /W4 /EHsc /permissive- /utf-8)
     endif()
     add_test(NAME SharedReplayTests COMMAND SharedReplayTests)
+    add_test(NAME SharedSurroundReplay COMMAND SharedReplayTests --surround)
+    set_tests_properties(SharedSurroundReplay PROPERTIES TIMEOUT 240)
     set_tests_properties(SharedReplayTests PROPERTIES TIMEOUT 180)
     add_test(NAME SharedReplayExtended COMMAND SharedReplayTests --extended)
     set_tests_properties(SharedReplayExtended PROPERTIES TIMEOUT 240)

@@ -1,4 +1,4 @@
-Low Latency Capture Viewer v1.2.9 - dependencies
+Low Latency Capture Viewer v1.2.10 - dependencies
 =================================================
 
 License: GNU General Public License v3.0 or later. See the root LICENSE file.
@@ -12,6 +12,9 @@ separate Visual C++ Redistributable installation. The target PC needs:
   mono/stereo PCM or 32-bit float audio, either on the video filter or as a
   separate DirectShow audio-input filter
 - D3D11, DXGI, DirectShow, and WASAPI Windows system components
+- Optional console LPCM 5.1: explicit 48 kHz 6/8-channel PCM capture input and
+  WASAPI Shared output. Configure Windows speakers for 5.1; stereo endpoints
+  downmix. Dolby/DTS decoding and ASIO/Exclusive 5.1 are not supported.
 - Optional ASIO mode: an ASIO-compatible output driver installed by the user.
   ASIO drivers are not included. The bundled Steinberg ASIO SDK host headers and
   helper sources are used under the SDK's GPLv3 option; see

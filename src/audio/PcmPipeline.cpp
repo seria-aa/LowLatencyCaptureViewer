@@ -4,6 +4,7 @@
 #include <cmath>
 #include <climits>
 #include <limits>
+#include <stdexcept>
 
 namespace llcv::audio {
 
@@ -11,10 +12,19 @@ PcmRing::PcmRing(size_t capacityFrames,
                  std::atomic<UINT32>* publishedFrames,
                  OverrunObserver overrunObserver, void* observerContext)
     : capacityFrames_((std::max)(size_t{1}, capacityFrames)),
-      data_(capacityFrames_ * kChannels),
+      data_(capacityFrames_ * channels_),
       publishedFrames_(publishedFrames),
       overrunObserver_(overrunObserver),
       observerContext_(observerContext) {
+    PublishAvailable();
+}
+
+void PcmRing::ConfigureChannels(size_t channels) {
+    if (channels != 2 && channels != 6) throw std::invalid_argument("PCM channels");
+    std::lock_guard<std::mutex> lock(mutex_);
+    data_.assign(capacityFrames_ * channels, 0);
+    channels_ = channels;
+    readFrame_ = writeFrame_ = available_ = 0;
     PublishAvailable();
 }
 
@@ -48,15 +58,17 @@ void PcmRing::Push(const int16_t* samples, size_t frames) {
     if (!samples || frames == 0) return;
     std::lock_guard<std::mutex> lock(mutex_);
     if (frames >= capacityFrames_) {
-        samples += (frames - capacityFrames_) * kChannels;
+        samples += (frames - capacityFrames_) * channels_;
     }
     frames = PrepareWrite(frames);
     for (size_t i = 0; i < frames; ++i) {
         const size_t destination =
-            ((writeFrame_ + i) % capacityFrames_) * kChannels;
-        const size_t source = i * kChannels;
-        data_[destination] = samples[source];
-        data_[destination + 1] = samples[source + 1];
+            ((writeFrame_ + i) % capacityFrames_) * channels_;
+        const size_t source = i * channels_;
+        if (channels_ == 2) {
+            data_[destination] = samples[source];
+            data_[destination + 1] = samples[source + 1];
+        } else std::copy_n(samples + source, channels_, data_.data() + destination);
     }
     writeFrame_ = (writeFrame_ + frames) % capacityFrames_;
     available_ += frames;
@@ -66,20 +78,22 @@ void PcmRing::Push(const int16_t* samples, size_t frames) {
 void PcmRing::PushConverted(const BYTE* source, size_t frames,
                             const capture_audio::Format& format) {
     if (!source || frames == 0 || format.blockAlign == 0) return;
+    if ((channels_ == 6) != (format.path == capture_audio::Path::ConvertToSurround51)) return;
     std::lock_guard<std::mutex> lock(mutex_);
     if (frames >= capacityFrames_) {
         source += (frames - capacityFrames_) * format.blockAlign;
     }
     frames = PrepareWrite(frames);
     for (size_t i = 0; i < frames; ++i) {
-        int16_t left = 0;
-        int16_t right = 0;
-        capture_audio::ConvertFrame(source + i * format.blockAlign, format,
-                                    left, right);
         const size_t destination =
-            ((writeFrame_ + i) % capacityFrames_) * kChannels;
-        data_[destination] = left;
-        data_[destination + 1] = right;
+            ((writeFrame_ + i) % capacityFrames_) * channels_;
+        if (channels_ == 6) {
+            capture_audio::ConvertSurroundFrame(source + i * format.blockAlign,
+                format, data_.data() + destination);
+        } else {
+            capture_audio::ConvertFrame(source + i * format.blockAlign, format,
+                data_[destination], data_[destination + 1]);
+        }
     }
     writeFrame_ = (writeFrame_ + frames) % capacityFrames_;
     available_ += frames;
@@ -92,10 +106,12 @@ size_t PcmRing::Pop(int16_t* output, size_t frames) {
     const size_t count = (std::min)(frames, available_);
     for (size_t i = 0; i < count; ++i) {
         const size_t source =
-            ((readFrame_ + i) % capacityFrames_) * kChannels;
-        const size_t destination = i * kChannels;
-        output[destination] = data_[source];
-        output[destination + 1] = data_[source + 1];
+            ((readFrame_ + i) % capacityFrames_) * channels_;
+        const size_t destination = i * channels_;
+        if (channels_ == 2) {
+            output[destination] = data_[source];
+            output[destination + 1] = data_[source + 1];
+        } else std::copy_n(data_.data() + source, channels_, output + destination);
     }
     readFrame_ = (readFrame_ + count) % capacityFrames_;
     available_ -= count;
@@ -130,13 +146,13 @@ void PcmRing::PublishAvailable() noexcept {
 
 SincDriftResampler::SincDriftResampler(
     PcmRing& ring, std::atomic<UINT32>* publishedBufferedFrames) noexcept
-    : ring_(ring), publishedBufferedFrames_(publishedBufferedFrames) {}
+    : channels_(ring.Channels()), ring_(ring), publishedBufferedFrames_(publishedBufferedFrames) {}
 
 void SincDriftResampler::Prepare(size_t maxOutputFrames) {
     const size_t sourceFrames = (std::max)(
         static_cast<size_t>(32768), maxOutputFrames * 4 + 64);
-    source_.reserve(sourceFrames * kChannels);
-    transfer_.reserve((maxOutputFrames + kHalfTaps * 2 + 8) * kChannels);
+    source_.reserve(sourceFrames * channels_);
+    transfer_.reserve((maxOutputFrames + kHalfTaps * 2 + 8) * channels_);
 }
 
 void SincDriftResampler::Reset() {
@@ -156,12 +172,11 @@ size_t SincDriftResampler::Render(int16_t* output, size_t outputFrames,
         const size_t wanted = outputFrames + kHalfTaps * 2 + 2;
         const size_t pulled = AppendFromRing(wanted);
         if (pulled == 0) return 0;
-        const int16_t firstLeft = source_[0];
-        const int16_t firstRight = source_[1];
-        source_.insert(source_.begin(), kHistoryFrames * kChannels, 0);
+        int16_t first[6]{};
+        std::copy_n(source_.data(), channels_, first);
+        source_.insert(source_.begin(), kHistoryFrames * channels_, 0);
         for (int i = 0; i < kHistoryFrames; ++i) {
-            source_[static_cast<size_t>(i) * kChannels] = firstLeft;
-            source_[static_cast<size_t>(i) * kChannels + 1] = firstRight;
+            std::copy_n(first, channels_, source_.data() + static_cast<size_t>(i) * channels_);
         }
         position_ = static_cast<double>(kHistoryFrames);
         primed_ = true;
@@ -171,13 +186,13 @@ size_t SincDriftResampler::Render(int16_t* output, size_t outputFrames,
         position_ + ratio * static_cast<double>(outputFrames - 1);
     const size_t requiredFrames =
         static_cast<size_t>(std::floor(lastPosition)) + 1;
-    const size_t currentFrames = source_.size() / kChannels;
+    const size_t currentFrames = source_.size() / channels_;
     if (requiredFrames > currentFrames) {
         AppendFromRing(requiredFrames - currentFrames);
     }
 
     size_t produced = 0;
-    const size_t sourceFrames = source_.size() / kChannels;
+    const size_t sourceFrames = source_.size() / channels_;
     while (produced < outputFrames) {
         const double samplePosition =
             position_ - static_cast<double>(kHalfTaps);
@@ -193,14 +208,14 @@ size_t SincDriftResampler::Render(int16_t* output, size_t outputFrames,
             weights[tap + kHalfTaps - 1] =
                 WindowedSinc(static_cast<double>(tap) - fraction);
         }
-        for (size_t channel = 0; channel < kChannels; ++channel) {
+        for (size_t channel = 0; channel < channels_; ++channel) {
             double sum = 0.0;
             double normalization = 0.0;
             for (int tap = -kHalfTaps + 1; tap <= kHalfTaps; ++tap) {
                 const double weight = weights[tap + kHalfTaps - 1];
                 const size_t index =
                     (center + static_cast<size_t>(tap + kHalfTaps - 1) -
-                     static_cast<size_t>(kHalfTaps - 1)) * kChannels + channel;
+                     static_cast<size_t>(kHalfTaps - 1)) * channels_ + channel;
                 sum += static_cast<double>(source_[index]) * weight;
                 normalization += weight;
             }
@@ -208,7 +223,7 @@ size_t SincDriftResampler::Render(int16_t* output, size_t outputFrames,
             const long sample = std::lround(std::clamp(
                 sum, static_cast<double>(INT16_MIN),
                 static_cast<double>(INT16_MAX)));
-            output[produced * kChannels + channel] =
+            output[produced * channels_ + channel] =
                 static_cast<int16_t>(sample);
         }
         ++produced;
@@ -221,7 +236,7 @@ size_t SincDriftResampler::Render(int16_t* output, size_t outputFrames,
 }
 
 size_t SincDriftResampler::BufferedFrames() const noexcept {
-    const size_t frames = source_.size() / kChannels;
+    const size_t frames = source_.size() / channels_;
     const size_t consumed = static_cast<size_t>(std::floor(position_));
     return frames > consumed ? frames - consumed : 0;
 }
@@ -240,11 +255,11 @@ double SincDriftResampler::WindowedSinc(double distance) noexcept {
 size_t SincDriftResampler::AppendFromRing(size_t wantedFrames) {
     const size_t frames = (std::min)(wantedFrames, ring_.AvailableFrames());
     if (frames == 0) return 0;
-    transfer_.resize(frames * kChannels);
+    transfer_.resize(frames * channels_);
     const size_t pulled = ring_.Pop(transfer_.data(), frames);
     source_.insert(source_.end(), transfer_.begin(),
                    transfer_.begin() +
-                       static_cast<ptrdiff_t>(pulled * kChannels));
+                       static_cast<ptrdiff_t>(pulled * channels_));
     return pulled;
 }
 
@@ -256,7 +271,7 @@ void SincDriftResampler::CompactHistory() {
         integerPosition - static_cast<size_t>(kHistoryFrames);
     source_.erase(source_.begin(),
                   source_.begin() +
-                      static_cast<ptrdiff_t>(dropFrames * kChannels));
+                      static_cast<ptrdiff_t>(dropFrames * channels_));
     position_ -= static_cast<double>(dropFrames);
 }
 

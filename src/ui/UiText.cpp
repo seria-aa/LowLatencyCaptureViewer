@@ -11,6 +11,15 @@ const wchar_t* Translate(const wchar_t* korean, bool useEnglish) {
     // This keeps settings files backward-compatible and lets the UI switch
     // language without a second executable or a runtime translation service.
     static const std::unordered_map<std::wstring, std::wstring> english = {
+        {L"콘솔 LPCM 5.1 (실험적 · Shared 전용)", L"Console LPCM 5.1 (experimental; Shared only)"},
+        {L"콘솔: 5.1 LPCM · 캡처: 6/8채널 PCM 필요\r\n"
+         L"Windows 출력 장치도 5.1로 설정하세요.\r\n"
+         L"스테레오 출력에서는 Windows가 다운믹스합니다.\r\n"
+         L"Dolby/DTS 및 가상 서라운드는 지원하지 않습니다.",
+         L"Requires console 5.1 LPCM and 6/8-channel capture.\r\n"
+         L"Configure Windows playback speakers as 5.1.\r\n"
+         L"Windows downmixes for stereo output devices.\r\n"
+         L"No Dolby/DTS decoding or virtual surround."},
         {L"Windows 기본 장치", L"Windows default device"},
         {L"선택 장치 없음", L"No selected device"},
         {L"WASAPI: 출력 사용 불가 · F2로 설정 확인", L"WASAPI: output unavailable (F2 for settings)"},

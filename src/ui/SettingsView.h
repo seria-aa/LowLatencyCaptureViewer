@@ -64,6 +64,8 @@ struct SettingsControls {
     HWND volumeHudCombo = nullptr;
     HWND muteBackgroundCheck = nullptr;
     HWND audioOnlyCheck = nullptr;
+    HWND surround51Check = nullptr;
+    HWND surround51Hint = nullptr;
     HWND forceHdr10Check = nullptr;
     HWND forceHdr10Help = nullptr;
     HWND hdrChromaLabel = nullptr;

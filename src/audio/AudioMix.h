@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 
 namespace llcv::audio {
 
@@ -21,6 +22,11 @@ struct MixMetrics {
 MixMetrics ProcessStereoPcm(int16_t* samples, std::size_t frames,
                             StereoGain& current, StereoGain target,
                             bool measurePeaks) noexcept;
+// Master affects all six channels. L/R controls affect the corresponding
+// front/surround pair; center and LFE use master only. Meters summarize sides.
+MixMetrics ProcessSurroundPcm(int16_t* samples, std::size_t frames,
+    std::array<double, 6>& current, double master, StereoGain sides,
+    bool measurePeaks) noexcept;
 
 // Peak hold is intentionally a tiny arithmetic helper, not a second audio
 // buffer. The caller owns the atomic publication policy.

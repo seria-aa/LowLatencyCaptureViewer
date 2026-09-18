@@ -54,6 +54,7 @@ inline constexpr int IDC_SETTINGS_MJPEG_COLOR_HELP = 2042;
 inline constexpr int IDC_SETTINGS_DISPLAY_MONITOR = 2043;
 inline constexpr int IDC_SETTINGS_HDR_CHROMA = 2044;
 inline constexpr int IDC_SETTINGS_HDR_CHROMA_HELP = 2045;
+inline constexpr int IDC_SETTINGS_SURROUND51 = 2046;
 } // namespace control_id
 
 // Borrowed for the duration of creation only; no settings/device list copies.

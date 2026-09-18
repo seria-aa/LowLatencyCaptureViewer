@@ -119,7 +119,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.2.9";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.10";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -814,6 +814,8 @@ static bool OnPcmRingOverrun(void*, size_t droppedFrames) {
 
 static PcmRing g_ring{kRingFrames, &g_audioRingFrames,
                       OnPcmRingOverrun, nullptr};
+static bool Surround51Active() { return g_ring.Channels() == 6; }
+static std::atomic<bool> g_surroundCaptureRejected{false};
 static std::atomic<uint64_t> g_underruns{0};
 
 // -----------------------------------------------------------------------------
@@ -834,6 +836,7 @@ static ISampleGrabberCB* CreateAudioSampleCallback(
         &g_audioLastCaptureCallbackMs,
         &g_audioCaptureCallbacks,
         &g_audioCaptureFrames,
+        &g_surroundCaptureRejected,
     };
     return new llcv::capture::AudioSampleGrabberCallback(
         format, g_ring, telemetry, CaptureAudioTrackingActive, nullptr);
@@ -1116,6 +1119,7 @@ struct WasapiRenderState {
     bool autoCorrectionActive = false;
     UINT32 queueTargetFrames = 0;
     llcv::audio::StereoGain currentMix{};
+    std::array<double, 6> surroundMix{1, 1, 1, 1, 1, 1};
 };
 
 static llcv::wasapi::FillResult FillWasapiPcm(
@@ -1262,8 +1266,10 @@ static llcv::wasapi::FillResult FillWasapiPcm(
     const double targetVolumeGain = TargetAudioVolumeGain();
     const bool measurePeaks =
         g_audioOsdVisible.load(std::memory_order_acquire);
-    const llcv::audio::MixMetrics mix = llcv::audio::ProcessStereoPcm(
-        output, got, state->currentMix,
+    const llcv::audio::MixMetrics mix = Surround51Active()
+        ? llcv::audio::ProcessSurroundPcm(output, got, state->surroundMix,
+            targetVolumeGain, {TargetAudioChannelGain(0), TargetAudioChannelGain(1)}, measurePeaks)
+        : llcv::audio::ProcessStereoPcm(output, got, state->currentMix,
         {targetVolumeGain * TargetAudioChannelGain(0),
          targetVolumeGain * TargetAudioChannelGain(1)},
         measurePeaks);
@@ -1434,6 +1440,8 @@ static llcv::wasapi::RunResult AudioRenderThreadWasapi(
     state.currentMix = {
         initialVolumeGain * TargetAudioChannelGain(0),
         initialVolumeGain * TargetAudioChannelGain(1)};
+    state.surroundMix = {state.currentMix.left, state.currentMix.right,
+        initialVolumeGain, initialVolumeGain, state.currentMix.left, state.currentMix.right};
     g_audioQueueTargetFrames.store(
         state.queueTargetFrames, std::memory_order_release);
     g_audioResamplerActive.store(
@@ -1447,6 +1455,7 @@ static llcv::wasapi::RunResult AudioRenderThreadWasapi(
             ? L"auto (observe first; latch on when sustained drift is detected)"
             : L"off (unaltered PCM samples)";
     llcv::wasapi::Configuration configuration{};
+    configuration.surround51 = Surround51Active();
     configuration.mode = mode == AudioMode::WasapiExclusive
         ? llcv::wasapi::Mode::Exclusive : llcv::wasapi::Mode::Shared;
     configuration.endpointId = g_settings.audioOutputDeviceId;
@@ -3146,11 +3155,14 @@ static bool AudioOnlyCaptureLoop() {
             hr = graph->AddFilter(capture, L"Selected Capture Device");
             if (FAILED(hr)) break;
             g_activeCaptureAudioDeviceName = g_activeCaptureDeviceName;
-            hr = FindOutputPinByName(capture, kAudioPinName, &audioPin);
-            if (FAILED(hr)) {
+            hr = Surround51Active()
+                ? llcv::capture_audio::FindSurroundPin(capture, &audioPin)
+                : FindOutputPinByName(capture, kAudioPinName, &audioPin);
+            if (FAILED(hr) && !Surround51Active()) {
                 hr = FindOutputPinByMajorType(capture, MEDIATYPE_Audio,
                                               &audioPin);
             }
+            if (Surround51Active()) g_surroundCaptureRejected.store(FAILED(hr));
         } else {
             g_activeCaptureDeviceName = L"(audio-only)";
             hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
@@ -3166,8 +3178,10 @@ static bool AudioOnlyCaptureLoop() {
             hr = graph->AddFilter(audioCapture,
                                   L"Selected Capture Audio Device");
             if (FAILED(hr)) break;
-            hr = FindOutputPinByMajorType(audioCapture, MEDIATYPE_Audio,
-                                          &audioPin);
+            hr = Surround51Active()
+                ? llcv::capture_audio::FindSurroundPin(audioCapture, &audioPin)
+                : FindOutputPinByMajorType(audioCapture, MEDIATYPE_Audio, &audioPin);
+            if (Surround51Active()) g_surroundCaptureRejected.store(FAILED(hr));
         }
         if (FAILED(hr)) break;
         g_captureAudioAvailable.store(true, std::memory_order_release);
@@ -3176,8 +3190,9 @@ static bool AudioOnlyCaptureLoop() {
         llcv::capture_audio::Rejection rejection =
             llcv::capture_audio::Rejection::Malformed;
         selectedAudioType = llcv::capture_audio::SelectSupportedType(
-            audioPin, selectedAudioFormat, &rejection);
+            audioPin, selectedAudioFormat, &rejection, Surround51Active());
         if (!selectedAudioType) {
+            if (Surround51Active()) g_surroundCaptureRejected.store(true);
             fwprintf(stderr, L"[audio] capture input rejected: %s\n",
                      llcv::capture_audio::DescribeRejection(rejection).c_str());
             hr = VFW_E_TYPE_NOT_ACCEPTED;
@@ -3218,8 +3233,14 @@ static bool AudioOnlyCaptureLoop() {
                                     &audioGrabberOut))) break;
         if (FAILED(hr = GetFirstPin(audioNullRenderer, PINDIR_INPUT,
                                     &audioNullIn))) break;
+        if (Surround51Active()) g_surroundCaptureRejected.store(true);
         if (FAILED(hr = graph->ConnectDirect(audioPin, audioGrabberIn,
                                              selectedAudioType))) break;
+        if (Surround51Active()) {
+            hr = llcv::capture_audio::VerifySurroundConnection(audioGrabberIn, selectedAudioFormat);
+            if (FAILED(hr)) break;
+            g_surroundCaptureRejected.store(false);
+        }
         ReportConnectedAudioAllocator(audioGrabberIn,
                                       selectedAudioFormat.blockAlign);
         if (FAILED(hr = graph->Connect(audioGrabberOut, audioNullIn))) break;
@@ -3232,7 +3253,15 @@ static bool AudioOnlyCaptureLoop() {
                  L"[capture] audio-only graph running: %s · %s\n",
                  g_activeCaptureAudioDeviceName.c_str(),
                  llcv::capture_audio::Describe(selectedAudioFormat).c_str());
-        while (g_running.load(std::memory_order_acquire)) Sleep(100);
+        while (g_running.load(std::memory_order_acquire)) {
+            if (Surround51Active() && g_surroundCaptureRejected.load(std::memory_order_acquire)) {
+                initializationStage = L"5.1 capture format changed; restart required";
+                hr = VFW_E_TYPE_NOT_ACCEPTED;
+                initialized = false;
+                break;
+            }
+            Sleep(100);
+        }
         control->Stop();
     } while (false);
 
@@ -3606,10 +3635,13 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         initializationStage = L"find audio output pin on video capture filter";
         hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
         if (g_settings.captureAudioDeviceId.empty()) {
-            hr = FindOutputPinByName(capture, kAudioPinName, &audioPin);
-            if (FAILED(hr)) {
+            hr = Surround51Active()
+                ? llcv::capture_audio::FindSurroundPin(capture, &audioPin)
+                : FindOutputPinByName(capture, kAudioPinName, &audioPin);
+            if (FAILED(hr) && !Surround51Active()) {
                 hr = FindOutputPinByMajorType(capture, MEDIATYPE_Audio, &audioPin);
             }
+            if (Surround51Active()) g_surroundCaptureRejected.store(FAILED(hr));
         }
         if (FAILED(hr)) {
             initializationStage = g_settings.captureAudioDeviceId.empty()
@@ -3625,7 +3657,10 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             if (FAILED(hr)) break;
             audioSource = audioCapture;
             initializationStage = L"find audio output pin on separate capture filter";
-            hr = FindOutputPinByMajorType(audioSource, MEDIATYPE_Audio, &audioPin);
+            hr = Surround51Active()
+                ? llcv::capture_audio::FindSurroundPin(audioSource, &audioPin)
+                : FindOutputPinByMajorType(audioSource, MEDIATYPE_Audio, &audioPin);
+            if (Surround51Active()) g_surroundCaptureRejected.store(FAILED(hr));
         }
         if (FAILED(hr)) break;
         g_captureAudioAvailable.store(true, std::memory_order_release);
@@ -3634,8 +3669,9 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         llcv::capture_audio::Rejection audioFormatRejection =
             llcv::capture_audio::Rejection::Malformed;
         selectedAudioType = llcv::capture_audio::SelectSupportedType(
-            audioPin, selectedAudioFormat, &audioFormatRejection);
+            audioPin, selectedAudioFormat, &audioFormatRejection, Surround51Active());
         if (!selectedAudioType) {
+            if (Surround51Active()) g_surroundCaptureRejected.store(true);
             fwprintf(stderr, L"[audio] capture input rejected: %s\n",
                      llcv::capture_audio::DescribeRejection(
                          audioFormatRejection).c_str());
@@ -3678,8 +3714,14 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                                     &audioGrabberOut))) break;
         if (FAILED(hr = GetFirstPin(audioNullRenderer, PINDIR_INPUT,
                                     &audioNullIn))) break;
+        if (Surround51Active()) g_surroundCaptureRejected.store(true);
         if (FAILED(hr = graph->ConnectDirect(audioPin, audioGrabberIn,
                                              selectedAudioType))) break;
+        if (Surround51Active()) {
+            hr = llcv::capture_audio::VerifySurroundConnection(audioGrabberIn, selectedAudioFormat);
+            g_surroundCaptureRejected.store(FAILED(hr));
+            if (FAILED(hr)) break;
+        }
         ReportConnectedAudioAllocator(audioGrabberIn,
                                       selectedAudioFormat.blockAlign);
         if (FAILED(hr = graph->Connect(audioGrabberOut, audioNullIn))) break;
@@ -3762,6 +3804,12 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         const auto firstFrameDeadline = firstFrameStart + std::chrono::seconds(10);
         initializationStage = L"wait for first valid capture frame";
         while (g_running.load()) {
+            if (Surround51Active() && g_surroundCaptureRejected.load(std::memory_order_acquire)) {
+                initializationStage = L"5.1 capture format changed; restart required";
+                hr = VFW_E_TYPE_NOT_ACCEPTED;
+                initialized = false;
+                break;
+            }
             const DWORD frameWait = WaitForSingleObject(frameEvent, 100);
             if (frameWait == WAIT_FAILED) {
                 hr = HRESULT_FROM_WIN32(GetLastError());
@@ -4240,6 +4288,13 @@ static void UpdateAudioClient3Status(SettingsDialogState* state) {
     if (SettingsUsesExclusiveMode(state)) {
         SetWindowTextW(state->audioStatus, UI_TEXT(
             L"WASAPI Exclusive 이벤트 진단 · 장치 독점 · IAudioClient3 미사용"));
+        return;
+    }
+    if (state->surround51Check && SendMessageW(state->surround51Check,
+            BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        SetWindowTextW(state->audioStatus, IsEnglishUi()
+            ? L"Console 5.1: output period is negotiated on start; actual value in Tab diagnostics."
+            : L"콘솔 5.1: 출력 주기는 시작 시 협상 · 실제 값은 Tab 진단에서 확인");
         return;
     }
     if (!state->probeReady.load(std::memory_order_acquire)) {
@@ -5006,6 +5061,8 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->muteBackgroundCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.audioOnly = SendMessageW(
             state->audioOnlyCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_settings.consoleSurround51 = SendMessageW(
+            state->surround51Check, BM_GETCHECK, 0, 0) == BST_CHECKED;
         // The override only has meaning on an explicit P010 selection. Clear
         // any older saved value when switching back to a normal SDR format.
         g_settings.forceHdr10 =
@@ -5348,6 +5405,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
     }
 
     case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_SETTINGS_SURROUND51 && HIWORD(wParam) == BN_CLICKED) {
+            UpdateAudioClient3Status(state);
+            return 0;
+        }
         if (LOWORD(wParam) == IDC_SETTINGS_AUDIO &&
             HIWORD(wParam) == CBN_SELCHANGE) {
             RememberCurrentBufferChoice(state);
@@ -6738,7 +6799,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
          g_settings.audioMode == AudioMode::WasapiExclusive
              ? L"WASAPI Exclusive"
              : g_settings.audioMode == AudioMode::Asio ? L"ASIO"
-                                                        : L"WASAPI Shared",
+                                                        : Surround51Active() ? L"WASAPI Shared · PCM 5.1" : L"WASAPI Shared",
         outputName.c_str(),
         1000.0 * audioFrames / kSampleRate,
         1000.0 * paddingFrames / kSampleRate,
@@ -7714,6 +7775,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
 
     // One DirectShow graph owns one selected capture-filter instance and both
     // its video and audio branches. WASAPI remains an independent consumer.
+    // Freeze queue width before either audio thread (or its resampler) exists.
+    g_ring.ConfigureChannels(g_settings.consoleSurround51 &&
+        g_settings.audioMode == AudioMode::WasapiShared ? 6 : 2);
+    g_surroundCaptureRejected.store(false, std::memory_order_release);
     std::thread renderThread(AudioRenderThread);
     std::thread unifiedCaptureThread([hwnd, smokeTest]() {
         const bool initialized = g_settings.audioOnly
@@ -7724,7 +7789,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                          ? L"[capture] audio-only graph stopped.\n"
                          : L"[capture] single capture graph stopped.\n");
             if (!smokeTest) {
-                if (g_settings.audioOnly) {
+                if (g_surroundCaptureRejected.load(std::memory_order_acquire)) {
+                    MessageBoxW(hwnd, IsEnglishUi()
+                        ? L"The capture device did not provide a compatible 48 kHz 5.1/7.1 PCM input.\n\nSet the console to 5.1 LPCM and use a multichannel capture input. If unsupported, turn off Console LPCM 5.1 and select stereo on the console. Dolby/DTS bitstreams are not supported."
+                        : L"캡처 장치에서 호환되는 48 kHz 5.1/7.1 PCM 입력을 받지 못했습니다.\n\n콘솔을 5.1 LPCM으로 설정하고 다채널 캡처 입력을 선택하세요. 지원하지 않는 장치라면 콘솔 LPCM 5.1 옵션을 끄고 콘솔도 스테레오로 바꿔 주세요. Dolby/DTS 비트스트림은 지원하지 않습니다.",
+                        L"Low Latency Capture Viewer", MB_OK | MB_ICONERROR);
+                    g_restartToSettings.store(true, std::memory_order_release);
+                } else if (g_settings.audioOnly) {
                     const HRESULT failure =
                         g_captureFailureHr.load(std::memory_order_acquire);
                     wchar_t message[512]{};

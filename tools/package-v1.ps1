@@ -1,7 +1,7 @@
-param(
-    [string]$Version = "1.2.9",
-    [string]$BuildDir = "..\build-v1290-release",
-    [string]$OutputDir = "..\outputs\v1.2.9"
+﻿param(
+    [string]$Version = "1.2.10",
+    [string]$BuildDir = "..\build-v12100-release",
+    [string]$OutputDir = "..\outputs\v1.2.10"
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +36,9 @@ New-Item -ItemType Directory -Force -Path $portable | Out-Null
 $files = @("README.md", "README.ko.md", "LICENSE", "실행안내.txt", "DEPENDENCIES.txt")
 Copy-Item -LiteralPath $exe -Destination $portable
 foreach ($file in $files) {
+    if (-not (Test-Path -LiteralPath (Join-Path $root $file) -PathType Leaf)) {
+        throw "Missing required package input: $file"
+    }
     Copy-Item -LiteralPath (Join-Path $root $file) -Destination $portable
 }
 Copy-Item -LiteralPath (Join-Path $root "third_party\asio\LICENSE.txt") `

@@ -28,6 +28,7 @@ std::wstring TemporaryIniPath() {
 void TestDefaults(const std::wstring& path) {
     DeleteFileW(path.c_str());
     const auto loaded = llcv::settings::LoadFromIni(path);
+    Check(!loaded.settings.consoleSurround51, "5.1 is opt-in for old and fresh profiles");
     Check(loaded.settings.preferredDisplayMonitor.empty(), "default display is automatic");
     Check(loaded.settings.audioMode ==
               llcv::settings::AudioMode::WasapiShared,
@@ -48,6 +49,7 @@ void TestDefaults(const std::wstring& path) {
 void TestRoundTrip(const std::wstring& path) {
     using namespace llcv::settings;
     AppSettings saved{};
+    saved.consoleSurround51 = true;
     saved.preferredDisplayMonitor = L"interface:monitor-test-id";
     saved.uiLanguage = UiLanguage::English;
     saved.audioMode = AudioMode::Asio;
@@ -93,6 +95,7 @@ void TestRoundTrip(const std::wstring& path) {
 
     SaveToIni(path, saved);
     const LoadResult result = LoadFromIni(path);
+    Check(result.settings.consoleSurround51, "surround preference round trip");
     const AppSettings& loaded = result.settings;
     Check(loaded.hdrChromaLocation == saved.hdrChromaLocation, "HDR chroma round trip");
     Check(loaded.preferredDisplayMonitor == saved.preferredDisplayMonitor, "display monitor round trip");

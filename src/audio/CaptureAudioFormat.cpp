@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cwchar>
 #include <limits>
 
 namespace llcv::capture_audio {
@@ -56,7 +57,7 @@ void DeleteMediaType(AM_MEDIA_TYPE*& mediaType) noexcept {
 
 }  // namespace
 
-Classification Classify(const AM_MEDIA_TYPE& mediaType) noexcept {
+Classification Classify(const AM_MEDIA_TYPE& mediaType, bool surround51) noexcept {
     if (mediaType.majortype != MEDIATYPE_Audio ||
         mediaType.formattype != FORMAT_WaveFormatEx || !mediaType.pbFormat ||
         mediaType.cbFormat < sizeof(WAVEFORMATEX)) {
@@ -68,7 +69,8 @@ Classification Classify(const AM_MEDIA_TYPE& mediaType) noexcept {
     if (wave.nSamplesPerSec != kExpectedSampleRate) {
         return Reject(Rejection::SampleRate);
     }
-    if (wave.nChannels != 1 && wave.nChannels != 2) {
+    if (surround51 ? (wave.nChannels != 6 && wave.nChannels != 8)
+                   : (wave.nChannels != 1 && wave.nChannels != 2)) {
         return Reject(Rejection::Channels);
     }
     const WORD sampleBytes = static_cast<WORD>((wave.wBitsPerSample + 7) / 8);
@@ -80,6 +82,7 @@ Classification Classify(const AM_MEDIA_TYPE& mediaType) noexcept {
 
     Encoding encoding{};
     WORD validBits = wave.wBitsPerSample;
+    DWORD channelMask = 0;
     if (wave.wFormatTag == WAVE_FORMAT_PCM &&
         mediaType.subtype == MEDIASUBTYPE_PCM) {
         encoding = Encoding::IntegerPcm;
@@ -102,6 +105,7 @@ Classification Classify(const AM_MEDIA_TYPE& mediaType) noexcept {
             return Reject(Rejection::Encoding);
         }
         validBits = extensible.Samples.wValidBitsPerSample;
+        channelMask = extensible.dwChannelMask;
     } else {
         return Reject(Rejection::Encoding);
     }
@@ -114,21 +118,28 @@ Classification Classify(const AM_MEDIA_TYPE& mediaType) noexcept {
         return Reject(Rejection::Bits);
     }
 
+    // Do not guess ordering for an unspecified/proprietary multichannel mask.
+    if (surround51 && !((wave.nChannels == 6 &&
+                         (channelMask == 0x3f || channelMask == 0x60f)) ||
+                        (wave.nChannels == 8 && channelMask == 0x63f))) {
+        return Reject(Rejection::Channels);
+    }
     Classification result{};
     result.supported = true;
     result.rejection = Rejection::None;
     result.format = {encoding,
+                     surround51 ? Path::ConvertToSurround51 :
                      encoding == Encoding::IntegerPcm &&
                              wave.wBitsPerSample == 16 && wave.nChannels == 2
                          ? Path::Direct16BitStereo
                          : Path::ConvertTo16BitStereo,
                      wave.wBitsPerSample, validBits, wave.nChannels,
-                     wave.nBlockAlign};
+                     wave.nBlockAlign, channelMask};
     return result;
 }
 
 AM_MEDIA_TYPE* SelectSupportedType(
-    IPin* audioPin, Format& selectedFormat, Rejection* rejection) {
+    IPin* audioPin, Format& selectedFormat, Rejection* rejection, bool surround51) {
     if (rejection) *rejection = Rejection::Malformed;
     if (!audioPin) return nullptr;
 
@@ -140,7 +151,7 @@ AM_MEDIA_TYPE* SelectSupportedType(
     Rejection firstRejection = Rejection::Malformed;
     AM_MEDIA_TYPE* type = nullptr;
     while (types->Next(1, &type, nullptr) == S_OK) {
-        const auto classification = Classify(*type);
+        const auto classification = Classify(*type, surround51);
         if (classification.supported) {
             if (classification.format.path == Path::Direct16BitStereo) {
                 DeleteMediaType(fallback);
@@ -148,7 +159,9 @@ AM_MEDIA_TYPE* SelectSupportedType(
                 types->Release();
                 return type;
             }
-            if (!fallback) {
+            if (!fallback || (surround51 &&
+                             classification.format.channels < fallbackFormat.channels)) {
+                DeleteMediaType(fallback);
                 fallback = type;
                 fallbackFormat = classification.format;
                 type = nullptr;
@@ -166,6 +179,51 @@ AM_MEDIA_TYPE* SelectSupportedType(
         *rejection = firstRejection;
     }
     return fallback;
+}
+
+HRESULT FindSurroundPin(IBaseFilter* filter, IPin** output) {
+    if (!output) return E_POINTER;
+    *output = nullptr;
+    if (!filter) return E_POINTER;
+    IEnumPins* pins = nullptr;
+    HRESULT hr = filter->EnumPins(&pins);
+    if (FAILED(hr)) return hr;
+    IPin* pin = nullptr;
+    while (pins->Next(1, &pin, nullptr) == S_OK) {
+        PIN_DIRECTION direction{};
+        if (SUCCEEDED(pin->QueryDirection(&direction)) && direction == PINDIR_OUTPUT) {
+            Format format{};
+            AM_MEDIA_TYPE* type = SelectSupportedType(pin, format, nullptr, true);
+            if (type) {
+                DeleteMediaType(type);
+                *output = pin;
+                pins->Release();
+                return S_OK;
+            }
+        }
+        pin->Release();
+    }
+    pins->Release();
+    return VFW_E_TYPE_NOT_ACCEPTED;
+}
+
+bool MatchesSurroundFormat(const AM_MEDIA_TYPE& type, const Format& expected) noexcept {
+    const auto result = Classify(type, true);
+    const auto& actual = result.format;
+    return result.supported && expected.path == Path::ConvertToSurround51 &&
+        actual.encoding == expected.encoding && actual.containerBits == expected.containerBits &&
+        actual.validBits == expected.validBits && actual.channels == expected.channels &&
+        actual.blockAlign == expected.blockAlign && actual.channelMask == expected.channelMask;
+}
+
+HRESULT VerifySurroundConnection(IPin* input, const Format& expected) {
+    if (!input) return E_POINTER;
+    AM_MEDIA_TYPE type{};
+    HRESULT hr = input->ConnectionMediaType(&type);
+    if (SUCCEEDED(hr) && !MatchesSurroundFormat(type, expected)) hr = VFW_E_TYPE_NOT_ACCEPTED;
+    CoTaskMemFree(type.pbFormat);
+    if (type.pUnk) type.pUnk->Release();
+    return hr;
 }
 
 HRESULT SuggestCaptureBuffer(IPin* audioPin, WORD blockAlign,
@@ -260,7 +318,13 @@ std::wstring Describe(const Format& format) {
                       L"-bit container)";
         }
     }
-    result += format.channels == 1 ? L" / mono" : L" / stereo";
+    if (format.channels > 2) {
+        result += L" / " + std::to_wstring(format.channels) + L" ch -> 5.1";
+        wchar_t mask[32]{};
+        swprintf_s(mask, L" / mask=0x%lx", static_cast<unsigned long>(format.channelMask));
+        result += mask;
+        if (format.channels == 8) result += L" / back+side fold (-3 dB each)";
+    } else result += format.channels == 1 ? L" / mono" : L" / stereo";
     result += format.path == Path::Direct16BitStereo
         ? L" / direct" : L" / converted";
     return result;
@@ -271,7 +335,7 @@ std::wstring DescribeRejection(Rejection rejection) {
     case Rejection::SampleRate:
         return L"only 48 kHz capture audio is supported";
     case Rejection::Channels:
-        return L"only mono or stereo capture audio is supported";
+        return L"stereo mode requires mono/stereo; 5.1 requires explicit 5.1 or 7.1 PCM channel layout";
     case Rejection::Encoding:
         return L"only uncompressed PCM or 32-bit float is supported";
     case Rejection::Bits:
@@ -284,6 +348,28 @@ std::wstring DescribeRejection(Rejection rejection) {
         break;
     }
     return L"unsupported capture audio format";
+}
+
+void ConvertSurroundFrame(const BYTE* source, const Format& format,
+                          int16_t* output) noexcept {
+    if (!output) return;
+    std::fill_n(output, 6, int16_t{0});
+    if (!source || format.path != Path::ConvertToSurround51 ||
+        (format.channels != 6 && format.channels != 8)) return;
+    const size_t step = format.containerBits / 8;
+    for (size_t channel = 0; channel < 6; ++channel)
+        output[channel] = ConvertSample(source + channel * step, format);
+    // 7.1 back + side pairs are folded into the corresponding 5.1 surround
+    // channel at -3 dB each. Never discard the final pair (5.1 may live there).
+    // Center and LFE are copied, not mixed into the front speakers.
+    if (format.channels == 8) {
+        for (size_t channel = 4; channel < 6; ++channel) {
+            const double sum = (static_cast<double>(output[channel]) +
+                ConvertSample(source + (channel + 2) * step, format)) * 0.7071067811865476;
+            output[channel] = static_cast<int16_t>(std::clamp(
+                std::lround(sum), static_cast<long>(INT16_MIN), static_cast<long>(INT16_MAX)));
+        }
+    }
 }
 
 }  // namespace llcv::capture_audio

@@ -51,7 +51,8 @@ void Run(const Scenario& test) {
     const size_t capacity = test.periodFrames * 2 + 96;
     state.driftResampler.Prepare(capacity);
     const uint64_t oldOverruns = g_ring.Overruns();
-    std::vector<int16_t> packet(test.packetFrames*2,1000), output(capacity*2);
+    const size_t channels = g_ring.Channels();
+    std::vector<int16_t> packet(test.packetFrames * channels,1000), output(capacity * channels);
     const double periodMs = test.periodFrames / 48.0;
     const double capturePeriod = test.packetFrames / 48.0 / (1.0 + test.inputPpm / 1e6);
     double nextCaptureMs = 2;
@@ -205,8 +206,11 @@ int main(int argc,char** argv) {
         {"input-jitter",600,20,480,-100,DriftCorrectionMode::Auto,0,0,false,480,true},
         {"forced-jitter",600,20,480,100,DriftCorrectionMode::Resample,0,0,false,480,true},
     };
+    const bool surround = argc > 1 && std::strcmp(argv[1], "--surround") == 0;
+    if (surround) g_ring.ConfigureChannels(6);
     const bool longRun = argc > 1 && std::strcmp(argv[1], "--long") == 0;
     for (auto test : cases) {
+        if (surround) { test.targetMs = 25; test.seconds = (std::min)(test.seconds, 180); }
         if (!longRun) test.seconds = (std::min)(test.seconds, 240);
         Run(test);
     }
