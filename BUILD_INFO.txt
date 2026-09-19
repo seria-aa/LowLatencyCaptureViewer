@@ -1,4 +1,11 @@
-Low Latency Capture Viewer v1.2.10 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.11 x64 (continued from the v0.14.2 rework)
+
+v1.2.11 SDR rendering refinements
+--------------------------------
+- Uses device-provided BT.601/BT.709 and Full/Limited metadata for NV12/YUY2.
+- Keeps SDR rendering consistent by disabling automatic GPU enhancements.
+- Applies Sharp enhancement only when scaling, retaining neutral 1:1 output.
+- Preserves the existing low-latency pipeline without additional frame queues.
 
 v1.2.10 Console LPCM 5.1 (experimental)
 -------------------------------------

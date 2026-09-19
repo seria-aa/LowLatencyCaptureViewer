@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 1.2.10 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 1.2.11 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -209,6 +209,8 @@ if (BUILD_TESTING)
         target_compile_options(HdrPolicyTests PRIVATE /W4 /EHsc /permissive- /utf-8)
     endif()
     add_test(NAME HdrPipelineTests COMMAND HdrPipelineTests)
+    add_test(NAME SdrPipelineTests COMMAND HdrPipelineTests --sdr-only)
+    set_tests_properties(SdrPipelineTests PROPERTIES TIMEOUT 90 LABELS GPU)
     set_tests_properties(HdrPipelineTests PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77 LABELS GPU)
 
     add_executable(MonitorMoveTests tests/MonitorMoveTests.cpp

@@ -253,7 +253,121 @@ static void Benchmark(DirectD3D11Renderer& r) {
     else std::puts("GPU timestamp unavailable; not a performance assertion");
     end->Release(); start->Release(); disjoint->Release();
 }
-int main() {
+static int TestRawSdr() {
+    Check(CoInitializeEx(nullptr, COINIT_MULTITHREADED), "SDR COM");
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    constexpr UINT width = 3840, height = 2160;
+    HWND hwnd = CreateWindowExW(0, L"STATIC", L"Hidden SDR fidelity test", WS_POPUP,
+        0, 0, width, height, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    Require(hwnd != nullptr, "SDR hidden window");
+    g_settings.pixelPerfect = false;
+    g_settings.scalingMode = ScalingMode::Sharp; // must not sharpen 1:1
+    g_settings.presentationMode = PresentationMode::VSync;
+    g_osdVisible = false; g_audioOsdVisible = false; g_volumeHudUntilMs = 0;
+    {
+        DirectD3D11Renderer r;
+        for (auto mode : {PresentationMode::AllowTearing, PresentationMode::VSync,
+                          PresentationMode::Compatibility})
+        for (auto format : {VideoPixelFormat::Nv12, VideoPixelFormat::Yuy2})
+        for (unsigned matrix : {1u, 2u}) for (unsigned range : {1u, 2u}) {
+            g_settings.presentationMode = mode;
+            // Exercise the device metadata parser and connected-type override,
+            // rather than handing the renderer a pre-decoded color tuple.
+            VIDEOINFOHEADER2 info{};
+            info.dwControlFlags = AMCONTROL_COLORINFO_PRESENT |
+                (matrix << DXVA_VideoTransferMatrixShift) |
+                (range << DXVA_NominalRangeShift);
+            AM_MEDIA_TYPE mt{};
+            mt.formattype = FORMAT_VideoInfo2;
+            mt.pbFormat = reinterpret_cast<BYTE*>(&info); mt.cbFormat = sizeof(info);
+            DirectShowColorMetadata connected{};
+            Require(ExtractVideoColorMetadata(&mt, connected), "raw connected metadata parsed");
+            DirectShowColorMetadata selected{};
+            selected.present = true; selected.transferMatrix = 3 - matrix;
+            selected.nominalRange = 3 - range;
+            MergeVideoColorMetadata(selected, connected);
+            const auto color = llcv::video_color::Resolve(false, width, height, {},
+                {selected.transferMatrix, selected.nominalRange});
+            Check(r.initialize(hwnd, width, height, 60, format, false, color), "4K SDR initialize");
+            Require(r.outputWidth == width && r.outputHeight == height && !r.sharpScalingActive,
+                "4K 1:1 output has no sharp enhancement even when Sharp selected");
+            BOOL automatic = TRUE;
+            r.videoContext->VideoProcessorGetStreamAutoProcessingMode(r.processor, 0, &automatic);
+            Require(!automatic, "SDR driver auto processing is explicitly disabled");
+            D3D11_VIDEO_PROCESSOR_COLOR_SPACE outputColor{};
+            r.videoContext->VideoProcessorGetOutputColorSpace(r.processor, &outputColor);
+            Require(outputColor.RGB_Range == 0, "SDR output RGB is full range");
+            const UINT pitch = width * (format == VideoPixelFormat::Nv12 ? 1 : 2) + 64;
+            const UINT rows = format == VideoPixelFormat::Nv12 ? height * 3 / 2 : height;
+            std::vector<BYTE> pixels(static_cast<size_t>(pitch) * rows, 0xee);
+            auto fill = [&](bool checker) {
+                for (UINT y = 0; y < height; ++y) for (UINT x = 0; x < width; ++x) {
+                    const BYTE luma = checker ? ((x + y) % 2 ? 192 : 64) : 100;
+                    if (format == VideoPixelFormat::Nv12) pixels[y * pitch + x] = luma;
+                    else {
+                        pixels[y * pitch + x * 2] = luma;
+                        pixels[y * pitch + x * 2 + 1] = checker ? 128 : (x % 2 ? 180 : 160);
+                    }
+                }
+                if (format == VideoPixelFormat::Nv12)
+                    for (UINT y = height; y < rows; ++y) for (UINT x = 0; x < width; ++x)
+                        pixels[y * pitch + x] = checker ? 128 : (x % 2 ? 180 : 160);
+                r.upload(pixels.data(), pitch);
+                D3D11_VIDEO_PROCESSOR_STREAM stream{};
+                stream.Enable = TRUE; stream.pInputSurface = r.inputViews[r.activeUploadSurface];
+                Check(r.videoContext->VideoProcessorBlt(r.processor, r.outputView, 0, 1, &stream), "SDR blit");
+            };
+            // Alternate individual luma pixels; padding must not enter the image.
+            fill(true);
+            for (UINT y : {0u, 1u, 1079u, 2159u}) for (UINT x : {0u, 1u, 1919u, 3839u}) {
+                const double luma = (x + y) % 2 ? 192 : 64;
+                const double expected = range == 1 ? luma : (luma - 16) * 255 / 219;
+                for (unsigned c : Read(r, x, y)) Near(c, expected, 3, "4K single-pixel luma preserved");
+            }
+            // Independent YCbCr reference; compare flat color away from boundaries.
+            fill(false);
+            const double yy = range == 1 ? 100.0 : (100.0 - 16) * 255 / 219;
+            const double uu = (160.0 - 128) * (range == 1 ? 1.0 : 255.0 / 224);
+            const double vv = (180.0 - 128) * (range == 1 ? 1.0 : 255.0 / 224);
+            const double kr = matrix == 1 ? 0.2126 : 0.299;
+            const double kb = matrix == 1 ? 0.0722 : 0.114;
+            const double rr = yy + 2 * (1 - kr) * vv;
+            const double bb = yy + 2 * (1 - kb) * uu;
+            const double gg = (yy - kr * rr - kb * bb) / (1 - kr - kb);
+            const auto actual = Read(r, 100, 100);
+            const double expected[]{rr, gg, bb};
+            for (size_t c = 0; c < 3; ++c)
+                Near(actual[c], std::clamp(expected[c], 0.0, 255.0), 3, "SDR matrix/range RGB reference");
+            std::printf("4K SDR mode=%u format=%u matrix=%u range=%u: pixel and color reference passed\n",
+                static_cast<unsigned>(mode), static_cast<unsigned>(format), matrix, range);
+            RequireCleanGpu(r);
+        }
+        // A real scale still honors Sharp if the GPU exposes that filter.
+        Check(r.initialize(hwnd, 1920, 1080, 60, VideoPixelFormat::Nv12), "scaled SDR initialize");
+        D3D11_VIDEO_PROCESSOR_FILTER_RANGE filter{};
+        const bool supported = SUCCEEDED(r.enumerator->GetVideoProcessorFilterRange(
+            D3D11_VIDEO_PROCESSOR_FILTER_EDGE_ENHANCEMENT, &filter)) && filter.Maximum > filter.Minimum;
+        Require(r.sharpScalingActive == supported, "actual upscale keeps supported Sharp filter");
+        Check(r.initialize(hwnd, width, height, 60, VideoPixelFormat::Nv12), "return to 1:1");
+        Require(!r.sharpScalingActive, "sharp state cleared on return to 1:1");
+        if (supported) {
+            BOOL enabled = TRUE; int level = 0;
+            r.videoContext->VideoProcessorGetStreamFilter(r.processor, 0,
+                D3D11_VIDEO_PROCESSOR_FILTER_EDGE_ENHANCEMENT, &enabled, &level);
+            Require(!enabled, "GPU sharp filter not retained after reinitialize");
+        }
+        g_settings.scalingMode = ScalingMode::Smooth;
+        Check(r.initialize(hwnd, 1920, 1080, 60, VideoPixelFormat::Nv12), "smooth upscale");
+        Require(!r.sharpScalingActive, "smooth upscale does not enable Sharp");
+        RequireCleanGpu(r);
+    }
+    DestroyWindow(hwnd); CoUninitialize();
+    std::puts("SDR 4K fidelity tests passed; no capture device or visible window used.");
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--sdr-only") return TestRawSdr();
     Check(CoInitializeEx(nullptr, COINIT_MULTITHREADED), "COM");
     HWND hwnd = CreateWindowExW(0, L"STATIC", L"HDR pixel test", WS_POPUP,
         0, 0, 800, 500, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);

@@ -119,7 +119,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.2.10";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.11";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -2279,30 +2279,10 @@ struct DirectD3D11Renderer {
                          static_cast<unsigned>(hdrInputColorSpace), static_cast<unsigned>(hr));
                 return FAILED(hr) ? hr : DXGI_ERROR_UNSUPPORTED;
             }
-            videoContext->VideoProcessorSetStreamAutoProcessingMode(processor, 0, FALSE);
         }
-        if (g_settings.scalingMode == ScalingMode::Sharp &&
-            !g_settings.pixelPerfect) {
-            D3D11_VIDEO_PROCESSOR_FILTER_RANGE sharpness{};
-            if (SUCCEEDED(enumerator->GetVideoProcessorFilterRange(
-                    D3D11_VIDEO_PROCESSOR_FILTER_EDGE_ENHANCEMENT, &sharpness)) &&
-                sharpness.Maximum > sharpness.Minimum) {
-                const int value = sharpness.Default +
-                    (sharpness.Maximum - sharpness.Default) / 2;
-                videoContext->VideoProcessorSetStreamFilter(
-                    processor, 0, D3D11_VIDEO_PROCESSOR_FILTER_EDGE_ENHANCEMENT,
-                    TRUE, std::clamp(value, sharpness.Minimum,
-                                     sharpness.Maximum));
-                sharpScalingActive = true;
-                fwprintf(stderr,
-                         L"[video] scaling: sharp (Video Processor, value %d)\n",
-                         std::clamp(value, sharpness.Minimum,
-                                    sharpness.Maximum));
-            } else {
-                fwprintf(stderr,
-                         L"[video] sharp scaling unavailable; using smooth scaling.\n");
-            }
-        }
+        // Keep driver-selected image enhancements out of both SDR and HDR.
+        // Only the user's explicit scaling filter may alter edge sharpness.
+        videoContext->VideoProcessorSetStreamAutoProcessingMode(processor, 0, FALSE);
 
         D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDesc{};
         inputDesc.FourCC = 0;
@@ -2661,6 +2641,25 @@ struct DirectD3D11Renderer {
 #endif
         videoContext->VideoProcessorSetStreamSourceRect(processor, 0, TRUE,
                                                         &sourceRect);
+        const bool scaled = videoRect.right - videoRect.left != width ||
+                            videoRect.bottom - videoRect.top != height;
+        if (scaled && !g_settings.pixelPerfect &&
+            g_settings.scalingMode == ScalingMode::Sharp) {
+            D3D11_VIDEO_PROCESSOR_FILTER_RANGE sharpness{};
+            if (SUCCEEDED(enumerator->GetVideoProcessorFilterRange(
+                    D3D11_VIDEO_PROCESSOR_FILTER_EDGE_ENHANCEMENT, &sharpness)) &&
+                sharpness.Maximum > sharpness.Minimum) {
+                const int value = std::clamp(sharpness.Default +
+                    (sharpness.Maximum - sharpness.Default) / 2,
+                    sharpness.Minimum, sharpness.Maximum);
+                videoContext->VideoProcessorSetStreamFilter(processor, 0,
+                    D3D11_VIDEO_PROCESSOR_FILTER_EDGE_ENHANCEMENT, TRUE, value);
+                sharpScalingActive = true;
+                fwprintf(stderr, L"[video] scaling: sharp (Video Processor, value %d)\n", value);
+            } else {
+                fwprintf(stderr, L"[video] sharp scaling unavailable; using smooth scaling.\n");
+            }
+        }
         videoContext->VideoProcessorSetStreamDestRect(processor, 0, TRUE,
                                                       &videoRect);
         videoContext->VideoProcessorSetOutputTargetRect(processor, TRUE,
@@ -2682,6 +2681,9 @@ struct DirectD3D11Renderer {
                     : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
             videoContext->VideoProcessorSetStreamColorSpace(processor, 0,
                                                             &inputColor);
+            D3D11_VIDEO_PROCESSOR_COLOR_SPACE outputColor{};
+            outputColor.RGB_Range = 0; // Full-range RGB back buffer, not studio RGB.
+            videoContext->VideoProcessorSetOutputColorSpace(processor, &outputColor);
         }
 #ifdef LLCV_HDR_SCRGB_PROTOTYPE
         }
@@ -3403,7 +3405,8 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
 
         DirectShowColorMetadata directShowColorInfo{};
         const bool colorMetadataRelevant =
-            configuredFormat == VideoPixelFormat::P010 || compressedVideo;
+            configuredFormat == VideoPixelFormat::P010 || compressedVideo ||
+            configuredFormat == VideoPixelFormat::Nv12 || configuredFormat == VideoPixelFormat::Yuy2;
         bool directShowColorMetadataDetected = colorMetadataRelevant &&
             ExtractVideoColorMetadata(activeVideoType,
                                            directShowColorInfo);
@@ -3434,6 +3437,12 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         g_videoConfiguredFps.store(configuredFps,
                                    std::memory_order_release);
         llcv::video_color::Configuration sdrColor{};
+        const bool rawSdr = configuredFormat == VideoPixelFormat::Nv12 ||
+                            configuredFormat == VideoPixelFormat::Yuy2;
+        if (rawSdr) {
+            sdrColor = llcv::video_color::Resolve(false, preset.width, preset.height, {},
+                {directShowColorInfo.transferMatrix, directShowColorInfo.nominalRange});
+        }
         if (compressedVideo) {
             initializationStage = L"initialize Media Foundation compressed decoder";
             hr = compressedDecoder.initialize(
@@ -3581,6 +3590,19 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             if (ExtractVideoColorMetadata(&connectedLayout, finalColor))
                 directShowColorInfo = llcv::hdr::ConnectedMetadata(directShowColorInfo, finalColor);
         }
+        if (SUCCEEDED(hr) && rawSdr) {
+            DirectShowColorMetadata finalColor{};
+            if (ExtractVideoColorMetadata(&connectedLayout, finalColor))
+                MergeVideoColorMetadata(directShowColorInfo, finalColor);
+            LogDirectShowColorMetadata(L"raw SDR effective metadata", directShowColorInfo);
+            sdrColor = llcv::video_color::Resolve(false, preset.width, preset.height, {},
+                {directShowColorInfo.transferMatrix, directShowColorInfo.nominalRange});
+            fwprintf(stderr, L"[video-color] raw SDR: %s / %s (matrix: %s; range: %s)\n",
+                llcv::video_color::MatrixName(sdrColor.matrix),
+                llcv::video_color::RangeName(sdrColor.range),
+                llcv::video_color::SourceName(sdrColor.matrixSource),
+                llcv::video_color::SourceName(sdrColor.rangeSource));
+        }
         FreeMediaType(connectedLayout);
         if (FAILED(hr)) break;
         if (configuredFormat == VideoPixelFormat::P010) {
@@ -3606,7 +3628,8 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                 sdrColor = llcv::video_color::Resolve(false, preset.width, preset.height, {},
                     {directShowColorInfo.transferMatrix, directShowColorInfo.nominalRange});
         }
-        if (configuredFps != previousFps || configuredFormat == VideoPixelFormat::P010) {
+        if (configuredFps != previousFps || configuredFormat == VideoPixelFormat::P010 ||
+            (rawSdr && !(sdrColor == renderer.sdrColor))) {
             hr = renderer.initialize(host, preset.width, preset.height, configuredFps,
                                      rendererInputFormat, hdrInputMetadataAvailable, sdrColor, hdrColorSpace);
             if (FAILED(hr)) break;
