@@ -26,9 +26,24 @@ int main() {
         false, 1920, 1080, {}, {});
     Expect(raw.matrix == Matrix::Bt709 && raw.range == Range::Limited,
            "uncompressed SDR default remains BT.709 Limited");
+    for (unsigned unknown : {0u, 3u, 255u}) {
+        const auto fallback = llcv::video_color::Resolve(false, 3840, 2160, {}, {unknown, unknown});
+        Expect(fallback == raw, "unknown raw metadata preserves existing SDR default");
+    }
+    const auto rawPartial = llcv::video_color::Resolve(false, 3840, 2160, {}, {0, 1});
+    Expect(rawPartial.matrix == Matrix::Bt709 && rawPartial.matrixSource == Source::Default &&
+           rawPartial.range == Range::Full && rawPartial.rangeSource == Source::DirectShow,
+           "partial raw metadata changes only the supplied field");
 
     const Configuration mjpegHd = llcv::video_color::Resolve(
         true, 1920, 1080, {}, {});
+    for (unsigned matrix : {1u, 2u}) for (unsigned range : {1u, 2u}) {
+        const auto rawMetadata = llcv::video_color::Resolve(false, 3840, 2160, {}, {matrix, range});
+        Expect(rawMetadata.matrix == (matrix == 1 ? Matrix::Bt709 : Matrix::Bt601) &&
+               rawMetadata.range == (range == 1 ? Range::Full : Range::Limited) &&
+               rawMetadata.matrixSource == Source::DirectShow && rawMetadata.rangeSource == Source::DirectShow,
+               "raw 4K SDR uses explicit device matrix and range");
+    }
     Expect(mjpegHd.matrix == Matrix::Bt709 && mjpegHd.range == Range::Full,
            "metadata-free HD MJPEG uses BT.709 Full fallback");
     Expect(mjpegHd.rangeSource == Source::MjpegFallback,

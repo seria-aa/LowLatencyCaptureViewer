@@ -36,7 +36,7 @@ Release 구성은 정적 MSVC 런타임을 사용하므로 패키지 실행에 �
 ## 설치 프로그램과 포터블 ZIP
 
 Release 빌드 뒤 저장소 루트에서 아래 명령을 실행합니다. 다음은 위에서 만든
-`build\Release` 실행 파일을 v1.2.10으로 패키징하는 예시입니다. 릴리스 스크립트의
+`build\Release` 실행 파일을 v1.2.11으로 패키징하는 예시입니다. 릴리스 스크립트의
 기본 경로는 버전별 빌드 폴더이므로 아래 빌드 경로 재정의가 필요합니다.
 
 ```powershell
@@ -44,11 +44,11 @@ chcp.com 65001 > $null
 & "C:\Program Files\Inno Setup 7\ISCC.exe" `
   "--define=BuildDir=..\build\Release" ".\installer\LowLatencyCaptureViewer.iss"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
-  -Version 1.2.10 -BuildDir ..\build\Release -OutputDir ..\outputs\v1.2.10
+  -Version 1.2.11 -BuildDir ..\build\Release -OutputDir ..\outputs\v1.2.11
 ```
 
-생성 파일은 `..\outputs\v1.2.10\LowLatencyCaptureViewer_v1.2.10_Setup.exe`와
-`..\outputs\v1.2.10\LowLatencyCaptureViewer_v1.2.10_x64.zip`입니다. 다른 버전은
+생성 파일은 `..\outputs\v1.2.11\LowLatencyCaptureViewer_v1.2.11_Setup.exe`와
+`..\outputs\v1.2.11\LowLatencyCaptureViewer_v1.2.11_x64.zip`입니다. 다른 버전은
 먼저 릴리스 관련 버전 표기를 맞춰야 합니다. ZIP 이름만 바꿔도 실행 파일 버전이
 바뀌지는 않습니다. 자세한 절차는 [릴리스 체크리스트](RELEASING.ko.md)를 따릅니다.
 
