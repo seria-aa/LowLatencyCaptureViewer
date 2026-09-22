@@ -1,4 +1,4 @@
-Low Latency Capture Viewer v1.2.11 실행 안내
+Low Latency Capture Viewer v1.2.12 실행 안내
 =======================================
 
 영상·창 > 표시 모니터에서 시작할 모니터를 선택할 수 있습니다.

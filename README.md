@@ -84,12 +84,12 @@ output shortage** repeats. Leave it alone when there are no errors.
 | --- | --- |
 | `F2` | Reopen settings |
 | `Tab` | Show/hide live diagnostics |
-| `F3` | Show/hide the audio meter |
+| `F3` | Show/hide the audio meter over video (audio-only has its own view) |
 | `F5` | Restore pixel-perfect size |
 | `F11` | Toggle borderless fullscreen |
 | `Esc` | Exit automatic fullscreen, or leave F11 fullscreen |
 | Mouse wheel over viewer | Change app volume in 5% steps |
-| Mouse wheel over the L/R card after `F3` | Change that channel only |
+| Mouse wheel over an L/R card | Change that channel only (show the meter with `F3` in video mode) |
 | `Shift` + drag | Temporarily bypass edge snap |
 
 Pixel-perfect maps one video pixel to one display pixel for a sharper image,

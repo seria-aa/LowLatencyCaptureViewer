@@ -80,7 +80,7 @@ const wchar_t* Translate(const wchar_t* korean, bool useEnglish) {
         {L"로그 폴더를 열지 못했습니다.", L"Could not open the logs folder."},
         {L"진단 로그", L"Diagnostic logs"},
         {L"시작을 누르면 현재 설정으로 뷰어를 엽니다.\r\n\r\nF2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nF11  보더리스 전체화면 켜기/끄기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료", L"Select Start to open the viewer with the current settings.\r\n\r\nF2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nF11  Toggle borderless fullscreen\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit"},
-        {L"F2  설정 다시 열기\r\nF3  오디오 OSD\r\nF5  Pixel-perfect 크기로 맞추기\r\nF11  보더리스 전체화면 켜기/끄기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료", L"F2  Reopen settings\r\nF3  Audio OSD\r\nF5  Restore Pixel-perfect size\r\nF11  Toggle borderless fullscreen\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit"},
+        {L"F2  설정 다시 열기\r\nF3  오디오 OSD (영상 모드)\r\nF5  Pixel-perfect 크기로 맞추기\r\nF11  보더리스 전체화면 켜기/끄기\r\nTab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료", L"F2  Reopen settings\r\nF3  Audio OSD (video mode)\r\nF5  Restore Pixel-perfect size\r\nF11  Toggle borderless fullscreen\r\nTab  Live diagnostics\r\nEsc  Leave fullscreen or exit"},
         {L"문제가 생길 때만 로그 저장을 켜고 같은 문제를 재현하세요.\r\n로그는 사용자 폴더의 logs에 저장됩니다.", L"Enable log saving only when a problem occurs, then reproduce it.\r\nLogs are saved in the user-data logs folder."},
         {L"업데이트", L"Updates"},
         {L"빠른 안내", L"Quick guide"},

@@ -4,14 +4,14 @@
 
 버전 표기, 빌드, 패키지와 GitHub 릴리스를 일관되게 유지하기 위한 체크리스트입니다.
 릴리스 작업은 기존 `agent/release-v1.0.0` 브랜치에서 진행합니다.
-아래 실행 명령은 모두 **v1.2.11**의 실제 예시이며 빌드 폴더는 현재 관례인
-`build-v12110-release`를 사용합니다. 다른 버전은 버전·빌드 폴더·출력 경로를
+아래 실행 명령은 모두 **v1.2.12**의 실제 예시이며 빌드 폴더는 현재 관례인
+`build-v12120-release`를 사용합니다. 다른 버전은 버전·빌드 폴더·출력 경로를
 함께 변경합니다. 빌드 폴더에 점이 있는 버전을 넣고 패키지 기본 경로는 그대로
 두지 않습니다.
 
 ## 1. 버전 표기
 
-Git 태그와 앱 버전 표시에는 `v1.2.11`을 사용합니다. 실행 파일 리소스와 설치
+Git 태그와 앱 버전 표시에는 `v1.2.12`을 사용합니다. 실행 파일 리소스와 설치
 프로그램의 버전 필드는 `v` 없는 숫자를 사용합니다. 다음 위치의 버전을 맞춥니다.
 
 - `CMakeLists.txt`의 `project(... VERSION ...)`
@@ -21,7 +21,7 @@ Git 태그와 앱 버전 표시에는 `v1.2.11`을 사용합니다. 실행 파�
   `VersionInfoVersion`
 - `tools/package-v1.ps1`의 기본 빌드·출력 경로
 - `BUILD_INFO.txt`, `DEPENDENCIES.txt`, `실행안내.txt`의 현재 버전 머리말
-- `docs/release-notes-v1.2.11.md`
+- `docs/release-notes-v1.2.12.md`
 
 변경 후 현재 버전 표기에 이전 문자열이 남지 않았는지 확인합니다.
 과거 릴리스 노트와 변경 기록의 버전 번호는 그대로 보존합니다.
@@ -37,9 +37,9 @@ Release x64 빌드를 만들고 등록된 모든 테스트와 공백 검사를 �
 
 ```powershell
 chcp.com 65001 > $null
-cmake -S . -B build-v12110-release -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-v12110-release
-ctest --test-dir build-v12110-release --output-on-failure
+cmake -S . -B build-v12120-release -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-v12120-release
+ctest --test-dir build-v12120-release --output-on-failure
 git diff --check
 ```
 
@@ -53,21 +53,21 @@ git diff --check
 공개할 릴리스 자산은 아래 설치 파일과 포터블 ZIP 두 개입니다.
 
 ```text
-LowLatencyCaptureViewer_v1.2.11_Setup.exe
-LowLatencyCaptureViewer_v1.2.11_x64.zip
+LowLatencyCaptureViewer_v1.2.12_Setup.exe
+LowLatencyCaptureViewer_v1.2.12_x64.zip
 ```
 
 ```powershell
 chcp.com 65001 > $null
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
-  -Version 1.2.11 -BuildDir ..\build-v12110-release -OutputDir ..\outputs\v1.2.11
+  -Version 1.2.12 -BuildDir ..\build-v12120-release -OutputDir ..\outputs\v1.2.12
 & "C:\Program Files\Inno Setup 7\ISCC.exe" `
-  "--define=BuildDir=..\build-v12110-release" ".\installer\LowLatencyCaptureViewer.iss"
+  "--define=BuildDir=..\build-v12120-release" ".\installer\LowLatencyCaptureViewer.iss"
 ```
 
 `settings.ini`, `%LOCALAPPDATA%` 로그, `build-*` 폴더, PDB, ILK와 테스트 실행
-파일은 패키지에 넣지 않습니다. ZIP 안의 EXE와 설치 파일 버전이 `1.2.11` 또는
-`1.2.11.0`인지 확인합니다. 파일명만 새 버전이고 내부 EXE는 구버전이면 안 됩니다.
+파일은 패키지에 넣지 않습니다. ZIP 안의 EXE와 설치 파일 버전이 `1.2.12` 또는
+`1.2.12.0`인지 확인합니다. 파일명만 새 버전이고 내부 EXE는 구버전이면 안 됩니다.
 
 두 패키지의 최상위에는 아래 ASIO 고지가 모두 있어야 합니다.
 
@@ -80,7 +80,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
 ```powershell
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $releaseArchive = [IO.Compression.ZipFile]::OpenRead(
-  (Resolve-Path '..\outputs\v1.2.11\LowLatencyCaptureViewer_v1.2.11_x64.zip').Path)
+  (Resolve-Path '..\outputs\v1.2.12\LowLatencyCaptureViewer_v1.2.12_x64.zip').Path)
 try {
   foreach ($required in @('LowLatencyCaptureViewer.exe', 'LICENSE',
       'ASIO-SDK-LICENSE.txt', 'ASIO-HOST-LICENSE.txt',
@@ -109,21 +109,21 @@ Inno Setup의 구성까지 확인된 것은 아닙니다.
 ```powershell
 git status --short
 git diff --cached --check
-git commit -m "Prepare v1.2.11 release"
+git commit -m "Prepare v1.2.12 release"
 git push origin agent/release-v1.0.0
 ```
 
 릴리스 노트를 사용해 브랜치 HEAD를 태그 대상으로 공개합니다. 베타가 명시된 경우에만
-`--prerelease`를 추가합니다. **v1.2.11은 정식 릴리스**이므로 해당 옵션을 쓰지 않습니다.
+`--prerelease`를 추가합니다. **v1.2.12은 정식 릴리스**이므로 해당 옵션을 쓰지 않습니다.
 
 ```powershell
-gh release create v1.2.11 `
-  "..\outputs\v1.2.11\LowLatencyCaptureViewer_v1.2.11_Setup.exe" `
-  "..\outputs\v1.2.11\LowLatencyCaptureViewer_v1.2.11_x64.zip" `
+gh release create v1.2.12 `
+  "..\outputs\v1.2.12\LowLatencyCaptureViewer_v1.2.12_Setup.exe" `
+  "..\outputs\v1.2.12\LowLatencyCaptureViewer_v1.2.12_x64.zip" `
   --repo seria-aa/LowLatencyCaptureViewer `
   --target agent/release-v1.0.0 `
-  --title "Low Latency Capture Viewer v1.2.11" `
-  --notes-file ".\docs\release-notes-v1.2.11.md"
+  --title "Low Latency Capture Viewer v1.2.12" `
+  --notes-file ".\docs\release-notes-v1.2.12.md"
 ```
 
 공개된 태그·자산은 덮어쓰지 않습니다. 문제가 생기면 다음 패치 버전으로 수정합니다.

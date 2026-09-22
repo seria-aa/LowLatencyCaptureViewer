@@ -2,6 +2,7 @@
 #include "audio/CaptureAudioFormat.h"
 #include "audio/PcmPipeline.h"
 #include "ui/AudioOsdLayout.h"
+#include "ui/AudioOnlyView.h"
 
 #include <cmath>
 #include <climits>
@@ -53,6 +54,66 @@ int main() {
     ok &= Check(audio_osd::HitTest(1920, 1080, 1600, 70) ==
                     audio_osd::HitTarget::Master,
                 "master row must be independently selectable");
+
+    const auto defaultAudioOnly = audio_only_view::ContentRect(380, 230);
+    ok &= Check(defaultAudioOnly.right - defaultAudioOnly.left == 380 &&
+                    defaultAudioOnly.bottom - defaultAudioOnly.top == 230,
+                "default audio-only view fills the client area");
+    const auto largeAudioOnly = audio_only_view::ContentRect(1200, 730);
+    const int largeWidth = largeAudioOnly.right - largeAudioOnly.left;
+    const int largeHeight = largeAudioOnly.bottom - largeAudioOnly.top;
+    ok &= Check(largeWidth >= 1190 && largeHeight >= 720 &&
+                    std::abs(largeWidth * 230 - largeHeight * 380) <= 380 &&
+                    largeAudioOnly.left == (1200 - largeWidth) / 2 &&
+                    largeAudioOnly.top == (730 - largeHeight) / 2,
+                "audio-only view scales uniformly and fills the window");
+    const auto scaledHit = [&](int logicalX, int logicalY) {
+        return audio_only_view::HitTest(
+            1200, 730,
+            largeAudioOnly.left + logicalX * largeWidth / 380,
+            largeAudioOnly.top + logicalY * largeHeight / 230);
+    };
+    ok &= Check(scaledHit(80, 160) == audio_osd::HitTarget::Left &&
+                    scaledHit(240, 160) == audio_osd::HitTarget::Right &&
+                    scaledHit(80, 90) == audio_osd::HitTarget::Master &&
+                    audio_only_view::HitTest(1200, 730, 0, 0) ==
+                        audio_osd::HitTarget::Outside,
+                "audio-only volume hit regions follow the dedicated view");
+    // Entire painted cards, including their newly expanded top/bottom areas,
+    // accept volume input; header, gutters and footer remain draggable.
+    for (int scale : {1, 2, 3}) {
+        const auto hit = [&](int x, int y) {
+            return audio_only_view::HitTest(380 * scale, 230 * scale,
+                                             x * scale, y * scale);
+        };
+        ok &= Check(hit(13, 39) == audio_osd::HitTarget::Master &&
+                        hit(366, 98) == audio_osd::HitTarget::Master &&
+                        hit(13, 108) == audio_osd::HitTarget::Left &&
+                        hit(184, 193) == audio_osd::HitTarget::Left &&
+                        hit(195, 108) == audio_osd::HitTarget::Right &&
+                        hit(366, 193) == audio_osd::HitTarget::Right,
+                    "full modern audio control surfaces accept input at each scale");
+        for (const auto point : {POINT{30, 22}, POINT{30, 103},
+                                 POINT{190, 150}, POINT{30, 211}}) {
+            ok &= Check(hit(point.x, point.y) == audio_osd::HitTarget::Panel,
+                        "audio control gutters and chrome never adjust volume");
+        }
+    }
+    const auto wideAudioOnly = audio_only_view::ContentRect(1200, 500);
+    ok &= Check(wideAudioOnly.top == 0 && wideAudioOnly.left > 100 &&
+                    wideAudioOnly.right < 1100,
+                "wide audio-only window letterboxes rather than stretching");
+    const auto oldFreeformSize = audio_only_view::FitClientSize(
+        640, 1920, 1080);
+    const auto monitorLimitedSize = audio_only_view::FitClientSize(
+        1600, 1200, 600);
+    ok &= Check(oldFreeformSize.width == 640 &&
+                    oldFreeformSize.height == 387 &&
+                    monitorLimitedSize.width <= 1200 &&
+                    monitorLimitedSize.height <= 600 &&
+                    std::abs(monitorLimitedSize.width * 230 -
+                             monitorLimitedSize.height * 380) <= 190,
+                "saved audio-only width and monitor limits preserve window aspect");
 
     WAVEFORMATEX pcm16{};
     pcm16.wFormatTag = WAVE_FORMAT_PCM;

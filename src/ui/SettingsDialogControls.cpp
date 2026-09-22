@@ -310,7 +310,7 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
         text(L"단축키"), 34, 62);
     state->guideText = CreateWindowExW(
         0, L"STATIC", text(
-            L"F2  설정 다시 열기\r\nF3  오디오 OSD\r\n"
+            L"F2  설정 다시 열기\r\nF3  오디오 OSD (영상 모드)\r\n"
             L"F5  Pixel-perfect 크기로 맞추기\r\n"
             L"F11  보더리스 전체화면 켜기/끄기\r\n"
             L"Tab  실시간 진단 표시\r\nEsc  전체화면 해제 또는 종료"),

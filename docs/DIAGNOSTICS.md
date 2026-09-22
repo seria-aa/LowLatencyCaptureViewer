@@ -4,10 +4,10 @@
 
 Press `Tab` in the viewer to show or hide the diagnostics overlay.
 
-Press `F3` to show or hide the audio meter OSD. It contains the L/R levels,
-dBFS peak values, channel/master volume, and clipping state. Audio-only mode
-starts with this OSD visible; `F3` can hide it when you want an unobstructed
-meter window.
+In video mode, press `F3` to show or hide the audio meter OSD. Audio-only mode
+uses a separate, always-visible view for master volume, L/R peak levels and
+channel volume, and clipping status. Its L/R cards support the same mouse-wheel
+volume adjustment and double-click reset as the video OSD.
 
 ## Video fields
 
