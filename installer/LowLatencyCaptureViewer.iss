@@ -1,13 +1,13 @@
-; Low Latency Capture Viewer v1.2.11
+; Low Latency Capture Viewer v1.2.12
 ; Build this script with Inno Setup 7 from the installer directory.
 
 #define MyAppName "Low Latency Capture Viewer"
-#define MyAppVersion "1.2.11"
+#define MyAppVersion "1.2.12"
 #define MyAppPublisher "seria-aa"
 #define MyAppURL "https://github.com/seria-aa/LowLatencyCaptureViewer"
 #define MyAppExeName "LowLatencyCaptureViewer.exe"
 #ifndef BuildDir
-#define BuildDir "..\build-v12110-release"
+#define BuildDir "..\build-v12120-release"
 #endif
 
 [Setup]
@@ -24,9 +24,9 @@ DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
-OutputDir=..\..\outputs\v1.2.11
-OutputBaseFilename=LowLatencyCaptureViewer_v1.2.11_Setup
-OutputManifestFile=LowLatencyCaptureViewer_v1.2.11_Setup-manifest.txt
+OutputDir=..\..\outputs\v1.2.12
+OutputBaseFilename=LowLatencyCaptureViewer_v1.2.12_Setup
+OutputManifestFile=LowLatencyCaptureViewer_v1.2.12_Setup-manifest.txt
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -34,7 +34,7 @@ CloseApplications=yes
 SetupIconFile=..\assets\LowLatencyCaptureViewer.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Uninstallable=yes
-VersionInfoVersion=1.2.11.0
+VersionInfoVersion=1.2.12.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName}
 VersionInfoCopyright=Copyright (C) 2026 seria-aa

@@ -117,6 +117,9 @@ struct AppSettings {
     bool skipStartupSettings = false;
     bool checkForUpdates = true;
     bool audioOnly = false;
+    // Client pixels, independent from video sizing preferences.
+    int audioOnlyWidth = 380;
+    int audioOnlyHeight = 230;
     bool forceHdr10 = false;
     hdr::ChromaLocation hdrChromaLocation = hdr::ChromaLocation::Auto;
     video_color::Override mjpegColorOverride = video_color::Override::Auto;

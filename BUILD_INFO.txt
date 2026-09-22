@@ -1,4 +1,12 @@
-Low Latency Capture Viewer v1.2.11 x64 (continued from the v0.14.2 rework)
+Low Latency Capture Viewer v1.2.12 x64 (continued from the v0.14.2 rework)
+
+v1.2.12 Dedicated audio-only view
+---------------------------------
+- Adds a compact dark audio-only view with subtle frame/card outlines.
+- Keeps large master/L/R wheel controls and double-click volume reset.
+- Supports drag-to-move anywhere, fixed-aspect resizing and saved window size.
+- Honors borderless settings and display scaling; clarifies 200% boost state.
+- Retains existing video and audio processing without additional runtime DLLs.
 
 v1.2.11 SDR rendering refinements
 --------------------------------

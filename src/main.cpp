@@ -61,6 +61,7 @@
 #include "settings/AppSettings.h"
 #include "settings/SettingsStore.h"
 #include "ui/AudioOsdLayout.h"
+#include "ui/AudioOnlyView.h"
 #include "ui/PresentationModeUi.h"
 #include "ui/SettingsView.h"
 #include "ui/SettingsDialogControls.h"
@@ -119,7 +120,7 @@ constexpr wchar_t kVideoPinName[] = L"Video";
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
-constexpr wchar_t kAppVersionLabel[] = L"v1.2.11";
+constexpr wchar_t kAppVersionLabel[] = L"v1.2.12";
 
 constexpr int kRecommendedCaptureBufferMs = 20;
 constexpr int kMaximumVolumePercent = 200;
@@ -789,6 +790,7 @@ static void LoadSettings() {
 }
 
 static void SaveSettings() {
+    if (g_suppressSettingsSave) return;
 #ifdef LLCV_HDR_FRAME_AUDIT
     return; // Includes settings-dialog acceptance and window-position updates.
 #endif
@@ -5887,7 +5889,7 @@ static void NormalizeWindowSize(HWND hwnd, bool clampToWorkArea,
     // Only strict pixel-perfect without monitor-relative behavior is fixed.
     // When both options are enabled, relative sizing is allowed to change the
     // size programmatically as the window crosses monitors.
-    if (!hwnd || !g_settings.pixelPerfect ||
+    if (!hwnd || g_settings.audioOnly || !g_settings.pixelPerfect ||
         g_settings.relativeWindowSize || g_fullscreen) return;
     RECT current{};
     if (!GetWindowRect(hwnd, &current)) return;
@@ -5925,6 +5927,9 @@ static void NormalizeWindowSize(HWND hwnd, bool clampToWorkArea,
 
 static HMONITOR g_relativeMoveMonitor = nullptr;
 static bool g_interactiveWindowMove = false;
+static bool g_audioOnlyResizePending = false;
+static bool g_audioOnlyDragPending = false;
+static POINT g_audioOnlyDragStart{};
 static llcv::video::OutputTransitionState g_outputTransition;
 
 static void BeginOutputTransition() {
@@ -6071,6 +6076,8 @@ static bool RestoredWindowOrigin(const SIZE& outerSize, POINT& origin) {
 }
 
 static void PersistWindowPosition(HWND hwnd) {
+    // Smoke tests and diagnostic probes must not alter the user's placement.
+    if (g_suppressSettingsSave) return;
     RECT rect{};
     if (g_fullscreen && g_haveLastWindowedRect) {
         rect = g_lastWindowedRect;
@@ -6250,6 +6257,27 @@ static void ConstrainWindowRectToVideoAspect(HWND hwnd, RECT& sizingRect,
          video.width, video.height, 320, 180});
 }
 
+static void ConstrainWindowRectToAudioAspect(HWND hwnd, RECT& sizingRect,
+                                             UINT sizingEdge, UINT dpi) {
+    if (!hwnd) return;
+    const DWORD style =
+        static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+    const DWORD exStyle =
+        static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+    RECT frame{0, 0, 0, 0};
+    if (!AdjustWindowRectExForDpi(&frame, style, FALSE, exStyle, dpi)) {
+        AdjustWindowRectEx(&frame, style, FALSE, exStyle);
+    }
+    const auto minimum = llcv::audio_only_view::MinimumClientSize(dpi);
+    llcv::window_geometry::ConstrainToAspect(
+        sizingRect, sizingEdge,
+        {static_cast<int>(frame.right - frame.left),
+         static_cast<int>(frame.bottom - frame.top),
+         llcv::audio_only_view::kBaseClientWidth,
+         llcv::audio_only_view::kBaseClientHeight,
+         minimum.width, minimum.height});
+}
+
 static LRESULT BorderlessHitTest(HWND hwnd, LPARAM lParam) {
     RECT windowRect{};
     if (!GetWindowRect(hwnd, &windowRect)) return HTCLIENT;
@@ -6257,7 +6285,16 @@ static LRESULT BorderlessHitTest(HWND hwnd, LPARAM lParam) {
     const UINT dpi = GetDpiForWindow(hwnd);
     const int grip = (std::max)(6, MulDiv(8, dpi, 96));
     return llcv::window_geometry::BorderlessHitTest(
-        windowRect, cursor, grip, !g_settings.pixelPerfect);
+        windowRect, cursor, grip,
+        g_settings.audioOnly || !g_settings.pixelPerfect);
+}
+
+static DWORD ViewerWindowStyle(const AppSettings& settings) {
+    if (settings.borderlessWindow) return WS_POPUP | WS_VISIBLE;
+    const DWORD fixed =
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE;
+    if (settings.audioOnly) return fixed | WS_THICKFRAME;
+    return settings.pixelPerfect ? fixed : (WS_OVERLAPPEDWINDOW | WS_VISIBLE);
 }
 
 constexpr UINT_PTR kFullscreenCursorTimerId = 2;
@@ -6336,6 +6373,7 @@ static LRESULT CALLBACK VideoHostSubclassProc(
 
 static void ToggleFullscreen(HWND hwnd, bool automaticStartup = false,
                              bool updateOutput = true) {
+    if (g_settings.audioOnly) return;
     BeginOutputTransition();
     if (!g_fullscreen.load(std::memory_order_acquire)) {
         GetWindowRect(hwnd, &g_lastWindowedRect);
@@ -6892,6 +6930,7 @@ static void ToggleRuntimeOsd() {
 }
 
 static void ToggleAudioOsd() {
+    if (g_settings.audioOnly) return;
     const bool visible = !g_audioOsdVisible.load(std::memory_order_acquire);
     g_audioOsdVisible.store(visible, std::memory_order_release);
     g_audioOsdHoverTarget.store(0, std::memory_order_release);
@@ -6902,13 +6941,17 @@ static void ToggleAudioOsd() {
 // 4 another part of the OSD. Cards deliberately have large hit areas; the
 // small numbers themselves are not the interaction target.
 static int AudioOsdHitTarget(HWND root, POINT screenPoint) {
-    if (!root || !g_audioOsdVisible.load(std::memory_order_acquire)) return 0;
+    if (!root || (!g_settings.audioOnly &&
+                  !g_audioOsdVisible.load(std::memory_order_acquire))) return 0;
     POINT client = screenPoint;
     if (!ScreenToClient(root, &client)) return 0;
     RECT bounds{};
     if (!GetClientRect(root, &bounds)) return 0;
-    return static_cast<int>(llcv::audio_osd::HitTest(
-        bounds.right, bounds.bottom, client.x, client.y));
+    return static_cast<int>(g_settings.audioOnly
+        ? llcv::audio_only_view::HitTest(
+              bounds.right, bounds.bottom, client.x, client.y)
+        : llcv::audio_osd::HitTest(
+              bounds.right, bounds.bottom, client.x, client.y));
 }
 
 static bool AdjustVolumeFromWheel(HWND root, WPARAM wParam, LPARAM lParam) {
@@ -6917,12 +6960,17 @@ static bool AdjustVolumeFromWheel(HWND root, WPARAM wParam, LPARAM lParam) {
     if (!hovered || GetAncestor(hovered, GA_ROOT) != root) return false;
 
     static int wheelRemainder = 0;
+    const int target = AudioOsdHitTarget(root, screenPoint);
+    if (g_settings.audioOnly && target != 1 && target != 2 && target != 3) {
+        // Header, footer and gutters are window-drag areas, not volume controls.
+        wheelRemainder = 0;
+        return true;
+    }
     wheelRemainder += GET_WHEEL_DELTA_WPARAM(wParam);
     const int steps = wheelRemainder / WHEEL_DELTA;
     wheelRemainder %= WHEEL_DELTA;
     if (steps == 0) return true;
 
-    const int target = AudioOsdHitTarget(root, screenPoint);
     const int maximum = g_settings.allowVolumeBoost
         ? kMaximumVolumePercent : 100;
     if (target == 1 || target == 2) {
@@ -6963,117 +7011,66 @@ static void UpdateBackgroundAudioMute(bool appActive) {
     g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
 }
 
-// Audio-only mode has no video swap chain to composite the normal D2D OSD
-// onto.  Paint the same compact audio panel directly into the small window
-// instead.  This is UI-thread work only (30 Hz) and never blocks the capture
-// or WASAPI render threads.
-static void PaintAudioOnlyOsd(HDC dc, const RECT& client) {
-    if (!g_audioOsdVisible.load(std::memory_order_acquire)) return;
-
-    const int clientWidth = client.right - client.left;
-    const llcv::audio_osd::Rect panel = llcv::audio_osd::RectForClient(
-        clientWidth);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(232, 237, 242));
-
-    LOGFONTW logFont{};
-    logFont.lfHeight = -16;
-    logFont.lfWeight = FW_SEMIBOLD;
-    wcscpy_s(logFont.lfFaceName, L"Segoe UI");
-    HFONT font = CreateFontIndirectW(&logFont);
-    HGDIOBJ previousFont = SelectObject(dc, font);
-
-    HBRUSH background = CreateSolidBrush(RGB(14, 16, 20));
-    HBRUSH card = CreateSolidBrush(RGB(22, 26, 32));
-    HBRUSH highlight = CreateSolidBrush(RGB(38, 66, 78));
-    HBRUSH barBackground = CreateSolidBrush(RGB(51, 56, 64));
-    HBRUSH bar = CreateSolidBrush(RGB(64, 199, 122));
-    HBRUSH clipBrush = CreateSolidBrush(RGB(237, 87, 74));
-    HPEN outline = CreatePen(PS_SOLID, 1, RGB(232, 237, 242));
-
-    HGDIOBJ oldBrush = SelectObject(dc, background);
-    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
-    RoundRect(dc, panel.left, panel.top, panel.right, panel.bottom, 12, 12);
-    SelectObject(dc, oldBrush);
-
-    const auto textAt = [&](int x, int y, const wchar_t* text,
-                            COLORREF color = RGB(232, 237, 242)) {
-        SetTextColor(dc, color);
-        TextOutW(dc, panel.left + x, panel.top + y, text,
-                 static_cast<int>(wcslen(text)));
-    };
-    textAt(16, 10, IsEnglishUi() ? L"Audio" : L"오디오");
-
-    wchar_t masterText[48]{};
-    swprintf_s(masterText, IsEnglishUi() ? L"Master  %d%%" : L"마스터  %d%%",
-               g_volumePercent.load(std::memory_order_acquire));
-    textAt(16, 38, masterText);
-
-    const int maximum = g_settings.allowVolumeBoost ? kMaximumVolumePercent : 100;
-    const int master = g_volumePercent.load(std::memory_order_acquire);
-    const RECT masterBar{panel.left + 16, panel.top + 64,
-                         panel.left + 320, panel.top + 71};
-    SelectObject(dc, barBackground);
-    FillRect(dc, &masterBar, barBackground);
-    RECT masterFill = masterBar;
-    masterFill.right = masterFill.left + (masterBar.right - masterBar.left) *
-        std::clamp(master, 0, maximum) / maximum;
-    if (masterFill.right > masterFill.left) FillRect(dc, &masterFill, bar);
-
-    const int hovered = g_audioOsdHoverTarget.load(std::memory_order_acquire);
-    const int left = g_leftVolumePercent.load(std::memory_order_acquire);
-    const int right = g_rightVolumePercent.load(std::memory_order_acquire);
-    const double leftDb = llcv::audio::PeakToDbfs(
-        g_audioPeakLeft.load(std::memory_order_acquire));
-    const double rightDb = llcv::audio::PeakToDbfs(
-        g_audioPeakRight.load(std::memory_order_acquire));
-
-    const auto drawChannel = [&](int channel, const wchar_t* label,
-                                 int percent, double peakDb, int x0, int x1) {
-        RECT cardRect{panel.left + x0, panel.top + 84,
-                      panel.left + x1, panel.top + 168};
-        SelectObject(dc, channel == hovered ? highlight : card);
-        RoundRect(dc, cardRect.left, cardRect.top, cardRect.right,
-                  cardRect.bottom, 10, 10);
-        SelectObject(dc, outline);
-        RoundRect(dc, cardRect.left, cardRect.top, cardRect.right,
-                  cardRect.bottom, 10, 10);
-        wchar_t line[64]{};
-        swprintf_s(line, L"%s   %d%%", label, percent);
-        textAt(x0 + 14, 92, line);
-        swprintf_s(line, L"%.1f dBFS", peakDb);
-        textAt(x0 + 14, 119, line);
-        RECT channelBar{panel.left + x0 + 14, panel.top + 157,
-                        panel.left + x1 - 14, panel.top + 163};
-        SelectObject(dc, barBackground);
-        FillRect(dc, &channelBar, barBackground);
-        RECT channelFill = channelBar;
-        channelFill.right = channelFill.left +
-            (channelBar.right - channelBar.left) * std::clamp(percent, 0, 100) / 100;
-        if (channelFill.right > channelFill.left) FillRect(dc, &channelFill, bar);
-    };
-    drawChannel(1, L"L", left, leftDb, 16, 160);
-    drawChannel(2, L"R", right, rightDb, 176, 320);
-
-    const bool clipping = GetTickCount64() < g_audioClipUntilMs.load(
+// Audio-only owns its presentation; it shares only the underlying audio state
+// and volume controls with the video overlay.
+static void PaintAudioOnlyView(HDC dc,
+                               const llcv::audio_only_view::Rect& content) {
+    llcv::audio_only_view::State state{};
+    state.english = IsEnglishUi();
+    state.allowBoost = g_settings.allowVolumeBoost;
+    state.hoveredTarget = g_audioOsdHoverTarget.load(std::memory_order_acquire);
+    state.outputLabel = g_settings.audioMode == AudioMode::WasapiExclusive
+        ? L"WASAPI Exclusive"
+        : g_settings.audioMode == AudioMode::Asio ? L"ASIO" : L"WASAPI Shared";
+    state.clipping = GetTickCount64() < g_audioClipUntilMs.load(
         std::memory_order_acquire);
-    textAt(16, 172, clipping
-               ? (IsEnglishUi() ? L"CLIP" : L"클리핑")
-               : (IsEnglishUi() ? L"No clipping" : L"클리핑 없음"),
-           clipping ? RGB(237, 87, 74) : RGB(232, 237, 242));
-
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    SelectObject(dc, previousFont);
-    DeleteObject(outline);
-    DeleteObject(clipBrush);
-    DeleteObject(bar);
-    DeleteObject(barBackground);
-    DeleteObject(highlight);
-    DeleteObject(card);
-    DeleteObject(background);
-    DeleteObject(font);
+    state.masterPercent = g_volumePercent.load(std::memory_order_acquire);
+    state.leftPercent = g_leftVolumePercent.load(std::memory_order_acquire);
+    state.rightPercent = g_rightVolumePercent.load(std::memory_order_acquire);
+    state.leftPeakDb = llcv::audio::PeakToDbfs(
+        g_audioPeakLeft.load(std::memory_order_acquire));
+    state.rightPeakDb = llcv::audio::PeakToDbfs(
+        g_audioPeakRight.load(std::memory_order_acquire));
+    llcv::audio_only_view::Paint(dc, content, state);
 }
+
+struct AudioOnlyPaintBuffer {
+    HDC dc = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ previousBitmap = nullptr;
+    int width = 0;
+    int height = 0;
+
+    void Release() {
+        if (dc && previousBitmap) SelectObject(dc, previousBitmap);
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
+        dc = nullptr;
+        bitmap = nullptr;
+        previousBitmap = nullptr;
+        width = height = 0;
+    }
+
+    bool Ensure(HDC target, int requestedWidth, int requestedHeight) {
+        if (dc && width == requestedWidth && height == requestedHeight)
+            return true;
+        Release();
+        if (requestedWidth <= 0 || requestedHeight <= 0) return false;
+        dc = CreateCompatibleDC(target);
+        if (dc) bitmap = CreateCompatibleBitmap(
+            target, requestedWidth, requestedHeight);
+        if (!bitmap) {
+            Release();
+            return false;
+        }
+        previousBitmap = SelectObject(dc, bitmap);
+        width = requestedWidth;
+        height = requestedHeight;
+        return true;
+    }
+};
+
+static AudioOnlyPaintBuffer g_audioOnlyPaintBuffer;
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
@@ -7082,6 +7079,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // transition behind when settings restart it in this process.
         g_outputTransition = {};
         g_interactiveWindowMove = false;
+        g_audioOnlyResizePending = false;
+        g_audioOnlyDragPending = false;
+        g_audioOnlyPaintBuffer.Release();
         g_relativeMoveMonitor = nullptr;
         if (!g_settings.audioOnly) {
             g_videoHost = CreateWindowExW(
@@ -7108,7 +7108,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_outputConfigurationGeneration.fetch_add(
                 1, std::memory_order_acq_rel);
         }
-        if (g_settings.audioOnly) InvalidateRect(hwnd, nullptr, FALSE);
+        if (g_settings.audioOnly) {
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         return 0;
 
     case WM_PAINT:
@@ -7117,26 +7119,44 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             HDC dc = BeginPaint(hwnd, &paint);
             RECT client{};
             GetClientRect(hwnd, &client);
-            const int width = client.right - client.left;
-            const int height = client.bottom - client.top;
-            HDC backDc = CreateCompatibleDC(dc);
-            HBITMAP backBitmap = (backDc && width > 0 && height > 0)
-                ? CreateCompatibleBitmap(dc, width, height) : nullptr;
-            if (backDc && backBitmap) {
-                HGDIOBJ oldBitmap = SelectObject(backDc, backBitmap);
-                FillRect(backDc, &client,
-                         reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-                PaintAudioOnlyOsd(backDc, client);
-                BitBlt(dc, 0, 0, width, height, backDc, 0, 0, SRCCOPY);
-                SelectObject(backDc, oldBitmap);
-                DeleteObject(backBitmap);
-                DeleteDC(backDc);
+            const auto panel = llcv::audio_only_view::ContentRect(
+                client.right, client.bottom);
+            const RECT panelRect{panel.left, panel.top, panel.right, panel.bottom};
+            RECT panelDirty{};
+            const bool paintPanel =
+                IntersectRect(&panelDirty, &paint.rcPaint, &panelRect);
+            const int panelWidth = panel.right - panel.left;
+            const int panelHeight = panel.bottom - panel.top;
+            const bool buffered = paintPanel && g_audioOnlyPaintBuffer.Ensure(
+                dc, panelWidth, panelHeight);
+            const HBRUSH black =
+                reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+            if (buffered) {
+                HDC backDc = g_audioOnlyPaintBuffer.dc;
+                const RECT localPanel{0, 0, panelWidth, panelHeight};
+                FillRect(backDc, &localPanel, black);
+                SetViewportOrgEx(backDc, -panel.left, -panel.top, nullptr);
+                PaintAudioOnlyView(backDc, panel);
+                SetViewportOrgEx(backDc, 0, 0, nullptr);
+
+                // The changing panel is double-buffered. Only newly exposed
+                // background is cleared, so a large window is not repainted
+                // in full at the audio meter's 30 Hz update rate.
+                const int savedDc = SaveDC(dc);
+                if (savedDc != 0) {
+                    ExcludeClipRect(dc, panel.left, panel.top,
+                                    panel.right, panel.bottom);
+                    FillRect(dc, &paint.rcPaint, black);
+                    RestoreDC(dc, savedDc);
+                } else {
+                    FillRect(dc, &paint.rcPaint, black);
+                }
+                BitBlt(dc, panel.left, panel.top,
+                       panelWidth, panelHeight,
+                       backDc, 0, 0, SRCCOPY);
             } else {
-                if (backBitmap) DeleteObject(backBitmap);
-                if (backDc) DeleteDC(backDc);
-                FillRect(dc, &client,
-                         reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-                PaintAudioOnlyOsd(dc, client);
+                FillRect(dc, &paint.rcPaint, black);
+                if (paintPanel) PaintAudioOnlyView(dc, panel);
             }
             EndPaint(hwnd, &paint);
             return 0;
@@ -7148,6 +7168,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         break;
 
     case WM_SIZING:
+        if (g_settings.audioOnly) {
+            g_audioOnlyResizePending = true;
+            if (lParam) {
+                ConstrainWindowRectToAudioAspect(
+                    hwnd, *reinterpret_cast<RECT*>(lParam),
+                    static_cast<UINT>(wParam), GetDpiForWindow(hwnd));
+                return TRUE;
+            }
+            break;
+        }
         if (lParam && !g_settings.audioOnly && !g_fullscreen &&
             !g_settings.pixelPerfect) {
             g_outputTransition.SetManualResize(true);
@@ -7175,7 +7205,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             FlushSharedDiagnostics();
             UpdateOsdRates();
             g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
-            if (g_settings.audioOnly) InvalidateRect(hwnd, nullptr, FALSE);
+            if (g_settings.audioOnly) {
+                RECT client{};
+                if (GetClientRect(hwnd, &client)) {
+                    const auto panel = llcv::audio_only_view::ContentRect(
+                        client.right, client.bottom);
+                    const RECT panelRect{panel.left, panel.top,
+                                         panel.right, panel.bottom};
+                    InvalidateRect(hwnd, &panelRect, FALSE);
+                }
+            }
             return 0;
         }
         break;
@@ -7186,6 +7225,77 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_MOUSEMOVE:
         NoteFullscreenCursorActivity();
+        if (g_settings.audioOnly) {
+            RECT client{};
+            int hovered = 0;
+            if (GetClientRect(hwnd, &client)) {
+                const auto target = llcv::audio_only_view::HitTest(
+                    client.right, client.bottom,
+                    GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+                if (target == llcv::audio_osd::HitTarget::Master ||
+                    target == llcv::audio_osd::HitTarget::Left ||
+                    target == llcv::audio_osd::HitTarget::Right)
+                    hovered = static_cast<int>(target);
+            }
+            if (g_audioOsdHoverTarget.exchange(hovered, std::memory_order_acq_rel) != hovered)
+                InvalidateRect(hwnd, nullptr, FALSE);
+            TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, hwnd, 0};
+            TrackMouseEvent(&tracking);
+        }
+        if (g_settings.audioOnly && g_audioOnlyDragPending &&
+            GetCapture() == hwnd) {
+            if ((wParam & MK_LBUTTON) == 0) {
+                g_audioOnlyDragPending = false;
+                ReleaseCapture();
+                return 0;
+            }
+            POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            if (!ClientToScreen(hwnd, &point)) return 0;
+            const UINT dpi = GetDpiForWindow(hwnd);
+            if (std::abs(point.x - g_audioOnlyDragStart.x) >=
+                    (std::max)(1, GetSystemMetricsForDpi(SM_CXDRAG, dpi)) ||
+                std::abs(point.y - g_audioOnlyDragStart.y) >=
+                    (std::max)(1, GetSystemMetricsForDpi(SM_CYDRAG, dpi))) {
+                g_audioOnlyDragPending = false;
+                ReleaseCapture();
+                // Enter the native move loop only after an actual drag.
+                // Ordinary clicks remain client clicks for double-click reset.
+                SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION,
+                             MAKELPARAM(point.x, point.y));
+            }
+            return 0;
+        }
+        break;
+
+    case WM_MOUSELEAVE:
+    case WM_NCMOUSEMOVE:
+        if (g_settings.audioOnly &&
+            g_audioOsdHoverTarget.exchange(0, std::memory_order_acq_rel) != 0)
+            InvalidateRect(hwnd, nullptr, FALSE);
+        break;
+
+    case WM_LBUTTONDOWN:
+        if (g_settings.audioOnly) {
+            POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            if (ClientToScreen(hwnd, &point)) {
+                g_audioOnlyDragStart = point;
+                SetCapture(hwnd);
+                g_audioOnlyDragPending = GetCapture() == hwnd;
+            }
+            return 0;
+        }
+        break;
+
+    case WM_LBUTTONUP:
+    case WM_CANCELMODE:
+        if (g_settings.audioOnly) {
+            g_audioOnlyDragPending = false;
+            if (GetCapture() == hwnd) ReleaseCapture();
+        }
+        break;
+
+    case WM_CAPTURECHANGED:
+        g_audioOnlyDragPending = false;
         break;
 
     case WM_SETCURSOR:
@@ -7196,6 +7306,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         break;
 
     case WM_DISPLAYCHANGE:
+        if (g_settings.audioOnly) g_audioOnlyPaintBuffer.Release();
         LogDisplayChangeEvent(wParam, lParam);
         break;
 
@@ -7208,7 +7319,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         break;
 
+    case WM_GETMINMAXINFO:
+        if (g_settings.audioOnly && lParam) {
+            const UINT dpi = GetDpiForWindow(hwnd);
+            const auto clientMinimum = llcv::audio_only_view::MinimumClientSize(dpi);
+            const SIZE minimum = OuterSizeForClientPixels(
+                clientMinimum.width, clientMinimum.height,
+                static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)),
+                static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)),
+                dpi);
+            auto& limits = *reinterpret_cast<MINMAXINFO*>(lParam);
+            limits.ptMinTrackSize = POINT{minimum.cx, minimum.cy};
+            return 0;
+        }
+        break;
+
     case WM_GETDPISCALEDSIZE:
+        if (g_settings.audioOnly) return FALSE;
         // During an interactive resize the incoming pending size can differ
         // from GetClientRect. Let Windows scale that user-controlled size;
         // the saved monitor-relative ratio is only a policy for moving.
@@ -7232,6 +7359,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         break;
 
     case WM_DPICHANGED:
+        if (g_settings.audioOnly) {
+            g_audioOnlyPaintBuffer.Release();
+            if (lParam) {
+                RECT suggested = *reinterpret_cast<const RECT*>(lParam);
+                ConstrainWindowRectToAudioAspect(
+                    hwnd, suggested, WMSZ_BOTTOMRIGHT, LOWORD(wParam));
+                SetWindowPos(hwnd, nullptr, suggested.left, suggested.top,
+                             suggested.right - suggested.left,
+                             suggested.bottom - suggested.top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            return 0;
+        }
         if ((g_settings.pixelPerfect || g_settings.relativeWindowSize) &&
             !g_fullscreen) {
             if (!lParam) return 0;
@@ -7258,6 +7398,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_ENTERSIZEMOVE:
         ResetWindowSnapState();
+        if (g_settings.audioOnly) {
+            g_audioOnlyResizePending = false;
+            return 0;
+        }
         // Moving can resize a monitor-relative window, just like WM_SIZING.
         // Keep one transition open until final geometry has been reconciled.
         if (!g_interactiveWindowMove) {
@@ -7271,13 +7415,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_MOVING:
         if (lParam) {
-            POINT cursor{};
-            if (GetCursorPos(&cursor)) {
-                const HMONITOR monitor = MonitorFromPoint(
-                    cursor, MONITOR_DEFAULTTONEAREST);
-                ApplyRelativeSizeForMonitor(
-                    hwnd, monitor, cursor,
-                    *reinterpret_cast<RECT*>(lParam));
+            if (!g_settings.audioOnly) {
+                POINT cursor{};
+                if (GetCursorPos(&cursor)) {
+                    const HMONITOR monitor = MonitorFromPoint(
+                        cursor, MONITOR_DEFAULTTONEAREST);
+                    ApplyRelativeSizeForMonitor(
+                        hwnd, monitor, cursor,
+                        *reinterpret_cast<RECT*>(lParam));
+                }
             }
             ApplyWindowEdgeSnap(hwnd, *reinterpret_cast<RECT*>(lParam));
             return TRUE;
@@ -7286,6 +7432,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_EXITSIZEMOVE:
         ResetWindowSnapState();
+        if (g_settings.audioOnly) {
+            // A move may cross display adapters without a DPI change.
+            g_audioOnlyPaintBuffer.Release();
+            if (g_audioOnlyResizePending) {
+                RECT client{};
+                if (GetClientRect(hwnd, &client) &&
+                    client.right > client.left && client.bottom > client.top) {
+                    g_settings.audioOnlyWidth = client.right - client.left;
+                    g_settings.audioOnlyHeight = client.bottom - client.top;
+                }
+            }
+            g_audioOnlyResizePending = false;
+            return 0;
+        }
         g_relativeMoveMonitor = nullptr;
         if (g_outputTransition.ManualResize()) {
             RememberRelativeScaleFromWindow(hwnd);
@@ -7308,7 +7468,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_NCHITTEST:
         if (g_settings.borderlessWindow && !g_fullscreen) {
-            return BorderlessHitTest(hwnd, lParam);
+            const LRESULT hit = BorderlessHitTest(hwnd, lParam);
+            if (!g_settings.audioOnly || hit != HTCAPTION) return hit;
+
+            // Every interior region supports drag-to-move and double-click.
+            // Keep native edge resize hit codes; start moving after a threshold.
+            return HTCLIENT;
         }
         break;
 
@@ -7368,7 +7533,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_volumePercent.store(100, std::memory_order_release);
                 g_settings.volumePercent = 100;
             }
-            g_audioOsdHoverTarget.store(target == 3 ? 0 : target,
+            g_audioOsdHoverTarget.store(target == 3 && !g_settings.audioOnly ? 0 : target,
                                         std::memory_order_release);
             g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
             return 0;
@@ -7388,7 +7553,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
 
     case WM_RESTORE_ONE_TO_ONE:
-        RestoreOneToOneWindow(hwnd);
+        if (!g_settings.audioOnly) RestoreOneToOneWindow(hwnd);
         return 0;
 
     case WM_UPDATE_CHECK_COMPLETE: {
@@ -7418,6 +7583,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
 
     case WM_DESTROY:
+        g_audioOnlyDragPending = false;
+        g_audioOnlyPaintBuffer.Release();
         EndFullscreenCursorTracking(hwnd);
         KillTimer(hwnd, 1);
         if (!g_windowPositionPersisted) PersistWindowPosition(hwnd);
@@ -7695,26 +7862,40 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                    audioLabel, videoLabel);
     }
 
-    const DWORD fixedWindowStyle =
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE;
-    const DWORD windowStyle = g_settings.audioOnly
-                                  ? fixedWindowStyle
-                                  : g_settings.borderlessWindow
-                                  ? (WS_POPUP | WS_VISIBLE)
-                                  : g_settings.pixelPerfect
-                                        ? fixedWindowStyle
-                                        : (WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+    const DWORD windowStyle = ViewerWindowStyle(g_settings);
     constexpr DWORD windowExStyle = 0;
     HMONITOR initialMonitor = SavedViewerMonitor();
     if (!initialMonitor) {
         initialMonitor = MonitorFromPoint(
             POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
     }
-    const SIZE initialClient = g_settings.audioOnly
-        ? SIZE{380, 230}
+    SIZE initialClient = g_settings.audioOnly
+        ? SIZE{g_settings.audioOnlyWidth, g_settings.audioOnlyHeight}
         : InitialClientPixelsForMonitor(initialMonitor);
     const UINT initialDpi = EffectiveMonitorDpi(initialMonitor, nullptr);
-    const SIZE outerSize = OuterSizeForClientPixels(
+    if (g_settings.audioOnly) {
+        // Older settings stored width and height independently. Keep the
+        // chosen width, but restore a proportional client area on launch.
+        const SIZE frame = OuterSizeForClientPixels(
+            0, 0, windowStyle, windowExStyle, initialDpi);
+        int maximumClientWidth = 16384;
+        int maximumClientHeight = 16384;
+        MONITORINFO info{sizeof(info)};
+        if (GetMonitorInfoW(initialMonitor, &info)) {
+            maximumClientWidth = (std::max)(1,
+                static_cast<int>(info.rcWork.right - info.rcWork.left - frame.cx));
+            maximumClientHeight = (std::max)(1,
+                static_cast<int>(info.rcWork.bottom - info.rcWork.top - frame.cy));
+        }
+        const auto minimum = llcv::audio_only_view::MinimumClientSize(initialDpi);
+        const auto fitted = llcv::audio_only_view::FitClientSize(
+            (std::max)(initialClient.cx, static_cast<LONG>(minimum.width)),
+            maximumClientWidth, maximumClientHeight);
+        initialClient = SIZE{fitted.width, fitted.height};
+        g_settings.audioOnlyWidth = initialClient.cx;
+        g_settings.audioOnlyHeight = initialClient.cy;
+    }
+    SIZE outerSize = OuterSizeForClientPixels(
         initialClient.cx, initialClient.cy, windowStyle, windowExStyle,
         initialDpi);
     if (g_settings.relativeWindowSize && !g_settings.audioOnly) {
@@ -7803,10 +7984,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         g_settings.audioMode == AudioMode::WasapiShared ? 6 : 2);
     g_surroundCaptureRejected.store(false, std::memory_order_release);
     std::thread renderThread(AudioRenderThread);
-    std::thread unifiedCaptureThread([hwnd, smokeTest]() {
+    std::atomic<bool> smokeCaptureFailed{false};
+    std::thread unifiedCaptureThread([hwnd, smokeTest, &smokeCaptureFailed]() {
         const bool initialized = g_settings.audioOnly
             ? AudioOnlyCaptureLoop()
             : UnifiedCaptureRenderLoop(g_videoHost);
+        if (!initialized) {
+            smokeCaptureFailed.store(true, std::memory_order_release);
+        }
         if (!initialized && g_running.load()) {
             fwprintf(stderr, g_settings.audioOnly
                          ? L"[capture] audio-only graph stopped.\n"
@@ -8041,5 +8226,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     FlushSharedDiagnostics(true);
     CloseSavedLog();
     if (restartToSettings) RelaunchWithSettings();
+    if (smokeTest && smokeCaptureFailed.load(std::memory_order_acquire))
+        return 1;
     return 0;
 }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 1.2.11 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 1.2.12 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,6 +23,7 @@ add_executable(LowLatencyCaptureViewer
     src/diagnostics/AudioErrorHistory.cpp
     src/settings/SettingsStore.cpp
     src/ui/AudioOsdLayout.cpp
+    src/ui/AudioOnlyView.cpp
     src/ui/PresentationModeUi.cpp
     src/ui/SettingsView.cpp
     src/ui/SettingsDialogControls.cpp
@@ -255,6 +256,7 @@ if (BUILD_TESTING)
         src/audio/CaptureAudioFormat.cpp
         src/audio/PcmPipeline.cpp
         src/ui/AudioOsdLayout.cpp
+        src/ui/AudioOnlyView.cpp
     )
     set_target_properties(AudioModuleTests PROPERTIES WIN32_EXECUTABLE FALSE)
     target_include_directories(AudioModuleTests PRIVATE src)
@@ -269,6 +271,19 @@ if (BUILD_TESTING)
         target_compile_options(AudioModuleTests PRIVATE /W4 /EHsc /permissive- /utf-8)
     endif()
     add_test(NAME AudioModuleTests COMMAND AudioModuleTests)
+
+    add_executable(AudioOnlyViewTests
+        tests/AudioOnlyViewTests.cpp
+        src/ui/AudioOnlyView.cpp)
+    target_include_directories(AudioOnlyViewTests PRIVATE src)
+    set_target_properties(AudioOnlyViewTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    target_compile_definitions(AudioOnlyViewTests PRIVATE
+        UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(AudioOnlyViewTests PRIVATE gdiplus gdi32 user32)
+    if (MSVC)
+        target_compile_options(AudioOnlyViewTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    endif()
+    add_test(NAME AudioOnlyViewTests COMMAND AudioOnlyViewTests)
 
     add_executable(AudioDeviceCapabilitiesTests
         tests/AudioDeviceCapabilitiesTests.cpp

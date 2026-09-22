@@ -36,7 +36,7 @@ executable does not require a separate Visual C++ Redistributable installation.
 ## Installer and portable ZIP
 
 After the Release build, run these commands from the repository root. These
-examples package v1.2.11 using the `build\Release` output above; the build-directory
+examples package v1.2.12 using the `build\Release` output above; the build-directory
 override is required because the release scripts normally use a versioned
 build directory.
 
@@ -45,11 +45,11 @@ chcp.com 65001 > $null
 & "C:\Program Files\Inno Setup 7\ISCC.exe" `
   "--define=BuildDir=..\build\Release" ".\installer\LowLatencyCaptureViewer.iss"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
-  -Version 1.2.11 -BuildDir ..\build\Release -OutputDir ..\outputs\v1.2.11
+  -Version 1.2.12 -BuildDir ..\build\Release -OutputDir ..\outputs\v1.2.12
 ```
 
-The outputs are `..\outputs\v1.2.11\LowLatencyCaptureViewer_v1.2.11_Setup.exe`
-and `..\outputs\v1.2.11\LowLatencyCaptureViewer_v1.2.11_x64.zip`. When preparing
+The outputs are `..\outputs\v1.2.12\LowLatencyCaptureViewer_v1.2.12_Setup.exe`
+and `..\outputs\v1.2.12\LowLatencyCaptureViewer_v1.2.12_x64.zip`. When preparing
 another version, update the versioned release files first; changing a ZIP name
 does not update the executable. See the [release checklist](RELEASING.md).
 

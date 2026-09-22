@@ -13,6 +13,14 @@ static LONG_PTR simulatedStyle = WS_POPUP;
 static RECT simulatedWindowRect;
 static POINT cursorPoint;
 static HWND testWindow = reinterpret_cast<HWND>(0x12345);
+static HWND simulatedCapture = nullptr;
+static int audioDragMoves = 0;
+static HWND FakeSetCapture(HWND hwnd) {
+    const HWND previous = simulatedCapture; simulatedCapture = hwnd; return previous;
+}
+static HWND FakeGetCapture() { return simulatedCapture; }
+static BOOL FakeReleaseCapture() { simulatedCapture = nullptr; return TRUE; }
+static LRESULT FakeSendMessageW(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static HMONITOR MonitorHandle(int i) { return reinterpret_cast<HMONITOR>(INT_PTR(i + 1)); }
 static int MonitorIndex(HMONITOR h) { return h == MonitorHandle(1) ? 1 : 0; }
 static HMONITOR FakeMonitorFromPoint(POINT p, DWORD) {
@@ -54,6 +62,16 @@ static HRESULT FakeGetDpiForMonitor(HMONITOR h,MONITOR_DPI_TYPE,UINT* x,UINT* y)
 }
 static UINT FakeGetDpiForWindow(HWND) {return monitors[MonitorIndex(FakeMonitorFromWindow(nullptr,0))].dpi;}
 static BOOL FakeGetCursorPos(LPPOINT p) {*p=cursorPoint;return TRUE;}
+static BOOL FakeScreenToClient(HWND, LPPOINT p) {
+    p->x -= simulatedWindowRect.left; p->y -= simulatedWindowRect.top; return TRUE;
+}
+static BOOL FakeClientToScreen(HWND, LPPOINT p) {
+    p->x += simulatedWindowRect.left; p->y += simulatedWindowRect.top; return TRUE;
+}
+static HWND FakeWindowFromPoint(POINT p) {
+    return PtInRect(&simulatedWindowRect, p) ? testWindow : nullptr;
+}
+static HWND FakeGetAncestor(HWND hwnd, UINT) { return hwnd; }
 static BOOL FakeGetWindowRect(HWND,LPRECT r) {*r=simulatedWindowRect;return TRUE;}
 static BOOL FakeGetClientRect(HWND,LPRECT r) {
     *r={0,0,simulatedWindowRect.right-simulatedWindowRect.left,simulatedWindowRect.bottom-simulatedWindowRect.top};return TRUE;
@@ -69,10 +87,18 @@ static BOOL FakeSetWindowPos(HWND,HWND,int,int,int,int,UINT);
 #define GetDpiForMonitor FakeGetDpiForMonitor
 #define GetDpiForWindow FakeGetDpiForWindow
 #define GetCursorPos FakeGetCursorPos
+#define ScreenToClient FakeScreenToClient
+#define ClientToScreen FakeClientToScreen
+#define WindowFromPoint FakeWindowFromPoint
+#define GetAncestor FakeGetAncestor
 #define GetWindowRect FakeGetWindowRect
 #define GetClientRect FakeGetClientRect
 #define GetWindowLongPtrW FakeGetWindowLongPtrW
 #define SetWindowPos FakeSetWindowPos
+#define SetCapture FakeSetCapture
+#define GetCapture FakeGetCapture
+#define ReleaseCapture FakeReleaseCapture
+#define SendMessageW FakeSendMessageW
 #include "../src/main.cpp"
 #undef fwprintf
 #undef EnumDisplayDevicesW
@@ -84,13 +110,30 @@ static BOOL FakeSetWindowPos(HWND,HWND,int,int,int,int,UINT);
 #undef GetDpiForMonitor
 #undef GetDpiForWindow
 #undef GetCursorPos
+#undef ScreenToClient
+#undef ClientToScreen
+#undef WindowFromPoint
+#undef GetAncestor
 #undef GetWindowRect
 #undef GetClientRect
 #undef GetWindowLongPtrW
 #undef SetWindowPos
+#undef SetCapture
+#undef GetCapture
+#undef ReleaseCapture
+#undef SendMessageW
 
 static void Require(bool value,const char* message) {
     if(!value) {std::fprintf(stderr,"FAIL: %s\n",message);std::exit(1);}
+}
+static LRESULT FakeSendMessageW(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_NCLBUTTONDOWN && wParam == HTCAPTION) {
+        Require(hwnd == testWindow && simulatedCapture == nullptr &&
+                !g_audioOnlyDragPending, "release capture before native move");
+        ++audioDragMoves;
+        return 0; // Do not enter the real OS modal move loop in this harness.
+    }
+    return WndProc(hwnd, msg, wParam, lParam);
 }
 static BOOL FakeSetWindowPos(HWND hwnd,HWND,int x,int y,int w,int h,UINT flags) {
     Require(hwnd==testWindow,"only simulated viewer may be positioned");
@@ -111,6 +154,7 @@ static void Reset(bool relative=true,bool perfect=true) {
     g_settings.pixelPerfect=perfect;
     g_settings.windowSnap=false;
     g_settings.audioOnly=false;
+    g_audioOnlyDragPending = false; simulatedCapture = nullptr; audioDragMoves = 0;
     g_fullscreen=false;g_videoHost=nullptr;
     g_outputTransition={};
     g_relativeMoveMonitor=nullptr;g_interactiveWindowMove=false;
@@ -327,6 +371,277 @@ int main(int argc, char** argv) {
     WndProc(testWindow,WM_CREATE,0,0);
     Require(g_outputTransition.Depth()==0 && !g_interactiveWindowMove && !g_outputTransition.Pending(),
             "new viewer resets abandoned modal move state");
+
+    Reset(false, true);
+    g_settings.audioOnly = true;
+    g_settings.borderlessWindow = true;
+    Require(ViewerWindowStyle(g_settings) == (WS_POPUP | WS_VISIBLE),
+            "audio-only honors the borderless setting even with video pixel-perfect enabled");
+    g_settings.borderlessWindow = false;
+    Require((ViewerWindowStyle(g_settings) & (WS_CAPTION | WS_THICKFRAME)) ==
+                (WS_CAPTION | WS_THICKFRAME),
+            "audio-only keeps its resizable caption when borderless is disabled");
+    g_settings.borderlessWindow = true;
+    simulatedStyle = ViewerWindowStyle(g_settings);
+    ApplyRect(RECT{100, 100, 480, 330});
+    Require(WndProc(testWindow, WM_NCHITTEST, 0, MAKELPARAM(101, 101)) == HTTOPLEFT,
+            "borderless audio-only has a resize corner");
+    Require(WndProc(testWindow, WM_NCHITTEST, 0, MAKELPARAM(200, 130)) == HTCLIENT,
+            "borderless header uses the same client drag gesture as controls");
+    Require(WndProc(testWindow, WM_NCHITTEST, 0, MAKELPARAM(180, 190)) == HTCLIENT &&
+                WndProc(testWindow, WM_NCHITTEST, 0, MAKELPARAM(180, 260)) == HTCLIENT &&
+                WndProc(testWindow, WM_NCHITTEST, 0, MAKELPARAM(350, 260)) == HTCLIENT,
+            "borderless audio-only volume controls retain client mouse interaction");
+
+    g_volumePercent = 100;
+    g_leftVolumePercent = 100;
+    g_rightVolumePercent = 100;
+    for (const auto point : {POINT{20, 45}, POINT{20, 112}, POINT{202, 112}}) {
+        const WPARAM wheelDown = MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA));
+        WndProc(testWindow, WM_MOUSEWHEEL, wheelDown,
+                MAKELPARAM(point.x + 100, point.y + 100));
+    }
+    Require(g_volumePercent == 95 && g_leftVolumePercent == 95 &&
+                g_rightVolumePercent == 95,
+            "wheel works on expanded master and channel surfaces");
+    for (const auto point : {POINT{30, 22}, POINT{30, 103},
+                             POINT{190, 150}, POINT{30, 211}}) {
+        WndProc(testWindow, WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA),
+                MAKELPARAM(point.x + 100, point.y + 100));
+    }
+    Require(g_volumePercent == 95 && g_leftVolumePercent == 95 &&
+                g_rightVolumePercent == 95,
+            "drag regions never adjust audio-only volume");
+    for (const auto point : {POINT{20, 45}, POINT{20, 112}, POINT{202, 112}})
+        WndProc(testWindow, WM_LBUTTONDBLCLK, 0, MAKELPARAM(point.x, point.y));
+    Require(g_volumePercent == 100 && g_leftVolumePercent == 100 &&
+                g_rightVolumePercent == 100,
+            "double-click resets each modern audio control independently");
+
+    for (const auto point : {POINT{30, 65}, POINT{30, 130}, POINT{220, 130}, POINT{190, 150}}) {
+        const int target = point.y == 65 ? 3 : point.x == 30 ? 1 : point.x == 220 ? 2 : 0;
+        WndProc(testWindow, WM_MOUSEMOVE, 0, MAKELPARAM(point.x, point.y));
+        Require(g_audioOsdHoverTarget == target && !g_audioOnlyDragPending,
+                "hover identifies controls without moving");
+    }
+    WndProc(testWindow, WM_MOUSEMOVE, 0, MAKELPARAM(30, 65));
+    WndProc(testWindow, WM_MOUSELEAVE, 0, 0);
+    Require(g_audioOsdHoverTarget == 0, "leaving client clears hover");
+    WndProc(testWindow, WM_MOUSEMOVE, 0, MAKELPARAM(30, 65));
+    WndProc(testWindow, WM_NCMOUSEMOVE, 0, 0);
+    Require(g_audioOsdHoverTarget == 0, "resize edge clears hover");
+
+    for (const bool borderless : {false, true}) {
+        g_settings.borderlessWindow = borderless;
+        simulatedStyle = ViewerWindowStyle(g_settings);
+        for (const auto point : {POINT{30, 22}, POINT{30, 65}, POINT{30, 130},
+                                 POINT{220, 130}, POINT{190, 150}, POINT{30, 211}}) {
+            const LPARAM at = MAKELPARAM(point.x, point.y);
+            const LPARAM moved = MAKELPARAM(point.x + 40, point.y + 30);
+            const int beforeMove = audioDragMoves;
+            WndProc(testWindow, WM_LBUTTONDOWN, MK_LBUTTON, at);
+            Require(g_audioOnlyDragPending && simulatedCapture == testWindow,
+                    "every audio-only region arms drag");
+            WndProc(testWindow, WM_MOUSEMOVE, MK_LBUTTON, at);
+            Require(audioDragMoves == beforeMove, "click alone never moves window");
+            WndProc(testWindow, WM_LBUTTONUP, 0, at);
+            Require(!g_audioOnlyDragPending && !simulatedCapture,
+                    "click release cancels pending drag");
+            WndProc(testWindow, WM_LBUTTONDOWN, MK_LBUTTON, at);
+            WndProc(testWindow, WM_MOUSEMOVE, MK_LBUTTON, moved);
+            Require(audioDragMoves == beforeMove + 1 &&
+                    !g_audioOnlyDragPending && !simulatedCapture,
+                    "dragging any audio-only region starts exactly one native move");
+            WndProc(testWindow, WM_MOUSEMOVE, MK_LBUTTON, moved);
+            Require(audioDragMoves == beforeMove + 1, "drag does not restart move loop");
+            WndProc(testWindow, WM_LBUTTONDOWN, MK_LBUTTON, at);
+            WndProc(testWindow, WM_CANCELMODE, 0, 0);
+            WndProc(testWindow, WM_MOUSEMOVE, MK_LBUTTON, moved);
+            Require(audioDragMoves == beforeMove + 1 && !simulatedCapture,
+                    "cancelled drag never moves or retains capture");
+            WndProc(testWindow, WM_LBUTTONDOWN, MK_LBUTTON, at);
+            simulatedCapture = nullptr;
+            WndProc(testWindow, WM_CAPTURECHANGED, 0, 0);
+            WndProc(testWindow, WM_MOUSEMOVE, MK_LBUTTON, moved);
+            Require(!g_audioOnlyDragPending && audioDragMoves == beforeMove + 1,
+                    "lost capture cancels pending drag");
+            WndProc(testWindow, WM_LBUTTONDOWN, MK_LBUTTON, at);
+            WndProc(testWindow, WM_MOUSEMOVE, 0, moved);
+            Require(!g_audioOnlyDragPending && !simulatedCapture &&
+                    audioDragMoves == beforeMove + 1, "released button cancels drag");
+        }
+    }
+    Require(g_volumePercent == 100 && g_leftVolumePercent == 100 &&
+            g_rightVolumePercent == 100, "window drag never changes volume");
+    for (const auto point : {POINT{30, 65}, POINT{30, 130}, POINT{220, 130}}) {
+        g_volumePercent = 150; g_leftVolumePercent = 85; g_rightVolumePercent = 75;
+        const LPARAM at = MAKELPARAM(point.x, point.y);
+        const int beforeMove = audioDragMoves;
+        WndProc(testWindow, WM_LBUTTONDOWN, MK_LBUTTON, at);
+        WndProc(testWindow, WM_LBUTTONUP, 0, at);
+        WndProc(testWindow, WM_LBUTTONDBLCLK, MK_LBUTTON, at);
+        WndProc(testWindow, WM_LBUTTONUP, 0, at);
+        Require(!g_audioOnlyDragPending && !simulatedCapture &&
+                audioDragMoves == beforeMove &&
+                g_volumePercent == (point.y == 65 ? 100 : 150) &&
+                g_leftVolumePercent == (point.y == 130 && point.x == 30 ? 100 : 85) &&
+                g_rightVolumePercent == (point.x == 220 ? 100 : 75),
+                "complete double-click sequence resets only its control without dragging");
+    }
+    g_settings.audioOnly = false;
+    WndProc(testWindow, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(30, 65));
+    Require(!g_audioOnlyDragPending && !simulatedCapture, "video mode does not arm audio drag");
+    g_settings.audioOnly = true;
+
+    const UINT originalDpi = monitors[0].dpi;
+    for (const UINT dpi : {96u, 120u, 144u, 168u, 192u, 240u, 288u}) {
+        monitors[0].dpi = dpi;
+        for (const bool borderless : {false, true}) {
+            g_settings.borderlessWindow = borderless;
+            simulatedStyle = ViewerWindowStyle(g_settings);
+            MINMAXINFO limits{};
+            WndProc(testWindow, WM_GETMINMAXINFO, 0,
+                    reinterpret_cast<LPARAM>(&limits));
+            const auto minimum = llcv::audio_only_view::MinimumClientSize(dpi);
+            const SIZE outer = OuterSizeForClientPixels(
+                minimum.width, minimum.height,
+                static_cast<DWORD>(simulatedStyle), 0, dpi);
+            Require(limits.ptMinTrackSize.x == outer.cx &&
+                    limits.ptMinTrackSize.y == outer.cy,
+                    "audio-only minimum follows DPI and window decoration");
+            RECT tiny{100, 100, 150, 130};
+            WndProc(testWindow, WM_SIZING, WMSZ_BOTTOMRIGHT,
+                    reinterpret_cast<LPARAM>(&tiny));
+            Require(tiny.right - tiny.left >= outer.cx &&
+                    tiny.bottom - tiny.top >= outer.cy - 1,
+                    "resize cannot shrink audio controls below DPI minimum");
+        }
+    }
+    monitors[0].dpi = originalDpi;
+
+    // Audio-only geometry must never borrow video sizing/fullscreen policies.
+    for (bool relative : {false, true}) for (bool pixelPerfect : {false, true}) {
+        Reset(relative, pixelPerfect);
+        g_settings.audioOnly = true;
+        g_settings.borderlessWindow = true;
+        const int videoScale = g_settings.relativeWindowScalePpm;
+        const auto generation = Generation();
+        const int savedWidth = g_settings.audioOnlyWidth;
+        const int savedHeight = g_settings.audioOnlyHeight;
+        WndProc(testWindow, WM_SIZE, SIZE_RESTORED, MAKELPARAM(500, 280));
+        Require(g_settings.audioOnlyWidth == savedWidth &&
+                    g_settings.audioOnlyHeight == savedHeight,
+                "automatic audio-only size changes do not overwrite preference");
+        Enter();
+        RECT rightEdge{100, 100, 700, 450};
+        Require(WndProc(testWindow, WM_SIZING, WMSZ_RIGHT,
+                        reinterpret_cast<LPARAM>(&rightEdge)) == TRUE &&
+                    rightEdge.left == 100 && rightEdge.top == 100 &&
+                    std::abs((rightEdge.right - rightEdge.left) * 230 -
+                             (rightEdge.bottom - rightEdge.top) * 380) <= 190,
+                "audio-only right-edge drag adjusts height proportionally");
+        RECT topEdge{100, 100, 700, 500};
+        Require(WndProc(testWindow, WM_SIZING, WMSZ_TOP,
+                        reinterpret_cast<LPARAM>(&topEdge)) == TRUE &&
+                    topEdge.bottom == 500 && topEdge.left == 100 &&
+                    std::abs((topEdge.right - topEdge.left) * 230 -
+                             (topEdge.bottom - topEdge.top) * 380) <= 190,
+                "audio-only top-edge drag adjusts width proportionally");
+        RECT audioSizing{100, 100, 740, 460};
+        Require(WndProc(testWindow, WM_SIZING, WMSZ_BOTTOMRIGHT,
+                        reinterpret_cast<LPARAM>(&audioSizing)) == TRUE &&
+                    audioSizing.right - audioSizing.left == 640 &&
+                    audioSizing.bottom - audioSizing.top == 387,
+                "audio-only border drag locks the client aspect ratio");
+        ApplyRect(audioSizing);
+        Leave();
+        Require(g_settings.audioOnlyWidth == 640 && g_settings.audioOnlyHeight == 387,
+                "audio-only remembers normal client size");
+        WndProc(testWindow, WM_SIZE, SIZE_MINIMIZED, 0);
+        WndProc(testWindow, WM_SIZE, SIZE_MAXIMIZED, MAKELPARAM(1920, 1080));
+        Require(g_settings.audioOnlyWidth == 640 && g_settings.audioOnlyHeight == 387,
+                "audio-only ignores minimized/maximized sizes");
+        const RECT before = simulatedWindowRect;
+        WndProc(testWindow, WM_RESTORE_ONE_TO_ONE, 0, 0);
+        ToggleFullscreen(testWindow);
+        NormalizeWindowSize(testWindow, true);
+        Require(EqualRect(&before, &simulatedWindowRect) && !g_fullscreen,
+                "video geometry commands leave audio-only unchanged");
+        SIZE pending{800, 500};
+        Require(WndProc(testWindow, WM_GETDPISCALEDSIZE, 144,
+                        reinterpret_cast<LPARAM>(&pending)) == FALSE,
+                "audio-only DPI preflight does not apply video dimensions");
+        RECT suggested{100, 100, 900, 600};
+        WndProc(testWindow, WM_DPICHANGED, MAKELONG(144, 144),
+                reinterpret_cast<LPARAM>(&suggested));
+        Require(simulatedWindowRect.left == suggested.left &&
+                    simulatedWindowRect.top == suggested.top &&
+                    simulatedWindowRect.right - simulatedWindowRect.left == 800 &&
+                    simulatedWindowRect.bottom - simulatedWindowRect.top == 484,
+                "audio-only DPI move keeps the suggested origin and fixed aspect");
+        Require(g_settings.audioOnlyWidth == 640 && g_settings.audioOnlyHeight == 387,
+                "DPI resize does not replace user-chosen audio-only dimensions");
+        Require(g_settings.relativeWindowScalePpm == videoScale &&
+                    Generation() == generation && g_outputTransition.Depth() == 0,
+                "audio-only geometry does not alter video scale or rebuild output");
+
+        g_settings.windowSnap = true;
+        cursorPoint = POINT{25, 110};
+        RECT moving{10, 100, 650, 460};
+        Enter();
+        Require(WndProc(testWindow, WM_MOVING, 0,
+                        reinterpret_cast<LPARAM>(&moving)) == TRUE &&
+                    moving.left == monitors[0].rect.left &&
+                    moving.right - moving.left == 640,
+                "audio-only retains window edge snap without video resizing");
+        Leave();
+    Require(g_settings.relativeWindowScalePpm == videoScale &&
+                    Generation() == generation,
+                "audio-only snap leaves video settings and output untouched");
+    }
+
+    Reset(false, false);
+    g_suppressSettingsSave = true;
+    PersistWindowPosition(testWindow);
+    Require(!g_settings.hasWindowPosition,
+            "diagnostic run does not persist window placement");
+    g_suppressSettingsSave = false;
+
+    // Dedicated audio-only controls scale with the resized window.
+    HDC screenDc = GetDC(nullptr);
+    Require(screenDc != nullptr, "desktop DC for audio-only paint check");
+    HDC panelDc = CreateCompatibleDC(screenDc);
+    const RECT largeClient{0, 0, 1200, 730};
+    const auto panel = llcv::audio_only_view::ContentRect(
+        largeClient.right, largeClient.bottom);
+    const int panelWidth = panel.right - panel.left;
+    const int panelHeight = panel.bottom - panel.top;
+    HBITMAP panelBitmap = CreateCompatibleBitmap(
+        screenDc, panelWidth, panelHeight);
+    Require(panelDc != nullptr && panelBitmap != nullptr,
+            "scaled audio meter back buffer");
+    HGDIOBJ previousBitmap = SelectObject(panelDc, panelBitmap);
+    const RECT panelPixels{0, 0, panelWidth, panelHeight};
+    FillRect(panelDc, &panelPixels,
+             reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+    g_audioOsdVisible.store(false, std::memory_order_release);
+    SetViewportOrgEx(panelDc, -panel.left, -panel.top, nullptr);
+    PaintAudioOnlyView(panelDc, panel);
+    SetViewportOrgEx(panelDc, 0, 0, nullptr);
+    Require(GetPixel(panelDc, MulDiv(365, panelWidth, 380),
+                     MulDiv(200, panelHeight, 230)) == RGB(12, 15, 19),
+            "audio-only view renders its full-size background");
+    Require(GetPixel(panelDc, MulDiv(200, panelWidth, 380),
+                     MulDiv(94, panelHeight, 230)) == RGB(30, 36, 44),
+            "audio-only master control renders at its scaled size");
+    g_settings.audioOnly = true;
+    ToggleAudioOsd();
+    Require(!g_audioOsdVisible.load(std::memory_order_acquire),
+            "F3 cannot hide the dedicated audio-only screen");
+    SelectObject(panelDc, previousBitmap);
+    DeleteObject(panelBitmap);
+    DeleteDC(panelDc);
+    ReleaseDC(nullptr, screenDc);
 
     // Replay both DPI/move orderings with negative monitor coordinates and
     // equal/mixed DPI. These are supplied event orders, not a Windows emulator.

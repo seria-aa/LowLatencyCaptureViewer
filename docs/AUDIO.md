@@ -47,8 +47,19 @@ presentation path. The app runs only the capture-audio-to-selected-output path. 
 is exposed on the video filter, only that audio pin is connected; when a
 separate capture-audio device is selected, only its DirectShow audio filter is
 used. WASAPI mode, PCM target, and clock-drift correction remain available with
-the same behavior as normal mode. The window shows the same L/R peak, dBFS,
-channel/master volume, and clipping OSD as the video viewer.
+the same behavior as normal mode. A dedicated audio view shows master and L/R
+volume, output levels in dBFS, and clipping status. Scroll anywhere within a
+master or channel control to adjust its volume; double-click it to reset to
+100%. The header, footer, and gaps between controls do not change volume.
+When volume boost is allowed, the master control shows **Up to 200%**; its number
+turns amber above 100%. This indicates amplification, not clipping. Actual
+clipping is shown separately in the status line.
+With **Hide title bar**
+enabled, the audio-only window is also borderless. Drag anywhere in the view,
+including the master and L/R controls, to move the window; drag an edge to resize
+it at a fixed aspect ratio. Master and L/R controls highlight on hover while
+remaining draggable.
+The minimum window size follows Windows display scaling to keep text and controls readable in a compact window.
 
 ## WASAPI Shared and Exclusive
 
@@ -143,9 +154,9 @@ The mouse wheel changes volume in 5% steps. At 100%, PCM volume processing is
 bypassed. **Allow volume boost above 100%** permits up to 200% digital gain
 without adding an audio buffer, but loud signals may clip.
 
-To adjust channels independently, press `F3` to show the audio meter OSD and
-hover the pointer over the **L** or **R** card while scrolling. Only the
-hovered channel changes, in 5% steps. Scrolling over the master row or outside
+To adjust channels independently, show the meter with `F3` in video mode or
+use the always-visible audio-only view, then scroll over an **L** or **R** card.
+Only that channel changes, in 5% steps. Scrolling over the master area or outside
 the channel cards changes the master volume. Independent L/R gain remains
 limited to 100%; the optional 200% boost applies only to the master volume.
 

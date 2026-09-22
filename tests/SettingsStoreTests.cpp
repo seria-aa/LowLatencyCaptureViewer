@@ -29,6 +29,8 @@ void TestDefaults(const std::wstring& path) {
     DeleteFileW(path.c_str());
     const auto loaded = llcv::settings::LoadFromIni(path);
     Check(!loaded.settings.consoleSurround51, "5.1 is opt-in for old and fresh profiles");
+    Check(loaded.settings.audioOnlyWidth == 380 && loaded.settings.audioOnlyHeight == 230,
+          "audio-only default size preserves old profiles");
     Check(loaded.settings.preferredDisplayMonitor.empty(), "default display is automatic");
     Check(loaded.settings.audioMode ==
               llcv::settings::AudioMode::WasapiShared,
@@ -92,11 +94,15 @@ void TestRoundTrip(const std::wstring& path) {
     saved.skipStartupSettings = true;
     saved.checkForUpdates = false;
     saved.audioOnly = true;
+    saved.audioOnlyWidth = 640;
+    saved.audioOnlyHeight = 360;
 
     SaveToIni(path, saved);
     const LoadResult result = LoadFromIni(path);
     Check(result.settings.consoleSurround51, "surround preference round trip");
     const AppSettings& loaded = result.settings;
+    Check(loaded.audioOnlyWidth == 640 && loaded.audioOnlyHeight == 360,
+          "audio-only size round trip independent from video scale");
     Check(loaded.hdrChromaLocation == saved.hdrChromaLocation, "HDR chroma round trip");
     Check(loaded.preferredDisplayMonitor == saved.preferredDisplayMonitor, "display monitor round trip");
     Check(loaded.uiLanguage == saved.uiLanguage, "language round trip");
@@ -255,6 +261,11 @@ int main() {
     }
     TestDefaults(path);
     TestRoundTrip(path);
+    WritePrivateProfileStringW(L"Window", L"AudioOnlyWidth", L"-1", path.c_str());
+    WritePrivateProfileStringW(L"Window", L"AudioOnlyHeight", L"999999", path.c_str());
+    const auto bounded = llcv::settings::LoadFromIni(path).settings;
+    Check(bounded.audioOnlyWidth == 380 && bounded.audioOnlyHeight == 16384,
+          "invalid audio-only dimensions are bounded");
     TestHdrChroma(path);
     TestPresentationModes(path);
     TestPcmDefaultAndPreservation(path);

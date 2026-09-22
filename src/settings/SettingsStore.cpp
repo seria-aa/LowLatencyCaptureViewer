@@ -143,6 +143,10 @@ LoadResult LoadFromIni(const std::wstring& path) {
     settings.checkForUpdates =
         ReadBool(path, L"General", L"CheckForUpdates", true);
     settings.audioOnly = ReadBool(path, L"General", L"AudioOnly");
+    settings.audioOnlyWidth = std::clamp(
+        ReadInt(path, L"Window", L"AudioOnlyWidth", 380), 380, 16384);
+    settings.audioOnlyHeight = std::clamp(
+        ReadInt(path, L"Window", L"AudioOnlyHeight", 230), 230, 16384);
     settings.consoleSurround51 = ReadBool(path, L"Audio", L"ConsoleSurround51");
 
     const std::wstring audioMode =
@@ -335,6 +339,8 @@ void SaveToIni(const std::wstring& path, const AppSettings& settings) {
     WriteInt(path, L"General", L"CheckForUpdates",
              settings.checkForUpdates ? 1 : 0);
     WriteInt(path, L"General", L"AudioOnly", settings.audioOnly ? 1 : 0);
+    WriteInt(path, L"Window", L"AudioOnlyWidth", settings.audioOnlyWidth);
+    WriteInt(path, L"Window", L"AudioOnlyHeight", settings.audioOnlyHeight);
     WriteInt(path, L"Audio", L"ConsoleSurround51", settings.consoleSurround51 ? 1 : 0);
 
     const wchar_t* audioMode = L"Shared";
