@@ -178,6 +178,8 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
         pages.Block(100, {{s->forceHdr10Check,0,0,width-34,36},{s->forceHdr10Help,width-24,6,24,24},
             {s->hdrChromaLabel,0,44,width-34,20},{s->hdrChromaCombo,0,68,width-34,30},
             {s->hdrChromaHelp,width-24,71,24,24}},44);
+        if (format!=static_cast<LRESULT>(settings::VideoPixelFormat::P010))
+            pages.Field(s->sdrRangeLabel,s->sdrRangeCombo,s->sdrRangeHelp);
         if (format==static_cast<LRESULT>(settings::VideoPixelFormat::Mjpeg))
             pages.Field(s->mjpegColorLabel,s->mjpegColorCombo,s->mjpegColorHelp);
         }

@@ -24,8 +24,9 @@ public:
     HRESULT initialize(int width, int height, int fps,
                        const AM_MEDIA_TYPE* captureType,
                        const CaptureColorMetadata* directShowColor,
-                       video_color::Override colorOverride,
-                       LogCallback logCallback);
+                       video_color::MatrixOverride colorOverride,
+                       LogCallback logCallback,
+                       video_color::RangeOverride rangeOverride = video_color::RangeOverride::Auto);
 
     // Returns S_OK without an output frame while the decoder is waiting for
     // enough input. If several frames become available, only the newest is
@@ -76,7 +77,8 @@ private:
     int width_ = 0;
     int height_ = 0;
     CaptureColorMetadata directShowColor_{};
-    video_color::Override colorOverride_ = video_color::Override::Auto;
+    video_color::MatrixOverride colorOverride_ = video_color::MatrixOverride::Auto;
+    video_color::RangeOverride rangeOverride_ = video_color::RangeOverride::Auto;
     video_color::Configuration colorConfiguration_{};
     LogCallback logCallback_ = nullptr;
     bool mfStarted_ = false;

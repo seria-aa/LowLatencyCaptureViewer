@@ -87,28 +87,30 @@ bool IsExclusiveLowLatencyBuffer(int bufferMs) {
            kExclusiveBufferOptionsMs.end();
 }
 
-video_color::Override ParseMjpegColorOverride(const std::wstring& value) {
-    if (_wcsicmp(value.c_str(), L"Bt709Full") == 0) {
-        return video_color::Override::Bt709Full;
-    }
-    if (_wcsicmp(value.c_str(), L"Bt709Limited") == 0) {
-        return video_color::Override::Bt709Limited;
-    }
-    if (_wcsicmp(value.c_str(), L"Bt601Full") == 0) {
-        return video_color::Override::Bt601Full;
-    }
-    if (_wcsicmp(value.c_str(), L"Bt601Limited") == 0) {
-        return video_color::Override::Bt601Limited;
-    }
-    return video_color::Override::Auto;
+video_color::MatrixOverride ParseMjpegMatrix(const std::wstring& value) {
+    if (_wcsicmp(value.c_str(), L"Bt709") == 0) return video_color::MatrixOverride::Bt709;
+    if (_wcsicmp(value.c_str(), L"Bt601") == 0) return video_color::MatrixOverride::Bt601;
+    return video_color::MatrixOverride::Auto;
 }
 
-const wchar_t* MjpegColorOverrideSettingName(video_color::Override mode) {
+const wchar_t* MjpegMatrixSettingName(video_color::MatrixOverride mode) {
     switch (mode) {
-    case video_color::Override::Bt709Full: return L"Bt709Full";
-    case video_color::Override::Bt709Limited: return L"Bt709Limited";
-    case video_color::Override::Bt601Full: return L"Bt601Full";
-    case video_color::Override::Bt601Limited: return L"Bt601Limited";
+    case video_color::MatrixOverride::Bt709: return L"Bt709";
+    case video_color::MatrixOverride::Bt601: return L"Bt601";
+    default: return L"Auto";
+    }
+}
+
+video_color::RangeOverride ParseSdrRange(const std::wstring& value) {
+    if (_wcsicmp(value.c_str(), L"Limited") == 0) return video_color::RangeOverride::Limited;
+    if (_wcsicmp(value.c_str(), L"Full") == 0) return video_color::RangeOverride::Full;
+    return video_color::RangeOverride::Auto;
+}
+
+const wchar_t* SdrRangeSettingName(video_color::RangeOverride mode) {
+    switch (mode) {
+    case video_color::RangeOverride::Limited: return L"Limited";
+    case video_color::RangeOverride::Full: return L"Full";
     default: return L"Auto";
     }
 }
@@ -307,8 +309,25 @@ LoadResult LoadFromIni(const std::wstring& path) {
         ? hdr::ChromaLocation::TopLeft
         : _wcsicmp(hdrChroma.c_str(), L"Left") == 0
             ? hdr::ChromaLocation::Left : hdr::ChromaLocation::Auto;
-    settings.mjpegColorOverride = ParseMjpegColorOverride(
-        ReadString(path, L"Video", L"MjpegColor", L"Auto"));
+    const auto mjpegMatrix = ReadString(path, L"Video", L"MjpegMatrix", L"__missing__");
+    const auto sdrRange = ReadString(path, L"Video", L"SdrRange", L"__missing__");
+    settings.mjpegMatrixOverride = ParseMjpegMatrix(mjpegMatrix);
+    settings.sdrRangeOverride = ParseSdrRange(sdrRange);
+    settings.legacyMjpegRangeOverride = ParseSdrRange(
+        ReadString(path, L"Video", L"LegacyMjpegRange", L"Auto"));
+    if (mjpegMatrix == L"__missing__" && sdrRange == L"__missing__") {
+        const auto legacy = ReadString(path, L"Video", L"MjpegColor", L"Auto");
+        for (const auto* matrix : {L"Bt709", L"Bt601"}) {
+            for (const auto* range : {L"Full", L"Limited"}) {
+                if (_wcsicmp(legacy.c_str(), (std::wstring(matrix) + range).c_str()) == 0) {
+                    settings.mjpegMatrixOverride = ParseMjpegMatrix(matrix);
+                    settings.legacyMjpegRangeOverride = ParseSdrRange(range);
+                }
+            }
+        }
+    }
+    if (settings.sdrRangeOverride != video_color::RangeOverride::Auto)
+        settings.legacyMjpegRangeOverride = video_color::RangeOverride::Auto;
     settings.captureDeviceId =
         ReadString(path, L"Video", L"CaptureDeviceId");
     settings.captureAudioDeviceId =
@@ -395,6 +414,14 @@ LoadResult LoadFromIni(const std::wstring& path) {
     else if (captureResolution == L"1920x1080") settings.capturePreset = VideoPreset::R1920x1080;
     else if (captureResolution == L"2560x1440") settings.capturePreset = VideoPreset::R2560x1440;
     else if (captureResolution == L"3840x2160") settings.capturePreset = VideoPreset::R3840x2160;
+    // Migrate only profiles without an explicit mode, after resolving legacy VSR capture sizes.
+    // Equal old sizes follow capture without changing their current appearance;
+    // explicit modes (including fixed at equal sizes) are never migrated again.
+    const auto displayMode = ReadString(path, L"Video", L"DisplayMatchesCapture", L"__missing__");
+    settings.displayMatchesCapture = displayMode == L"__missing__"
+        ? (ReadString(path, L"Video", L"Resolution").empty() ||
+           settings.capturePreset == settings.videoPreset)
+        : ReadBool(path, L"Video", L"DisplayMatchesCapture");
     settings.showDiagnosticConsole =
         ReadBool(path, L"Diagnostics", L"ShowConsole");
     return result;
@@ -489,14 +516,20 @@ static DWORD WriteSettings(const std::wstring& file, const AppSettings& settings
     WriteInt(path, L"Video", L"ForceHdr10", settings.forceHdr10 ? 1 : 0);
     WriteString(path, L"Video", L"HdrChromaLocation",
                 hdr::ChromaLocationName(settings.hdrChromaLocation));
-    WriteString(path, L"Video", L"MjpegColor",
-                MjpegColorOverrideSettingName(settings.mjpegColorOverride));
+    WriteString(path, L"Video", L"MjpegMatrix", MjpegMatrixSettingName(settings.mjpegMatrixOverride));
+    WriteString(path, L"Video", L"SdrRange", SdrRangeSettingName(settings.sdrRangeOverride));
+    WriteString(path, L"Video", L"LegacyMjpegRange",
+        settings.sdrRangeOverride == video_color::RangeOverride::Auto &&
+        settings.legacyMjpegRangeOverride != video_color::RangeOverride::Auto
+            ? SdrRangeSettingName(settings.legacyMjpegRangeOverride) : nullptr);
+    WriteString(path, L"Video", L"MjpegColor", nullptr);
     int width = 0;
     int height = 0;
     VideoDimensions(settings.videoPreset, width, height);
     wchar_t resolution[32]{};
     swprintf_s(resolution, L"%dx%d", width, height);
     WriteString(path, L"Video", L"Resolution", resolution);
+    WriteInt(path, L"Video", L"DisplayMatchesCapture", settings.displayMatchesCapture ? 1 : 0);
     VideoDimensions(settings.capturePreset, width, height);
     swprintf_s(resolution, L"%dx%d", width, height);
     WriteString(path, L"Video", L"CaptureResolution", resolution);

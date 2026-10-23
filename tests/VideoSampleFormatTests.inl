@@ -85,6 +85,53 @@ static void TestVideoSampleChanges() {
               "type failure wakes owner even without valid input");
         after->Release(); cb->Release(); ++scenarios;
     }
+    // A capture-rate change must never hide behind an unchanged resolution or
+    // pixel format. Fractional NTSC equivalents keep their nominal FPS, while
+    // an announced jump to 120 must clear retained input and wake the owner.
+    for (const GUID subtype : {MEDIASUBTYPE_NV12, MEDIASUBTYPE_YUY2,
+                               MFVideoFormat_P010, MEDIASUBTYPE_MJPG})
+    for (int requested : {30, 40, 60}) {
+        auto requestedInfo = info;
+        requestedInfo.bmiHeader.biSizeImage = subtype == MFVideoFormat_P010 ? 48 :
+            subtype == MEDIASUBTYPE_YUY2 ? 32 : 24;
+        requestedInfo.AvgTimePerFrame = 10000000LL / requested;
+        auto requestedType = type;
+        requestedType.subtype = subtype;
+        requestedType.pbFormat = reinterpret_cast<BYTE*>(&requestedInfo);
+        VideoSampleFormat requestedFormat{};
+        Check(ReadVideoSampleFormat(&requestedType, requested, requestedFormat),
+              "selected rate format initializes across raw and compressed capture");
+        LatestVideoSample slot(requestedInfo.bmiHeader.biSizeImage, ready);
+        auto* callback = new VideoSampleGrabberCallback(&slot, nullptr, requestedFormat);
+        auto* sample = new Sample(requestedInfo.bmiHeader.biSizeImage);
+        Check(callback->SampleCB(0, sample) == S_OK,
+              "unchanged input remains valid before a rate reannouncement");
+
+        auto announcedInfo = requestedInfo;
+        auto announcedType = requestedType;
+        announcedType.pbFormat = reinterpret_cast<BYTE*>(&announcedInfo);
+        sample->dynamicType = &announcedType;
+        sample->typeResult = S_OK;
+        if (requested == 30 || requested == 60) {
+            announcedInfo.AvgTimePerFrame = 10010000LL / requested;
+            Check(callback->SampleCB(0, sample) == S_OK,
+                  "29.97/59.94 equivalents do not falsely reject the selected nominal FPS");
+        }
+        announcedInfo.AvgTimePerFrame = 10000000LL / 120;
+        Check(callback->SampleCB(0, sample) == VFW_E_TYPE_NOT_ACCEPTED &&
+                  FAILED(slot.FormatFailure()),
+              "announced 30/40/60 to 120 change cannot silently increase input FPS");
+        int64_t arrival = 0;
+        auto* retained = slot.TakeLatest(arrival);
+        Check(retained == nullptr, "rate change removes stale retained sample");
+        if (retained) retained->Release();
+        sample->dynamicType = nullptr;
+        sample->typeResult = S_FALSE;
+        Check(callback->SampleCB(0, sample) == VFW_E_TYPE_NOT_ACCEPTED,
+              "later untagged sample cannot clear rate-change rejection");
+        sample->Release();
+        callback->Release();
+    }
     // MJPEG's compressed allocation hint may change without a layout change.
     auto jpeg = type; jpeg.subtype = MEDIASUBTYPE_MJPG;
     VideoSampleFormat jpegExpected{};

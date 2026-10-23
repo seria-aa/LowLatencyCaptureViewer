@@ -7,6 +7,7 @@
 #include "recording/RecordingStorage.h"
 #include "recording/RecordingAudioGain.h"
 #include "recording/RecordingAdmission.h"
+#include "recording/RecordingDeliveryPolicy.h"
 #include "video/MjpegDecoder.h"
 #include <mfapi.h>
 #include <mfidl.h>
@@ -43,14 +44,32 @@ void AudioType(IMFMediaType* t, bool encoded,int kbps) {
 }
 }
 Recorder::~Recorder() { Shutdown();if(wake_)CloseHandle(wake_); }
+void Recorder::TrackWorkerActivity(WorkerActivity activity) noexcept {
+    workerActivity_.store((GetTickCount64()<<8)|static_cast<unsigned>(activity),std::memory_order_relaxed);
+}
+void Recorder::ReportQueueFailure(bool video, LONGLONG incomingTime, const wchar_t* reason) noexcept {
+    const auto& queue=video?videoQueue_:audioQueue_;
+    const auto read=queue.read.load(std::memory_order_acquire);
+    const auto write=queue.write.load(std::memory_order_relaxed);
+    const auto activity=workerActivity_.load(std::memory_order_relaxed);
+    constexpr const wchar_t* stages[]={L"starting",L"waiting",L"storage",L"video",L"audio",L"write-video",L"write-audio",L"finalizing"};
+    const auto stage=activity&255u;
+    const auto elapsed=GetTickCount64()-(activity>>8);
+    const auto span=write!=read && !queue.packets.empty()?incomingTime-queue.packets[read%queue.packets.size()].time:0;
+    fwprintf(stderr,L"[recording] queue diagnostic: stream=%s reason=%s used=%zu capacity=%zu arrival=%u span_us=%lld worker=%s stage_ms=%llu\n",
+        video?L"video":L"audio",reason,write-read,queue.packets.size(),arrivalClock_?1u:0u,span/10,
+        stage<std::size(stages)?stages[stage]:L"unknown",elapsed);
+}
 void Recorder::Configure(const video::VideoSampleFormat& v,
                          const capture_audio::Format& a,
                          video_color::Configuration c, bool arrivalClock,const Options& options,
-                         const AM_MEDIA_TYPE* captureType,video_color::Override mjpegColorOverride) {
+                         const AM_MEDIA_TYPE* captureType,video_color::MatrixOverride mjpegColorOverride,
+                         video_color::RangeOverride sdrRangeOverride) {
     std::lock_guard life(lifecycle_);
     if (busy_) return;
     video_=v; audio_=a; color_=c; arrivalClock_=arrivalClock; options_=options;
     mjpegColorOverride_=mjpegColorOverride;
+    sdrRangeOverride_=sdrRangeOverride;
     compressedFormat_.clear();compressedFormatType_=GUID_NULL;
     if(v.format==settings::VideoPixelFormat::Mjpeg && captureType){
         if(captureType->cbFormat && !captureType->pbFormat){video_.valid=false;return;}
@@ -80,6 +99,7 @@ bool Recorder::Start(const std::wstring& path,const Options* options) {
     stop_=false;
     finalizeResult_=S_OK;failure_=Failure::None;phase_=Phase::Starting;
     recordingStartedMs_=0;recordingStoppedMs_=0;
+    TrackWorkerActivity(WorkerActivity::Starting);
     pauseGeneration_=0;
     {
         std::lock_guard status(statusMutex_);snapshot_={};snapshot_.path=path;
@@ -224,12 +244,14 @@ void Recorder::Push(bool video, IMediaSample* sample) noexcept {
         const size_t write=queue.write.load(std::memory_order_relaxed);
         if (write-queue.read.load(std::memory_order_acquire)>=queue.packets.size()) {
             fwprintf(stderr,L"[recording] %s delivery queue full (%zu packets)\n",video?L"video":L"audio",queue.packets.size());
+            ReportQueueFailure(video,start,L"delivery-full");
             Fail(HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW),Operation::Queue); return;
         }
         Packet& p=queue.packets[write%queue.packets.size()];
         auto buffer=(video?videoBuffers_:audioBuffers_).Acquire();
         if(!buffer){
             fwprintf(stderr,L"[recording] %s encoder buffer leases exhausted\n",video?L"video":L"audio");
+            ReportQueueFailure(video,start,L"leases-exhausted");
             Fail(HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW),Operation::Queue);return;
         }
         p.time=start;
@@ -265,6 +287,18 @@ void Recorder::Push(bool video, IMediaSample* sample) noexcept {
         queue.write.store(write+1,std::memory_order_release); SetEvent(wake_);
     } catch (HRESULT hr) { Fail(hr);
     } catch (...) { Fail(E_OUTOFMEMORY); }
+}
+void Recorder::PrepareQueues() {
+    const bool mjpeg=video_.format==settings::VideoPixelFormat::Mjpeg;
+    const bool yuy2=video_.format==settings::VideoPixelFormat::Yuy2;
+    const size_t frameBytes=static_cast<size_t>(video_.width)*video_.height*(yuy2?2:3)/(yuy2?1:2);
+    const auto policy=RecordingDeliveryPolicy(mjpeg);
+    videoQueue_.write=0;videoQueue_.read=0;audioQueue_.write=0;audioQueue_.read=0;
+    videoQueue_.packets.resize(policy.videoPackets);audioQueue_.packets.resize(policy.audioPackets);
+    videoBuffers_.Allocate(policy.videoBuffers,mjpeg
+        ? (video_.bytes?video_.bytes:static_cast<DWORD>(video_.width*video_.height*3))
+        : static_cast<DWORD>(frameBytes));
+    audioBuffers_.Allocate(policy.audioBuffers,kAudioBufferBytes);
 }
 void Recorder::Run(std::wstring path) {
     const HRESULT com=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
@@ -302,16 +336,7 @@ void Recorder::Run(std::wstring path) {
         const bool yuy2=video_.format==settings::VideoPixelFormat::Yuy2;
         const bool mjpeg=video_.format==settings::VideoPixelFormat::Mjpeg;
         const size_t frameBytes=static_cast<size_t>(video_.width)*video_.height*(yuy2?2:3)/(yuy2?1:2);
-        videoQueue_.write=0; videoQueue_.read=0; audioQueue_.write=0; audioQueue_.read=0;
-        videoQueue_.packets.resize(6);audioQueue_.packets.resize(32);
-        // Keep delivery queues short; extra leases cover asynchronous encoder
-        // retention without allowing unbounded memory growth.
-        // Compressed input leases end after decoding; they never reach the
-        // encoder. Size them from the connected allocator when available.
-        videoBuffers_.Allocate(mjpeg?8:16,mjpeg
-            ? (video_.bytes?video_.bytes:static_cast<DWORD>(video_.width*video_.height*3))
-            : static_cast<DWORD>(frameBytes));
-        audioBuffers_.Allocate(64,kAudioBufferBytes);
+        PrepareQueues();
         const auto dimensions=OutputSize(options_,video_.width,video_.height);
         const bool scaling=dimensions.width!=video_.width || dimensions.height!=video_.height;
         auto recordingColor=color_;
@@ -320,7 +345,7 @@ void Recorder::Run(std::wstring path) {
             AM_MEDIA_TYPE type{};type.formattype=compressedFormatType_;
             type.cbFormat=static_cast<ULONG>(compressedFormat_.size());type.pbFormat=compressedFormat_.data();
             Check(mjpegDecoder.initialize(video_.width,video_.height,video_.fps,
-                &type,&video_.color,mjpegColorOverride_,nullptr));
+                &type,&video_.color,mjpegColorOverride_,nullptr,sdrRangeOverride_));
             recordingColor=mjpegDecoder.colorConfiguration();
             // Native recording needs leases that an asynchronous encoder may
             // retain. Downscaling already produces its own encoder-safe lease.
@@ -379,12 +404,16 @@ void Recorder::Run(std::wstring path) {
             Check(RecordingStorageResult(bytes.Get()));
             if(!stop_ && GetTickCount64()>=nextSpaceCheck){
                 operation=Operation::Storage;
+                TrackWorkerActivity(WorkerActivity::Storage);
                 // Queue durability work on the storage thread. Encoding keeps
                 // consuming capture input during a slow disk flush.
                 // Completed fragments survive abrupt process exit; device/OS
                 // caches and the unfinished fragment still limit power-loss safety.
                 Check(archive?archive->RequestFlush():RequestRecordingFlush(bytes.Get()));
-                UpdateStorage(folder);
+                // Free-space metadata can block on filesystem/driver work too.
+                // Reuse the storage worker; never hold up video/audio encoding.
+                Check(RequestRecordingSpace(bytes.Get(),folder.c_str()));
+                UpdateStorage(bytes.Get());
                 bool lowSpace=false;
                 {
                     std::lock_guard status(statusMutex_);
@@ -401,6 +430,7 @@ void Recorder::Run(std::wstring path) {
             const bool hasAudio=ar!=audioQueue_.write.load(std::memory_order_acquire);
             if (!hasVideo && !hasAudio) {
                 if (ReadyToFinalizeRecording(stop_,phase_,producers_,vr,videoQueue_.write,ar,audioQueue_.write)) break;
+                TrackWorkerActivity(WorkerActivity::Waiting);
                 const DWORD wait=WaitForSingleObject(wake_,1000);
                 if(wait==WAIT_FAILED)Check(HRESULT_FROM_WIN32(GetLastError()));
                 continue;
@@ -416,7 +446,12 @@ void Recorder::Run(std::wstring path) {
                 audioQueue_.packets[ar%audioQueue_.packets.size()].time);
             auto& queue=takeVideo?videoQueue_:audioQueue_;
             const size_t read=takeVideo?vr:ar;
-            Packet& p=queue.packets[read%queue.packets.size()];
+            // Transfer the lease, not its pixels. In-flight encoding no longer
+            // occupies a delivery slot; pool references still enforce the same
+            // total memory bound until every asynchronous consumer releases it.
+            Packet p=std::move(queue.packets[read%queue.packets.size()]);
+            queue.read.store(read+1,std::memory_order_release);
+            TrackWorkerActivity(p.video?WorkerActivity::Video:WorkerActivity::Audio);
             auto& last=p.video?lastVideo:lastAudio;
             const auto mapped=pauseTimeline.Map(p.video,p.pauseGeneration,p.time,p.duration);
             if (mapped.keep) {
@@ -483,11 +518,11 @@ void Recorder::Run(std::wstring path) {
                 Check(sample->AddBuffer(buffer.Get())); Check(sample->SetSampleTime(mapped.time));
                 Check(sample->SetSampleDuration(mapped.duration));
                 operation=Operation::Write;
+                TrackWorkerActivity(p.video?WorkerActivity::WriteVideo:WorkerActivity::WriteAudio);
                 Check(timeline->Push(writer.Get(),p.video,sample.Get()));
                 (p.video?videoCount_:audioCount_).fetch_add(1);
             }
             p.buffer.Reset();
-            queue.read.store(read+1,std::memory_order_release);
         }
     } catch (HRESULT hr) { Fail(hr,operation); }
       catch (...) { Fail(E_OUTOFMEMORY,operation); }
@@ -496,6 +531,7 @@ void Recorder::Run(std::wstring path) {
     // Do not let Start/Configure recycle storage until it has left.
     while (producers_.load(std::memory_order_acquire)!=0) Sleep(1);
     if (begun) {
+        TrackWorkerActivity(WorkerActivity::Finalizing);
         const HRESULT pending=timeline->Finish(writer.Get());
         if(FAILED(pending))Fail(pending,Operation::Write);
         const HRESULT hr=writer->Finalize();
@@ -552,10 +588,10 @@ Snapshot Recorder::GetSnapshot() const {
     value.paused=value.busy && value.phase==Phase::Recording && (pauseGeneration_.load()&1)!=0;
     return value;
 }
-void Recorder::UpdateStorage(const std::wstring& folder) {
-    ULARGE_INTEGER free{};
-    const bool freeKnown=!folder.empty() && GetDiskFreeSpaceExW(folder.c_str(),&free,nullptr,nullptr);
+void Recorder::UpdateStorage(IMFByteStream* stream) {
+    const auto space=RecordingStorageSpace(stream);
+    if(!space.completed)return; // Preserve the initial startup check while pending.
     std::lock_guard status(statusMutex_);
-    snapshot_.freeBytesKnown=freeKnown;snapshot_.freeBytes=free.QuadPart;
+    snapshot_.freeBytesKnown=space.known;snapshot_.freeBytes=space.freeBytes;
 }
 } // namespace llcv::recording

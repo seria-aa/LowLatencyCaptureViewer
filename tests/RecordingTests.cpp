@@ -124,7 +124,7 @@ static void TestRecordingColor(bool scale,llcv::settings::VideoPixelFormat forma
         // the override chooses interpretation; it does not recolor JPEG pixels.
         // This reference never passes through the recorder, scaler or encoder.
         video::MjpegDecoder decoder;
-        Check(decoder.initialize(width,height,30,nullptr,nullptr,video_color::Override::Auto,nullptr));
+        Check(decoder.initialize(width,height,30,nullptr,nullptr,video_color::MatrixOverride::Auto,nullptr));
         ComPtr<IMFMediaBuffer> decoded;
         Check(decoder.decode(frame.data(),static_cast<DWORD>(frame.size()),0,333333,&decoded,true));
         Expect(decoded!=nullptr,"colored JPEG produces a reference frame");
@@ -157,10 +157,12 @@ static void TestRecordingColor(bool scale,llcv::settings::VideoPixelFormat forma
             }
         }
     }
-    struct Interpretation { video_color::Override mode;UINT32 matrix,range; };
+    struct Interpretation { video_color::MatrixOverride matrixOverride;video_color::RangeOverride rangeOverride;UINT32 matrix,range; };
     constexpr Interpretation interpretations[]={
-        {video_color::Override::Bt601Full,2,1},{video_color::Override::Bt601Limited,2,2},
-        {video_color::Override::Bt709Full,1,1},{video_color::Override::Bt709Limited,1,2}};
+        {video_color::MatrixOverride::Bt601,video_color::RangeOverride::Full,2,1},
+        {video_color::MatrixOverride::Bt601,video_color::RangeOverride::Limited,2,2},
+        {video_color::MatrixOverride::Bt709,video_color::RangeOverride::Full,1,1},
+        {video_color::MatrixOverride::Bt709,video_color::RangeOverride::Limited,1,2}};
     for(const auto& interpretation:interpretations){
         video::VideoSampleFormat v{};v.valid=true;v.width=width;v.height=height;v.fps=30;
         v.format=format;v.bytes=static_cast<DWORD>(frame.size());v.stride=inputStride;
@@ -168,9 +170,13 @@ static void TestRecordingColor(bool scale,llcv::settings::VideoPixelFormat forma
         a.path=capture_audio::Path::Direct16BitStereo;
         recording::Options options;options.encoder=L"cpu";options.rateControl=recording::RateControl::Bitrate;
         options.maxHeight=scale?720:0;options.maxFps=0;
-        video_color::Configuration generic;
-        generic.matrix=interpretation.matrix==1?video_color::Matrix::Bt709:video_color::Matrix::Bt601;
-        generic.range=interpretation.range==1?video_color::Range::Full:video_color::Range::Limited;
+        // Match the viewer's resolver, with deliberately conflicting device
+        // range metadata to verify the selected SDR range wins for raw input.
+        const auto viewerColor=video_color::Resolve(mjpeg,width,height,{},
+            {interpretation.matrix,interpretation.range==1?2u:1u},
+            mjpeg?interpretation.matrixOverride:video_color::MatrixOverride::Auto,
+            interpretation.rangeOverride);
+        auto generic=viewerColor;
         // Opposite values expose accidentally reusing the generic capture color
         // instead of the MJPEG decoder's explicit override.
         if(mjpeg){
@@ -178,7 +184,8 @@ static void TestRecordingColor(bool scale,llcv::settings::VideoPixelFormat forma
             generic.range=interpretation.range==1?video_color::Range::Limited:video_color::Range::Full;
         }
         recording::Recorder recorder;
-        recorder.Configure(v,a,generic,false,options,nullptr,interpretation.mode);
+        recorder.Configure(v,a,generic,false,options,nullptr,
+            interpretation.matrixOverride,interpretation.rangeOverride);
         const auto path=std::filesystem::temp_directory_path()/(L"LLCV-recording-color-"+
             std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64())+L"-"+
             std::to_wstring(interpretation.matrix)+std::to_wstring(interpretation.range)+L".mp4");
@@ -541,13 +548,23 @@ int wmain(int argc, wchar_t** argv) {
             Check(allocator->Decommit());goto finished;
         }
         auto start=std::chrono::steady_clock::now();double maxPushUs=0,totalPushUs=0,maxAudioPushUs=0,totalAudioPushUs=0;unsigned pushes=0;
+        double maxScheduleLatenessMs=0,maxVideoGapMs=0,minVideoGapMs=-1;
+        unsigned catchUpTicks=0,catchUpRun=0,maxCatchUpRun=0;
+        auto previousVideoPush=start;bool havePreviousVideoPush=false;
         std::vector<double> flashWall;
         double audioWall=0;
         int audioFrame=0;unsigned audioPacket=0;
         constexpr int audioPacketFrames[]={4800,4801,12000,5904,9600,7201};
         auto wall=[] { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
         for(int tick=0;tick<600 && recorder.Recording();++tick){
-            std::this_thread::sleep_until(start+std::chrono::milliseconds(tick*10));
+            const auto deadline=start+std::chrono::milliseconds(tick*10);
+            std::this_thread::sleep_until(deadline);
+            // Observe scheduler stalls without changing the original fixture
+            // clock or its deliberately bursty timestamped video delivery.
+            const double latenessMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-deadline).count();
+            maxScheduleLatenessMs=(std::max)(maxScheduleLatenessMs,latenessMs);
+            if(latenessMs>=10){++catchUpTicks;++catchUpRun;maxCatchUpRun=(std::max)(maxCatchUpRun,catchUpRun);}
+            else catchUpRun=0;
             if(pause&&(tick==(unaligned?185:180)||tick==(unaligned?255:250))){
                 const bool pausing=tick<200;
                 Expect(recorder.SetPaused(pausing),"pause/resume accepted");
@@ -575,6 +592,12 @@ int wmain(int argc, wchar_t** argv) {
                     const auto t=std::chrono::steady_clock::now();
                     recorder.Push(true,s.Get());
                     const double us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-t).count();
+                    if(havePreviousVideoPush){
+                        const double gapMs=std::chrono::duration<double,std::milli>(t-previousVideoPush).count();
+                        maxVideoGapMs=(std::max)(maxVideoGapMs,gapMs);
+                        minVideoGapMs=minVideoGapMs<0?gapMs:(std::min)(minVideoGapMs,gapMs);
+                    }
+                    previousVideoPush=t;havePreviousVideoPush=true;
                     if(mjpeg){
                         const auto& jpeg=pulse?brightJpeg:darkJpeg;
                         Expect(std::memcmp(d,jpeg.data(),jpeg.size())==0,"recording leaves compressed playback samples untouched");
@@ -612,7 +635,14 @@ int wmain(int argc, wchar_t** argv) {
         recorder.Stop();recorder.Shutdown();
         printf("record result=0x%08lX, video enqueue mean=%.2fus max=%.2fus\n",static_cast<unsigned long>(recorder.Result()),totalPushUs/(std::max)(1u,pushes),maxPushUs);
         printf("audio enqueue packets=%u mean=%.2fus max=%.2fus\n",audioPacket,totalAudioPushUs/(std::max)(1u,audioPacket),maxAudioPushUs);
+        printf("input scheduler max lateness=%.3fms catch-up ticks=%u longest run=%u video gap min/max=%.3f/%.3fms\n",
+            maxScheduleLatenessMs,catchUpTicks,maxCatchUpRun,minVideoGapMs,maxVideoGapMs);
         Expect(SUCCEEDED(recorder.Result()),"record/finalize");
+        // Derive the expected count from the complete six-second fixture, not
+        // the number accepted by the recorder (which would hide an early stop).
+        // The pause fixtures omit seven 100 ms bursts: 21 of 180 input frames.
+        const unsigned expectedVideoFrames=pause?159u:6u*static_cast<unsigned>(llcv::recording::OutputFps(testOptions,v.fps));
+        Expect(pushes==6u*static_cast<unsigned>(v.fps),"fixture delivers every scheduled input video frame");
         if(split){
             unsigned frames=0,parts=0,events=0;
             for(unsigned part=1;;++part){
@@ -628,16 +658,17 @@ int wmain(int argc, wchar_t** argv) {
                 for(size_t i=0;i<std::min(vp.size(),ap.size());++i)Expect(std::abs(vp[i]-ap[i])<0.04,"split decoded A/V skew below 40 ms");
                 printf("split: %ls\n",segment.c_str());
             }
-            Expect(parts>=2&&frames==159&&events==3,"split and pause preserve every intended frame/event");
+            printf("stored video frames=%u expected=%u across %u parts\n",frames,expectedVideoFrames,parts);
+            Expect(parts>=2&&frames==expectedVideoFrames&&events==3,"split and pause preserve every intended frame/event");
             goto finished;
         }
         if(SUCCEEDED(recorder.Result())){
             if(largeAudio)VerifyContinuousAudio(path.c_str(),pause?5.3:6.0);
-            if(pause||scale||mjpeg||largeAudio){
+            {
                 ComPtr<IMFSourceReader> reader;Check(MFCreateSourceReaderFromURL(path.c_str(),nullptr,&reader));
                 ComPtr<IMFMediaType> media;Check(reader->GetNativeMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),0,&media));
                 UINT32 width=0,height=0;Check(MFGetAttributeSize(media.Get(),MF_MT_FRAME_SIZE,&width,&height));
-                if(mjpeg){
+                {
                     printf("saved native dimensions=%ux%u\n",width,height);
                     for(const auto key:{MF_MT_MINIMUM_DISPLAY_APERTURE,MF_MT_GEOMETRIC_APERTURE}){
                         MFVideoArea aperture{};UINT32 bytes=0;
@@ -658,7 +689,9 @@ int wmain(int argc, wchar_t** argv) {
                 unsigned frames=0;
                 for(;;){ComPtr<IMFSample> sample;DWORD flags=0;Check(reader->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),0,nullptr,&flags,nullptr,&sample));
                     if(sample)++frames;if(flags&MF_SOURCE_READERF_ENDOFSTREAM)break;}
-                Expect(frames==(pause?159u:arrival?300u:mjpegHd?360u:180u),"no video loss outside intentional paused interval");
+                printf("stored video frames=%u expected=%u input=%u fps=%d output fps=%d\n",
+                    frames,expectedVideoFrames,pushes,v.fps,llcv::recording::OutputFps(testOptions,v.fps));
+                Expect(frames==expectedVideoFrames,"every intended video frame is stored outside intentional pause/frame-rate cap");
             }
             if(limited){
                 ComPtr<IMFSourceReader> reader;Check(MFCreateSourceReaderFromURL(path.c_str(),nullptr,&reader));

@@ -22,12 +22,16 @@ enum class Source : std::uint8_t {
     UserOverride,
 };
 
-enum class Override : std::uint8_t {
+enum class MatrixOverride : std::uint8_t {
     Auto,
-    Bt709Full,
-    Bt709Limited,
-    Bt601Full,
-    Bt601Limited,
+    Bt709,
+    Bt601,
+};
+
+enum class RangeOverride : std::uint8_t {
+    Auto,
+    Limited,
+    Full,
 };
 
 struct Metadata {
@@ -50,7 +54,8 @@ struct Configuration {
 Configuration Resolve(bool mjpeg, int width, int height,
                       Metadata mediaFoundation,
                       Metadata directShow,
-                      Override overrideMode = Override::Auto);
+                      MatrixOverride matrixOverride = MatrixOverride::Auto,
+                      RangeOverride rangeOverride = RangeOverride::Auto);
 
 const wchar_t* MatrixName(Matrix matrix);
 const wchar_t* RangeName(Range range);

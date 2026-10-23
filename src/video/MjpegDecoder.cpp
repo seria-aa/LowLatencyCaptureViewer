@@ -27,7 +27,8 @@ MjpegDecoder::~MjpegDecoder() {
 HRESULT MjpegDecoder::initialize(
     int width, int height, int fps, const AM_MEDIA_TYPE* captureType,
     const CaptureColorMetadata* directShowColor,
-    video_color::Override colorOverride, LogCallback logCallback) {
+    video_color::MatrixOverride colorOverride, LogCallback logCallback,
+    video_color::RangeOverride rangeOverride) {
     reset();
     if (width <= 0 || height <= 0 || fps <= 0 || (width & 1) || (height & 1))
         return E_INVALIDARG;
@@ -38,6 +39,7 @@ HRESULT MjpegDecoder::initialize(
     width_ = width;
     height_ = height;
     colorOverride_ = colorOverride;
+    rangeOverride_ = rangeOverride;
     logCallback_ = logCallback;
     if (directShowColor && directShowColor->present) {
         directShowColor_ = *directShowColor;
@@ -249,7 +251,8 @@ void MjpegDecoder::reset() {
     width_ = 0;
     height_ = 0;
     directShowColor_ = {};
-    colorOverride_ = video_color::Override::Auto;
+    colorOverride_ = video_color::MatrixOverride::Auto;
+    rangeOverride_ = video_color::RangeOverride::Auto;
     colorConfiguration_ = {};
     logCallback_ = nullptr;
     if (mfStarted_) {
@@ -293,7 +296,7 @@ void MjpegDecoder::UpdateColorConfiguration() {
     const video_color::Metadata directShow{
         directShowColor_.transferMatrix, directShowColor_.nominalRange};
     colorConfiguration_ = video_color::Resolve(
-        true, width_, height_, mf, directShow, colorOverride_);
+        true, width_, height_, mf, directShow, colorOverride_, rangeOverride_);
     wchar_t message[512]{};
     swprintf_s(
         message,

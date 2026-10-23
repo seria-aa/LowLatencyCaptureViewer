@@ -1,4 +1,17 @@
-LLCV v2.1.4 x64 (continued from the v0.14.2 rework)
+LLCV v2.1.5 x64 (continued from the v0.14.2 rework)
+
+v2.1.5 Capture settings and recording reliability
+-------------------------------------------------
+- Validates explicit FPS requests without silent rate substitution; Auto selection is retained.
+- Preserves unavailable selections and warns about sustained excess actual capture FPS.
+- Adds Auto/Limited/Full SDR range shared by playback, screenshots and recording; HDR is unaffected.
+- Groups optional FPS requests under More and adds capture-matched display sizing.
+- New profiles and equal legacy capture/display sizes follow capture; differing sizes stay fixed and explicit modes win.
+- Moves periodic free-space queries to the existing storage worker and reuses the existing video-buffer budget.
+- Verifies total stored frames, storage delays, low-space finalization and independent full-file decoding.
+- Retains settings, shortcuts, installation paths and 1080p/60fps recording defaults.
+- No physical HDMI latency or universal device-compatibility guarantee is claimed.
+- See tests/RELEASE_V2_1_5_AUDIT.md for preparation status and verification limits.
 
 v2.1.4 Settings access and recording reliability
 -----------------------------------------------
