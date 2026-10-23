@@ -8,8 +8,9 @@ namespace {
 using llcv::video_color::Configuration;
 using llcv::video_color::Matrix;
 using llcv::video_color::Metadata;
-using llcv::video_color::Override;
+using llcv::video_color::MatrixOverride;
 using llcv::video_color::Range;
+using llcv::video_color::RangeOverride;
 using llcv::video_color::Source;
 
 void Expect(bool value, const char* message) {
@@ -88,7 +89,7 @@ int main() {
 
     const Configuration manual = llcv::video_color::Resolve(
         true, 1920, 1080, Metadata{1, 1}, Metadata{1, 1},
-        Override::Bt601Limited);
+        MatrixOverride::Bt601, RangeOverride::Limited);
     Expect(manual.matrix == Matrix::Bt601 &&
                manual.range == Range::Limited,
            "manual MJPEG setting overrides detected metadata");
@@ -97,10 +98,61 @@ int main() {
            "manual MJPEG setting is reported as the source");
 
     const Configuration rawIgnoresManual = llcv::video_color::Resolve(
-        false, 1920, 1080, {}, {}, Override::Bt601Full);
+        false, 1920, 1080, {}, {}, MatrixOverride::Bt601);
     Expect(rawIgnoresManual.matrix == Matrix::Bt709 &&
                rawIgnoresManual.range == Range::Limited,
-           "MJPEG override cannot alter uncompressed formats");
+           "MJPEG matrix override cannot alter uncompressed formats");
+
+    // Snapshot the pre-split Auto rules independently of Resolve. Every
+    // metadata precedence/fallback combination must retain the same result,
+    // including reported source labels, after adding manual range selection.
+    unsigned parityCases = 0;
+    for (bool mjpeg : {false, true}) for (int width : {720, 1280})
+        for (unsigned mfMatrix : {0u, 1u, 2u, 255u})
+        for (unsigned mfRange : {0u, 1u, 2u, 255u})
+        for (unsigned dsMatrix : {0u, 1u, 2u, 255u})
+        for (unsigned dsRange : {0u, 1u, 2u, 255u}) {
+            const Metadata mf{mfMatrix, mfRange}, ds{dsMatrix, dsRange};
+            Configuration expected;
+            const auto valid = [](unsigned value) { return value == 1 || value == 2; };
+            if (valid(mfMatrix) || valid(dsMatrix)) {
+                expected.matrix = (valid(mfMatrix) ? mfMatrix : dsMatrix) == 1
+                                      ? Matrix::Bt709 : Matrix::Bt601;
+                expected.matrixSource = valid(mfMatrix) ? Source::MediaFoundation : Source::DirectShow;
+            } else if (mjpeg) {
+                expected.matrix = width >= 1280 ? Matrix::Bt709 : Matrix::Bt601;
+                expected.matrixSource = Source::MjpegFallback;
+            }
+            if (valid(mfRange) || valid(dsRange)) {
+                expected.range = (valid(mfRange) ? mfRange : dsRange) == 1
+                                     ? Range::Full : Range::Limited;
+                expected.rangeSource = valid(mfRange) ? Source::MediaFoundation : Source::DirectShow;
+            } else if (mjpeg) {
+                expected.range = Range::Full;
+                expected.rangeSource = Source::MjpegFallback;
+            }
+            const auto automatic = llcv::video_color::Resolve(mjpeg, width, 480, mf, ds);
+            Expect(automatic == expected, "Auto exactly preserves pre-split precedence, fallbacks and sources");
+            for (auto matrix : {MatrixOverride::Auto, MatrixOverride::Bt709, MatrixOverride::Bt601})
+                for (auto range : {RangeOverride::Auto, RangeOverride::Limited, RangeOverride::Full}) {
+                    auto manualExpected = expected;
+                    if (mjpeg && matrix != MatrixOverride::Auto) {
+                        manualExpected.matrix = matrix == MatrixOverride::Bt601 ? Matrix::Bt601 : Matrix::Bt709;
+                        manualExpected.matrixSource = Source::UserOverride;
+                    }
+                    if (range != RangeOverride::Auto) {
+                        manualExpected.range = range == RangeOverride::Full ? Range::Full : Range::Limited;
+                        manualExpected.rangeSource = Source::UserOverride;
+                    }
+                    Expect(llcv::video_color::Resolve(mjpeg, width, 480, mf, ds, matrix, range) == manualExpected,
+                           "matrix and range controls are independent for raw SDR and MJPEG");
+                }
+            Expect(llcv::video_color::Resolve(mjpeg, width, 480, mf, ds,
+                       static_cast<MatrixOverride>(255), static_cast<RangeOverride>(255)) == automatic,
+                   "invalid override values fall back to Auto without false manual source labels");
+            ++parityCases;
+        }
+    Expect(parityCases == 1024, "all Auto metadata parity combinations covered");
 
     std::cout << "VideoColorTests passed\n";
     return 0;

@@ -40,12 +40,15 @@ bool FindMatchingDirectShowColorMetadata(
 
 // Optional color hints are cleared on entry and taken only from the accepted
 // candidate. Active/connected metadata must override these startup-only hints.
+// Explicit frame selections require strict verification. Requesting a timing
+// absent from the advertised modes/ranges is a separate, explicit opt-in.
 HRESULT ConfigureVideoPin(
     IPin* videoPin, int wantedWidth, int wantedHeight, int wantedFps,
     VideoPixelFormat wantedFormat, DWORD& imageBytes, UINT32& stride,
     int& configuredFps, VideoPixelFormat& configuredFormat,
     LogCallback logCallback, bool requestExactFps = false,
-    CaptureColorMetadata* acceptedCandidateColor = nullptr);
+    CaptureColorMetadata* acceptedCandidateColor = nullptr,
+    bool allowUnlistedFps = false);
 // Strict timing check used at negotiation and after graph connection.
 bool IsRequestedFrameRate(const AM_MEDIA_TYPE* mediaType, int fps);
 inline constexpr HRESULT kRequestedFrameRateMismatch =

@@ -307,6 +307,7 @@ static void TestF5SplitResolutionBaseline() {
         g_settings.vsrEnabled = vsr;
         g_settings.capturePreset = capture;
         g_settings.videoPreset = display;
+        g_settings.displayMatchesCapture = false; // This fixture explicitly exercises independent sizes.
         LatchVideoResolutionPlan();
         const auto source = CurrentCapturePreset();
         g_settings.relativeWindowScalePpm = RelativeScaleForMonitor(MonitorHandle(0));
@@ -362,11 +363,138 @@ static void TestF5SplitResolutionBaseline() {
     std::printf("PASS %u F5 capture/display/DPI cases with four monitor crossings each.\n", cases);
 }
 
+static void TestCaptureMatchedDisplayGeometry() {
+    const auto savedSettings = g_settings;
+    const bool savedSuppress = g_suppressSettingsSave;
+    const bool savedLatched = g_resolutionPlanLatched;
+    const bool savedSplit = g_splitResolutionPlan;
+    const auto savedCapture = g_capturePreset;
+    const bool savedSourceSize = g_fullscreenSourceSize.load();
+    const VirtualMonitor savedMonitors[]{fixtureMonitors[0], fixtureMonitors[1]};
+    g_suppressSettingsSave = true;
+    unsigned cases = 0;
+    for (const bool borderless : {false, true})
+    for (const bool vsr : {false, true})
+    for (const UINT dpi : {96u, 144u, 192u})
+    for (const auto capture : {VideoPreset::R1280x720, VideoPreset::R1920x1080,
+                               VideoPreset::R2560x1440, VideoPreset::R3840x2160}) {
+        fixtureMonitors[0] = {{0, 0, 5120, 2880}, 96};
+        fixtureMonitors[1] = {{5120, 0, 10240, 2880}, dpi};
+        Reset(false, true);
+        simulatedStyle = borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW;
+        g_settings.borderlessWindow = borderless;
+        g_settings.vsrEnabled = vsr;
+        g_settings.capturePreset = capture;
+        g_settings.videoPreset = VideoPreset::R3840x2160; // Dormant fixed selection.
+        g_settings.displayMatchesCapture = true;
+        LatchVideoResolutionPlan();
+        const auto source = CurrentCapturePreset();
+        Require(CurrentVideoPreset().preset == capture && !g_splitResolutionPlan && SourcePixelPerfect(),
+                "capture-matched display is native-size with VSR either enabled or disabled");
+        for (const int monitor : {0, 1}) {
+            const auto initial = InitialClientPixelsForMonitor(MonitorHandle(monitor));
+            const auto desired = DesiredClientPixelsForMonitor(MonitorHandle(monitor));
+            Require(initial.cx == source.width && initial.cy == source.height &&
+                    desired.cx == source.width && desired.cy == source.height,
+                    "capture-matched startup and ordinary/borderless sizing use source pixels at mixed DPI");
+        }
+        WndProc(testWindow, WM_RESTORE_ONE_TO_ONE, 0, 0);
+        const auto outer = OuterSizeForClientPixels(source.width, source.height,
+            static_cast<DWORD>(simulatedStyle), 0, 96);
+        Require(!g_fullscreen && simulatedWindowRect.right - simulatedWindowRect.left == outer.cx &&
+                simulatedWindowRect.bottom - simulatedWindowRect.top == outer.cy,
+                "F5 retains capture-native client size for both window frames");
+        for (const auto mode : {PresentationMode::AllowTearing, PresentationMode::ExclusiveFullscreen}) {
+            g_settings.presentationMode = mode;
+            ToggleFullscreen(testWindow);
+            Require(g_fullscreen && !g_fullscreenSourceSize &&
+                    simulatedWindowRect.right - simulatedWindowRect.left == 5120 &&
+                    simulatedWindowRect.bottom - simulatedWindowRect.top == 2880,
+                    "normal and exclusive fullscreen intent use the same monitor canvas");
+            const auto display = CurrentVideoPreset();
+            // Exercise the common production placement policy; this harness
+            // deliberately does not enter real DXGI exclusive mode or present.
+            const RECT video = llcv::video_placement::Destination(source.width, source.height,
+                5120, 2880, true, display.width, display.height,
+                llcv::settings::FullscreenVideoPosition::Center);
+            Require(video.right - video.left == source.width && video.bottom - video.top == source.height &&
+                    video.left == (5120 - source.width) / 2 && video.top == (2880 - source.height) / 2,
+                    "capture-matched fullscreen video stays native-sized with symmetric margins");
+            ToggleFullscreen(testWindow);
+        }
+        g_settings.relativeWindowSize = true;
+        const int scale = static_cast<int>(static_cast<int64_t>(source.width) * kRelativeScaleUnit / 5120);
+        g_settings.relativeWindowScalePpm = RelativeScaleForMonitor(MonitorHandle(0));
+        Require(g_settings.relativeWindowScalePpm == scale,
+                "relative monitor baseline uses matched capture, not dormant fixed resolution");
+        for (const int monitor : {0, 1}) {
+            const auto desired = DesiredClientPixelsForMonitor(MonitorHandle(monitor));
+            Require(desired.cx == source.width && desired.cy == source.height,
+                    "capture-matched relative sizing is DPI-independent on equal-pixel monitors");
+        }
+        if (borderless) {
+            ApplyRect({100, 100, 100 + source.width, 100 + source.height});
+            for (const int target : {1, 0}) {
+                Enter(); MoveTo(target); Leave();
+                Require(simulatedWindowRect.right - simulatedWindowRect.left == source.width &&
+                        simulatedWindowRect.bottom - simulatedWindowRect.top == source.height &&
+                        g_settings.relativeWindowScalePpm == scale,
+                        "capture-matched size survives mixed-DPI monitor round trips");
+            }
+        }
+        Require(g_settings.displayMatchesCapture && g_settings.videoPreset == VideoPreset::R3840x2160,
+                "F5, fullscreen and monitor movement preserve automatic mode and dormant fixed display");
+        ++cases;
+    }
+    // Settings are accepted before the next capture plan is latched. Display
+    // sizing/rebasing must use the newly selected capture, not the old session.
+    Reset(true, true);
+    g_settings.videoPreset = VideoPreset::R3840x2160;
+    g_settings.capturePreset = VideoPreset::R1280x720;
+    g_settings.displayMatchesCapture = true;
+    LatchVideoResolutionPlan();
+    g_settings.capturePreset = VideoPreset::R2560x1440;
+    Require(CurrentCapturePreset().preset == VideoPreset::R1280x720 &&
+            CurrentVideoPreset().preset == VideoPreset::R2560x1440 &&
+            RelativeScaleForMonitor(MonitorHandle(0)) == kRelativeScaleUnit / 2,
+            "new capture-matched settings rebase from the new size despite the previous capture latch");
+    LatchVideoResolutionPlan();
+    Require(SourcePixelPerfect() && !g_splitResolutionPlan,
+            "new capture plan catches up without turning matched display into a split plan");
+    g_settings.displayMatchesCapture = false;
+    Require(CurrentVideoPreset().preset == VideoPreset::R3840x2160,
+            "leaving capture matching restores the dormant fixed display");
+
+    fixtureMonitors[0] = {{0, 0, 1920, 1080}, 96};
+    Reset(true, true);
+    g_settings.displayMatchesCapture = true;
+    g_settings.videoPreset = VideoPreset::R3840x2160;
+    LatchVideoResolutionPlan();
+    WndProc(testWindow, WM_RESTORE_ONE_TO_ONE, 0, 0);
+    Require(g_fullscreen && g_fullscreenSourceSize && g_settings.relativeWindowScalePpm == kRelativeScaleUnit &&
+            g_settings.displayMatchesCapture && g_settings.videoPreset == VideoPreset::R3840x2160,
+            "F5 matching-monitor fullscreen keeps automatic display and the saved fixed choice intact");
+    ToggleFullscreen(testWindow);
+    Require(!g_fullscreenSourceSize && CurrentVideoPreset().preset == VideoPreset::R1920x1080,
+            "fullscreen exit clears only the temporary F5 override, not capture matching");
+
+    fixtureMonitors[0] = savedMonitors[0]; fixtureMonitors[1] = savedMonitors[1];
+    Reset();
+    g_settings = savedSettings;
+    g_resolutionPlanLatched = savedLatched;
+    g_splitResolutionPlan = savedSplit;
+    g_capturePreset = savedCapture;
+    g_fullscreenSourceSize = savedSourceSize;
+    g_suppressSettingsSave = savedSuppress;
+    std::printf("PASS %u capture-matched display/frame/DPI/VSR cases plus F5 and settings rebase.\n", cases);
+}
+
 int main(int argc, char** argv) {
     fixtureMonitors[0]={{0,0,1920,1080},96};
     fixtureMonitors[1]={{1920,0,4480,1440},144};
     TestSymmetricEdgeSnap();
     TestF5SplitResolutionBaseline();
+    TestCaptureMatchedDisplayGeometry();
     // Placement regressions run in the regular suite, not just review mode.
     unsigned placementCases=0;
     for(int layout=0;layout<4;++layout)

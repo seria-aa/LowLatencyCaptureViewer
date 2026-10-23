@@ -75,19 +75,45 @@ frame queue, but the device encoder and decoder path can still add more latency
 and load than NV12 or YUY2.
 Decode buffers are reused to reduce repeated allocation. This does not change
 the latest-frame policy or guarantee lower end-to-end latency on every device.
-Playback and recording use color metadata from the final connection, retaining
-earlier hints when later types omit them.
-The viewer prefers the decoder-reported color range and BT.601/709 matrix, then
-DirectShow metadata, and falls back to JPEG full range when neither is present.
-The Tab overlay and diagnostic log report the applied result and its source.
-Start with **Auto (recommended)**. If colors still differ from another
-application, an explicit MJPEG selection exposes **MJPEG color interpretation**
-with manual BT.709/BT.601 and Full/Limited combinations. This override applies
-only to MJPEG and neither appears for nor affects NV12/YUY2.
+Playback, screenshots and recording use the same color interpretation from the
+final connection, retaining earlier hints when later types omit them.
+
+**SDR color range** offers **Auto / Limited / Full**. Auto is the recommended
+default and preserves the existing policy: NV12/YUY2 use device metadata and
+fall back to Limited; MJPEG prefers decoder metadata, then DirectShow metadata,
+and falls back to Full. Use a manual range only to match the actual captured
+samples when blacks are crushed or the picture looks washed out. This does not
+change the HDMI output range or recover already-clipped detail, and **does not
+apply to P010/HDR**. The Tab overlay and diagnostic log show the applied result
+and its source.
+
+An explicit MJPEG selection also exposes **MJPEG matrix: Auto / BT.709 / BT.601**;
+range selection is handled only by the common control above. Auto prefers
+decoder/device metadata, then BT.709 for HD or BT.601 for SD. Existing manual
+MJPEG corrections are preserved until a new common range is explicitly selected.
 
 <br>
 
 ## Frame rate
+
+An explicit rate such as 30 or 60 fps is never silently replaced with another rate.
+Auto pixel format chooses among formats supporting that rate. A different rate
+reported by the driver stops startup with a notice. **Auto** frame rate retains
+the existing format preference and supported-mode fallback. A selection missing
+after a query, resolution or format change remains marked **unavailable**; choose
+another rate or format before starting.
+
+This requests a capture rate, not a limit on LS-generated frames. Compare input
+and Present under **Tab → Actual FPS**. Sustained input above the requested rate
+raises a diagnostic/log warning, even if driver metadata reports the expected
+rate. The warning adds no waits or software frame cap.
+
+Use **Frame rate → More** in Video settings for unlisted FPS requests and 40 fps
+capture. Escape or Close dismisses only these options, preserving the pending
+choices; Cancel in the main settings window still discards changes.
+SDR color range sits below pixel format. MJPEG matrix and HDR options appear
+only for their corresponding formats. Small work areas retain the existing
+whole-option pages.
 
 Choose the rate the source actually outputs. A 120 fps source contains no new
 visual information when captured at 144 fps; a device may repeat or re-time
@@ -123,7 +149,7 @@ Support varies by device and mode. [Startup troubleshooting](TROUBLESHOOTING.md#
 
 ### 40 fps capture
 
-**40 fps capture** is off by default. Enable it at the bottom-left of Video settings
+**40 fps capture** is off by default. Enable it under **More** beside Frame rate in Video settings
 to request 40 fps from the capture driver instead of the normal frame-rate selection. Disabling it
 restores that selection. Mode detection does not insert synthetic 40 fps entries.
 An unlisted rate may work, but support depends on the device, resolution and pixel
@@ -307,6 +333,9 @@ guarantee for every card. Avoid concurrent capture-device use by multiple apps.
 ## Pixel-perfect and resizing
 
 **Capture resolution** and **Display resolution** are independent of VSR.
+Choose **Same as capture** for the display size to follow changes to the capture resolution.
+This is the default for new profiles. On upgrade, equal saved capture/display sizes follow capture;
+different sizes remain fixed. An explicitly saved fixed/matched mode always takes precedence.
 **Pixel-perfect / Lock display size** locks the selected display size. This is source 1:1 only
 when both resolutions match. Disable it for aspect-preserving manual resizing.
 F6 toggles only the effect; F5 restores input size.

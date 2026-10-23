@@ -32,7 +32,8 @@ bool DecodeRange(unsigned value, Range& range) {
 Configuration Resolve(bool mjpeg, int width, int height,
                       Metadata mediaFoundation,
                       Metadata directShow,
-                      Override overrideMode) {
+                      MatrixOverride matrixOverride,
+                      RangeOverride rangeOverride) {
     Configuration result;
 
     if (DecodeMatrix(mediaFoundation.matrix, result.matrix)) {
@@ -60,28 +61,18 @@ Configuration Resolve(bool mjpeg, int width, int height,
         result.rangeSource = Source::MjpegFallback;
     }
 
-    if (mjpeg && overrideMode != Override::Auto) {
-        switch (overrideMode) {
-        case Override::Bt709Full:
-            result.matrix = Matrix::Bt709;
-            result.range = Range::Full;
-            break;
-        case Override::Bt709Limited:
-            result.matrix = Matrix::Bt709;
-            result.range = Range::Limited;
-            break;
-        case Override::Bt601Full:
-            result.matrix = Matrix::Bt601;
-            result.range = Range::Full;
-            break;
-        case Override::Bt601Limited:
-            result.matrix = Matrix::Bt601;
-            result.range = Range::Limited;
-            break;
-        default:
-            break;
-        }
+    // Matrix selection is an MJPEG-only compatibility option. Range selection
+    // is shared by SDR paths; it changes interpretation, never sample bytes.
+    if (mjpeg && (matrixOverride == MatrixOverride::Bt709 ||
+                  matrixOverride == MatrixOverride::Bt601)) {
+        result.matrix = matrixOverride == MatrixOverride::Bt601
+                            ? Matrix::Bt601 : Matrix::Bt709;
         result.matrixSource = Source::UserOverride;
+    }
+    if (rangeOverride == RangeOverride::Limited ||
+        rangeOverride == RangeOverride::Full) {
+        result.range = rangeOverride == RangeOverride::Full
+                           ? Range::Full : Range::Limited;
         result.rangeSource = Source::UserOverride;
     }
 

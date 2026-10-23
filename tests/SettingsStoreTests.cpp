@@ -78,12 +78,19 @@ void TestDefaults(const std::wstring& path) {
     Check(loaded.settings.videoPreset ==
               llcv::settings::VideoPreset::R1920x1080,
           "default resolution");
+    Check(loaded.settings.displayMatchesCapture &&
+              llcv::settings::EffectiveDisplayPreset(loaded.settings) == loaded.settings.capturePreset,
+          "fresh profiles follow capture resolution by default");
     Check(loaded.settings.checkForUpdates,
           "automatic update check defaults on");
     Check(loaded.settings.preventSleep, "sleep prevention defaults on for old/new profiles");
     Check(loaded.settings.roundedCorners, "rounded corners default on for old/new profiles");
     Check(loaded.settings.hdrChromaLocation == llcv::hdr::ChromaLocation::Auto,
           "old and fresh profiles keep automatic HDR chroma");
+    Check(loaded.settings.sdrRangeOverride == llcv::video_color::RangeOverride::Auto &&
+          loaded.settings.legacyMjpegRangeOverride == llcv::video_color::RangeOverride::Auto &&
+          loaded.settings.mjpegMatrixOverride == llcv::video_color::MatrixOverride::Auto,
+          "old and fresh profiles keep automatic SDR color interpretation");
     WritePrivateProfileStringW(L"General", L"CheckForUpdates", L"0", path.c_str());
     Check(llcv::settings::LoadFromIni(path).settings.preventSleep,
           "legacy profile without the new key defaults to sleep prevention");
@@ -246,7 +253,7 @@ void TestResolutionRoundTrips(const std::wstring& path) {
         {VideoPreset::R3840x2160, L"3840x2160"},
     };
     for (const auto& item : cases) {
-        for (int fps : {0, 60, 120}) {
+        for (int fps : {0, 30, 40, 60, 120}) {
             AppSettings saved{};
             saved.videoPreset = item.preset;
             saved.capturePreset = item.preset;
@@ -277,11 +284,16 @@ void TestResolutionRoundTrips(const std::wstring& path) {
             WritePrivateProfileStringW(L"Video", L"Resolution", display.text, path.c_str());
             WritePrivateProfileStringW(L"Video", L"VsrCaptureResolution", capture.text, path.c_str());
             WritePrivateProfileStringW(L"Video", L"CaptureResolution", nullptr, path.c_str());
+            WritePrivateProfileStringW(L"Video", L"DisplayMatchesCapture", nullptr, path.c_str());
             WritePrivateProfileStringW(L"Video", L"VsrEnabled", enabled ? L"1" : L"0", path.c_str());
             auto migrated = LoadFromIni(path).settings;
             Check(migrated.videoPreset == display.preset &&
                   migrated.capturePreset == (enabled ? capture.preset : display.preset),
                   "migration preserves active legacy capture/display with VSR on or off");
+            Check(migrated.displayMatchesCapture ==
+                      (migrated.capturePreset == migrated.videoPreset) &&
+                      EffectiveDisplayPreset(migrated) == display.preset,
+                  "legacy equal sizes follow capture without changing initial display size");
             migrated.capturePreset = capture.preset;
             if (!CheckSaved(path, migrated, "save independent capture/display fixture")) return;
             const auto loaded = LoadFromIni(path).settings;
@@ -293,6 +305,146 @@ void TestResolutionRoundTrips(const std::wstring& path) {
             Check(toggled.capturePreset == capture.preset && toggled.videoPreset == display.preset,
                   "toggling saved VSR never reinterprets either resolution");
         }
+    }
+}
+
+void TestDisplayMatchesCapturePersistence(const std::wstring& path) {
+    using namespace llcv::settings;
+    AppSettings fresh{};
+    fresh.capturePreset = VideoPreset::R3840x2160;
+    Check(fresh.displayMatchesCapture && EffectiveDisplayPreset(fresh) == fresh.capturePreset,
+          "in-memory defaults follow capture edits");
+    DeleteFileW(path.c_str());
+    WritePrivateProfileStringW(L"Video", L"CaptureResolution", L"2560x1440", path.c_str());
+    auto first = LoadFromIni(path).settings;
+    Check(first.displayMatchesCapture && EffectiveDisplayPreset(first) == first.capturePreset,
+          "profile without display preference follows capture");
+    if (!CheckSaved(path, first, "save new capture-matched default")) return;
+    Check(LoadFromIni(path).settings.displayMatchesCapture,
+          "new capture-matched default survives first save");
+    WritePrivateProfileStringW(L"Video", L"DisplayMatchesCapture", L"0", path.c_str());
+    WritePrivateProfileStringW(L"Video", L"Resolution", nullptr, path.c_str());
+    Check(!LoadFromIni(path).settings.displayMatchesCapture,
+          "explicit fixed preference wins even without a resolution key");
+    const VideoPreset presets[]{VideoPreset::R1280x720, VideoPreset::R1920x1080,
+                                VideoPreset::R2560x1440, VideoPreset::R3840x2160};
+    unsigned caseIndex = 0;
+    for (const auto display : presets) for (const auto capture : presets) {
+        AppSettings saved{};
+        saved.videoPreset = display;
+        saved.capturePreset = capture;
+        saved.fullscreenVideoPosition = FullscreenPositionFromIndex(
+            static_cast<int>(caseIndex % kFullscreenVideoPositionCount));
+        saved.vsrEnabled = (caseIndex & 1) != 0;
+        // Save enabled then disabled to exercise replacement, not just new keys.
+        for (const bool matches : {true, false}) {
+            saved.displayMatchesCapture = matches;
+            if (!CheckSaved(path, saved, "save capture-matched display preference")) return;
+            const auto loaded = LoadFromIni(path).settings;
+            Check(loaded.displayMatchesCapture == matches &&
+                      loaded.videoPreset == display && loaded.capturePreset == capture &&
+                      loaded.fullscreenVideoPosition == saved.fullscreenVideoPosition &&
+                      loaded.vsrEnabled == saved.vsrEnabled,
+                  "matching capture preserves fixed display, capture, position and VSR on save/load");
+            Check(EffectiveDisplayPreset(loaded) == (matches ? capture : display),
+                  "effective display resolves capture only when explicitly enabled");
+            auto changedCapture = loaded;
+            changedCapture.capturePreset = presets[(caseIndex + 1) % ARRAYSIZE(presets)];
+            Check(EffectiveDisplayPreset(changedCapture) ==
+                      (matches ? changedCapture.capturePreset : display) &&
+                      changedCapture.videoPreset == display,
+                  "capture edits follow automatically without overwriting fixed display selection");
+            changedCapture.displayMatchesCapture = false;
+            Check(EffectiveDisplayPreset(changedCapture) == display,
+                  "leaving capture matching restores the preserved fixed display selection");
+        }
+        ++caseIndex;
+    }
+    for (const wchar_t* value : {L"invalid", L"1x"}) {
+        WritePrivateProfileStringW(L"Video", L"DisplayMatchesCapture", value, path.c_str());
+        const auto loaded = LoadFromIni(path).settings;
+        Check(!loaded.displayMatchesCapture && EffectiveDisplayPreset(loaded) == loaded.videoPreset,
+              "malformed explicit capture matching keeps fixed display selection");
+    }
+    const wchar_t* sizes[]{L"1280x720", L"1920x1080", L"2560x1440", L"3840x2160"};
+    for (const auto* display : sizes) for (const auto* capture : sizes) {
+        WritePrivateProfileStringW(L"Video", L"Resolution", display, path.c_str());
+        WritePrivateProfileStringW(L"Video", L"CaptureResolution", capture, path.c_str());
+        WritePrivateProfileStringW(L"Video", L"DisplayMatchesCapture", nullptr, path.c_str());
+        const auto migrated = LoadFromIni(path).settings;
+        const bool same = migrated.capturePreset == migrated.videoPreset;
+        Check(migrated.displayMatchesCapture == same &&
+              EffectiveDisplayPreset(migrated) == migrated.videoPreset,
+              "legacy migration preserves appearance and follows only equal resolutions");
+        if (!CheckSaved(path, migrated, "save migrated display mode")) return;
+        Check(LoadFromIni(path).settings.displayMatchesCapture == same,
+              "migration persists its resolved mode");
+        WritePrivateProfileStringW(L"Video", L"DisplayMatchesCapture", L"0", path.c_str());
+        Check(!LoadFromIni(path).settings.displayMatchesCapture,
+              "explicit fixed selection remains fixed even when sizes match");
+    }
+}
+
+void TestCaptureFrameRatePersistence(const std::wstring& path) {
+    using namespace llcv::settings;
+    // Selection and the 40 fps override are separate preferences. Applying or
+    // removing the override must not destroy the rate restored afterward.
+    for (const auto format : {VideoPixelFormat::Auto, VideoPixelFormat::Nv12,
+                              VideoPixelFormat::Yuy2, VideoPixelFormat::Mjpeg,
+                              VideoPixelFormat::P010}) {
+        for (int fps : {0, 30, 60, 120}) {
+            AppSettings saved{};
+            saved.capturePreset = VideoPreset::R2560x1440;
+            saved.videoPreset = VideoPreset::R1920x1080;
+            saved.pixelFormat = format;
+            saved.videoFrameRate = fps;
+            saved.allowUnlistedFps = fps == 30;
+            for (const bool capture40 : {true, false}) {
+                saved.capture40Fps = capture40;
+                if (!CheckSaved(path, saved, "save FPS and override fixture")) return;
+                const auto loaded = LoadFromIni(path).settings;
+                Check(loaded.videoFrameRate == fps && loaded.pixelFormat == format &&
+                      loaded.capture40Fps == capture40 &&
+                      loaded.allowUnlistedFps == saved.allowUnlistedFps &&
+                      loaded.capturePreset == saved.capturePreset &&
+                      loaded.videoPreset == saved.videoPreset,
+                      "all capture formats preserve FPS independently of 40 fps and display size");
+            }
+        }
+    }
+
+    AppSettings saved{};
+    saved.videoFrameRate = 60;
+    saved.allowUnlistedFps = true;
+    if (!CheckSaved(path, saved, "reset legacy FPS parser fixture")) return;
+    const struct { const wchar_t* text; int expected; } cases[] = {
+        {L"30", 30}, {L"60", 60}, {L"120", 120}, {L"0", 0},
+        {L" 30 ", 30}, {L"+60", 60},
+        {L"30fps", 0}, {L"60.0", 0}, {L"invalid", 0}, {L"", 0},
+        {L"-30", 0}, {L"2147483648", 0},
+        {L"999999999999999999999999", 0},
+        {nullptr, 0},
+    };
+    for (const auto& item : cases) {
+        if (!CheckWin32(WritePrivateProfileStringW(
+                L"Video", L"FrameRate", item.text, path.c_str()),
+                "write legacy or damaged FPS fixture")) return;
+        const auto loaded = LoadFromIni(path).settings;
+        Check(loaded.videoFrameRate == item.expected && loaded.allowUnlistedFps &&
+              !loaded.capture40Fps,
+              "valid legacy FPS remains exact; invalid text does not affect other options");
+    }
+    // A previous malformed profile must not poison a subsequent UI selection.
+    for (int fps : {30, 60}) {
+        auto recovered = LoadFromIni(path).settings;
+        recovered.videoFrameRate = fps;
+        if (!CheckSaved(path, recovered, "replace invalid FPS with explicit selection")) return;
+        wchar_t value[32]{};
+        GetPrivateProfileStringW(L"Video", L"FrameRate", L"", value,
+                                 ARRAYSIZE(value), path.c_str());
+        Check(std::wstring(value) == std::to_wstring(fps) &&
+              LoadFromIni(path).settings.videoFrameRate == fps,
+              "an explicit FPS selection saves plain decimal and survives reopening");
     }
 }
 
@@ -335,7 +487,8 @@ void TestRoundTrip(const std::wstring& path) {
     saved.fullscreenCursorMode = FullscreenCursorMode::AlwaysVisible;
     saved.forceHdr10 = true;
     saved.hdrChromaLocation = llcv::hdr::ChromaLocation::TopLeft;
-    saved.mjpegColorOverride = llcv::video_color::Override::Bt709Full;
+    saved.mjpegMatrixOverride = llcv::video_color::MatrixOverride::Bt709;
+    saved.sdrRangeOverride = llcv::video_color::RangeOverride::Full;
     saved.pixelPerfect = false;
     saved.relativeWindowSize = true;
     saved.relativeWindowScalePpm = 666'667;
@@ -396,8 +549,9 @@ void TestRoundTrip(const std::wstring& path) {
           "scaling mode round trip");
     Check(loaded.fullscreenCursorMode == saved.fullscreenCursorMode,
           "cursor mode round trip");
-    Check(loaded.mjpegColorOverride == saved.mjpegColorOverride,
-          "MJPEG color override round trip");
+    Check(loaded.mjpegMatrixOverride == saved.mjpegMatrixOverride &&
+          loaded.sdrRangeOverride == saved.sdrRangeOverride,
+          "independent MJPEG matrix and SDR range round trip");
     Check(loaded.relativeWindowScalePpm == saved.relativeWindowScalePpm,
           "relative scale round trip");
     Check(result.relativeWindowScaleVersion == kRelativeWindowScaleVersion,
@@ -496,6 +650,75 @@ void TestLegacyPcmMigration(const std::wstring& path) {
           "migration must not create a settings file for a fresh install");
 }
 
+void TestSdrColorSettings(const std::wstring& path) {
+    using namespace llcv;
+    for (auto matrix : {video_color::MatrixOverride::Auto, video_color::MatrixOverride::Bt709,
+                        video_color::MatrixOverride::Bt601})
+    for (auto range : {video_color::RangeOverride::Auto, video_color::RangeOverride::Limited,
+                       video_color::RangeOverride::Full}) {
+        settings::AppSettings saved{};
+        saved.mjpegMatrixOverride = matrix;
+        saved.sdrRangeOverride = range;
+        saved.forceHdr10 = true;
+        saved.hdrChromaLocation = hdr::ChromaLocation::Left;
+        if (!CheckSaved(path, saved, "save SDR matrix/range combination")) return;
+        const auto loaded = settings::LoadFromIni(path).settings;
+        Check(loaded.mjpegMatrixOverride == matrix && loaded.sdrRangeOverride == range &&
+              loaded.legacyMjpegRangeOverride == video_color::RangeOverride::Auto,
+              "all independent SDR color choices survive save/load");
+        Check(loaded.forceHdr10 && loaded.hdrChromaLocation == hdr::ChromaLocation::Left,
+              "SDR settings do not overwrite HDR preferences");
+    }
+    for (const auto* matrix : {L"Bt709", L"Bt601"})
+    for (const auto* range : {L"Limited", L"Full"}) {
+        DeleteFileW(path.c_str());
+        WritePrivateProfileStringW(L"Video", L"MjpegColor", (std::wstring(matrix) + range).c_str(), path.c_str());
+        WritePrivateProfileStringW(L"Video", L"PixelFormat", L"NV12", path.c_str());
+        auto migrated = settings::LoadFromIni(path).settings;
+        const auto expectedMatrix = std::wcscmp(matrix, L"Bt709") == 0
+            ? video_color::MatrixOverride::Bt709 : video_color::MatrixOverride::Bt601;
+        const auto expectedRange = std::wcscmp(range, L"Limited") == 0
+            ? video_color::RangeOverride::Limited : video_color::RangeOverride::Full;
+        Check(migrated.mjpegMatrixOverride == expectedMatrix &&
+              settings::EffectiveSdrRange(migrated, true) == expectedRange &&
+              settings::EffectiveSdrRange(migrated, false) == video_color::RangeOverride::Auto,
+              "legacy MJPEG correction never becomes a raw SDR override");
+        if (!CheckSaved(path, migrated, "save untouched legacy MJPEG correction")) return;
+        const auto preserved = settings::LoadFromIni(path).settings;
+        Check(preserved.mjpegMatrixOverride == expectedMatrix &&
+              settings::EffectiveSdrRange(preserved, true) == expectedRange &&
+              settings::EffectiveSdrRange(preserved, false) == video_color::RangeOverride::Auto,
+              "unrelated save keeps legacy MJPEG appearance and raw automatic range");
+        wchar_t obsolete[64]{};
+        GetPrivateProfileStringW(L"Video", L"MjpegColor", L"missing", obsolete, ARRAYSIZE(obsolete), path.c_str());
+        Check(std::wcscmp(obsolete, L"missing") == 0, "save retires duplicate combined MJPEG setting");
+        migrated.sdrRangeOverride = video_color::RangeOverride::Full;
+        if (!CheckSaved(path, migrated, "save explicit shared SDR range")) return;
+        const auto common = settings::LoadFromIni(path).settings;
+        Check(common.legacyMjpegRangeOverride == video_color::RangeOverride::Auto &&
+              settings::EffectiveSdrRange(common, false) == video_color::RangeOverride::Full &&
+              settings::EffectiveSdrRange(common, true) == video_color::RangeOverride::Full,
+              "explicit common range supersedes legacy MJPEG-only range");
+    }
+    for (const auto* value : {L"garbage", L"3", L"-1", L"Bt709Full", L""}) {
+        WritePrivateProfileStringW(L"Video", L"MjpegMatrix", value, path.c_str());
+        WritePrivateProfileStringW(L"Video", L"SdrRange", value, path.c_str());
+        WritePrivateProfileStringW(L"Video", L"LegacyMjpegRange", value, path.c_str());
+        WritePrivateProfileStringW(L"Video", L"MjpegColor", L"Bt601Full", path.c_str());
+        const auto invalid = settings::LoadFromIni(path).settings;
+        Check(invalid.mjpegMatrixOverride == video_color::MatrixOverride::Auto &&
+              invalid.sdrRangeOverride == video_color::RangeOverride::Auto &&
+              invalid.legacyMjpegRangeOverride == video_color::RangeOverride::Auto,
+              "malformed new values safely select Auto without resurrecting legacy keys");
+    }
+    WritePrivateProfileStringW(L"Video", L"MjpegMatrix", L"bt601", path.c_str());
+    WritePrivateProfileStringW(L"Video", L"SdrRange", L"full", path.c_str());
+    const auto lowercase = settings::LoadFromIni(path).settings;
+    Check(lowercase.mjpegMatrixOverride == video_color::MatrixOverride::Bt601 &&
+          lowercase.sdrRangeOverride == video_color::RangeOverride::Full,
+          "new color settings are case insensitive");
+}
+
 void TestHdrChroma(const std::wstring& path) {
     using namespace llcv;
     for (auto mode : {hdr::ChromaLocation::Auto, hdr::ChromaLocation::TopLeft, hdr::ChromaLocation::Left}) {
@@ -590,6 +813,8 @@ int main(int argc, char** argv) {
     TestNewUnicodeProfile(path);
     TestInvalidNumericSettings(path);
     TestResolutionRoundTrips(path);
+    TestDisplayMatchesCapturePersistence(path);
+    TestCaptureFrameRatePersistence(path);
     TestRoundTrip(path);
     for (const wchar_t* version : {L"1", L"0"}) {
         WritePrivateProfileStringW(L"ExclusiveEndpointCache", L"ProbeVersion", version, path.c_str());
@@ -621,6 +846,7 @@ int main(int argc, char** argv) {
     Check(bounded.audioOnlyWidth == 380 && bounded.audioOnlyHeight == 16384,
           "invalid audio-only dimensions are bounded");
     TestHdrChroma(path);
+    TestSdrColorSettings(path);
     {
         auto settings=llcv::settings::LoadFromIni(path).settings;
         Check(settings.shortcuts==llcv::shortcuts::Defaults,"legacy profiles keep default shortcuts");

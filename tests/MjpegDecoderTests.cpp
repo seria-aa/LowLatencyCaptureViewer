@@ -20,6 +20,7 @@ struct Layout {
     DWORD bytes = 24, flags = 0;
     bool hasStride = true, hasSize = true, nv12 = true;
     DWORD alignment = 64;
+    UINT32 matrix = 0, range = 0;
 };
 struct Candidate {
     HRESULT activate = S_OK, input = S_OK, info = S_OK;
@@ -89,6 +90,8 @@ public:
             (*p)->SetGUID(MF_MT_SUBTYPE, layout.nv12 ? MFVideoFormat_NV12 : MFVideoFormat_YUY2);
             if (layout.hasSize) MFSetAttributeSize(*p, MF_MT_FRAME_SIZE, layout.width, layout.height);
             if (layout.hasStride) (*p)->SetUINT32(MF_MT_DEFAULT_STRIDE, layout.stride);
+            if (layout.matrix) (*p)->SetUINT32(MF_MT_YUV_MATRIX, layout.matrix);
+            if (layout.range) (*p)->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, layout.range);
         }
         return hr;
     }
@@ -261,7 +264,7 @@ static void TestInputTiming() {
     candidates.assign(1,{});
     llcv::video::MjpegDecoder decoder;
     Check(SUCCEEDED(decoder.initialize(4,2,60,nullptr,nullptr,
-        llcv::video_color::Override::Auto,nullptr)),"timing decoder initialization");
+        llcv::video_color::MatrixOverride::Auto,nullptr)),"timing decoder initialization");
     Sample sample;Microsoft::WRL::ComPtr<IMFMediaBuffer> output;
     Check(SUCCEEDED(decoder.decode(&sample,&output)) && FAILED(candidates[0].timeResult),
         "untimed playback input remains untimed");
@@ -279,13 +282,47 @@ static void TestRecordingFramePolicy() {
         auto& c=candidates.front();c.change=scenario!=0;c.emitBefore=scenario==2;
         llcv::video::MjpegDecoder decoder;
         Check(SUCCEEDED(decoder.initialize(4,2,60,nullptr,nullptr,
-            llcv::video_color::Override::Auto,nullptr)),"recording decoder initialization");
+            llcv::video_color::MatrixOverride::Auto,nullptr)),"recording decoder initialization");
         Sample sample;Microsoft::WRL::ComPtr<IMFMediaBuffer> output;
         const auto hr=decoder.decode(sample.data.data(),static_cast<DWORD>(sample.data.size()),
             10000000,166667,&output,true);
         Check(scenario==1?SUCCEEDED(hr)&&output:hr==MF_E_INVALID_STREAM_DATA&&!output,
             "recording requires exactly one decoded frame instead of silently keeping the newest");
     }
+}
+static void TestColorSelection() {
+    using namespace llcv;
+    using video_color::MatrixOverride;
+    using video_color::RangeOverride;
+    for (auto matrix : {MatrixOverride::Auto, MatrixOverride::Bt709, MatrixOverride::Bt601})
+        for (auto range : {RangeOverride::Auto, RangeOverride::Limited, RangeOverride::Full}) {
+            candidates.assign(1, {});
+            auto& c = candidates.front();
+            c.change = true; c.emitBefore = true;
+            c.before.matrix = 1; c.before.range = 1;
+            c.after.matrix = 2; c.after.range = 2;
+            video::CaptureColorMetadata directShow{};
+            directShow.present = true; directShow.transferMatrix = 2; directShow.nominalRange = 2;
+            video::MjpegDecoder decoder;
+            Check(decoder.initialize(4, 2, 60, nullptr, &directShow, matrix, nullptr, range) == S_OK,
+                  "independent MJPEG color selectors initialize");
+            Check(decoder.colorConfiguration() == video_color::Resolve(true, 4, 2, {1, 1}, {2, 2}, matrix, range),
+                  "decoder applies independent matrix/range over MF output metadata");
+            Sample sample;
+            Microsoft::WRL::ComPtr<IMFMediaBuffer> output;
+            Check(SUCCEEDED(decoder.decode(&sample, &output)) && output,
+                  "color test stream change returns newest frame");
+            Check(decoder.colorConfiguration() == video_color::Resolve(true, 4, 2, {2, 2}, {2, 2}, matrix, range),
+                  "manual selectors survive decoder stream changes; Auto follows updated metadata");
+            decoder.reset();
+            Check(decoder.colorConfiguration() == video_color::Configuration{},
+                  "decoder reset clears selected color and its sources");
+            c = {};
+            Check(decoder.initialize(4, 2, 60, nullptr, nullptr, MatrixOverride::Auto, nullptr) == S_OK,
+                  "decoder can reopen in Auto without an explicit range argument");
+            Check(decoder.colorConfiguration() == video_color::Resolve(true, 4, 2, {}, {}),
+                  "previous manual range cannot leak into reopened Auto decoder");
+        }
 }
 static void TestStreamChanges() {
     for (unsigned scenario = 0; scenario < 15; ++scenario) {
@@ -308,7 +345,7 @@ static void TestStreamChanges() {
         if (scenario == 14) c.changedInfo = E_FAIL;
         llcv::video::MjpegDecoder decoder;
         Check(decoder.initialize(4, 2, 60, nullptr, nullptr,
-            llcv::video_color::Override::Auto, nullptr) == S_OK, "initial layout accepted");
+            llcv::video_color::MatrixOverride::Auto, nullptr) == S_OK, "initial layout accepted");
         Check(c.attributeCalls == 1 && c.lowLatency == TRUE,
               "GetAttributes delivers low-latency request before input type setup");
         Sample sample; IMFMediaBuffer* output = nullptr;
@@ -340,7 +377,7 @@ static void TestStreamChanges() {
         if (scenario == 3) c.before.hasStride = false;
         llcv::video::MjpegDecoder decoder;
         const HRESULT hr = decoder.initialize(4, 2, 60, nullptr, nullptr,
-            llcv::video_color::Override::Auto, nullptr);
+            llcv::video_color::MatrixOverride::Auto, nullptr);
         Check(scenario == 2 ? FAILED(hr) : hr == S_OK,
               "optional attributes/stride accepted, missing required dimensions rejected");
         if (scenario < 2) Check(c.attributeCalls == 1 && c.lowLatency == 0,
@@ -392,29 +429,63 @@ static void TestNativeDecoder() {
         ULONG read = 0;
         Check(SUCCEEDED(stream->Read(sample.data.data(), sample.bytes, &read)) &&
             read == static_cast<ULONG>(sample.bytes), "JPEG fixture read");
-        llcv::video::MjpegDecoder decoder;
-        Check(SUCCEEDED(decoder.initialize(width, height, 60, nullptr, nullptr,
-            llcv::video_color::Override::Auto, nullptr)), "system MJPEG decoder initialized");
-        unsigned decoded = 0;
-        for (unsigned index = 0; index < 8; ++index) {
-            ComPtr<IMFMediaBuffer> output;
-            Check(SUCCEEDED(index%2?decoder.decode(sample.data.data(),
-                static_cast<DWORD>(sample.bytes),index*10000000LL/60,10000000/60,&output,true):
-                decoder.decode(&sample,&output)), "system MJPEG display/recording decode succeeds");
-            if (!output) continue;
-            BYTE* data = nullptr; DWORD capacity = 0, length = 0;
-            Check(SUCCEEDED(output->Lock(&data, &capacity, &length)), "native NV12 buffer locked");
-            Check(data && decoder.validOutputBuffer(capacity, length), "native NV12 output layout valid");
-            Check(data[0] != data[(height - 1) * decoder.stride() + width - 1], "decoded gradient preserved");
-            output->Unlock(); ++decoded;
+        std::vector<BYTE> automaticPixels;
+        llcv::video_color::Configuration automaticColor;
+        uint64_t automaticInputAllocations = 0, automaticOutputAllocations = 0;
+        for (auto range : {llcv::video_color::RangeOverride::Auto,
+                           llcv::video_color::RangeOverride::Limited,
+                           llcv::video_color::RangeOverride::Full}) {
+            llcv::video::MjpegDecoder decoder;
+            Check(SUCCEEDED(decoder.initialize(width, height, 60, nullptr, nullptr,
+                llcv::video_color::MatrixOverride::Auto, nullptr, range)), "system MJPEG decoder initialized");
+            unsigned decoded = 0;
+            for (unsigned index = 0; index < 8; ++index) {
+                ComPtr<IMFMediaBuffer> output;
+                Check(SUCCEEDED(index%2?decoder.decode(sample.data.data(),
+                    static_cast<DWORD>(sample.bytes),index*10000000LL/60,10000000/60,&output,true):
+                    decoder.decode(&sample,&output)), "system MJPEG display/recording decode succeeds");
+                if (!output) continue;
+                BYTE* data = nullptr; DWORD capacity = 0, length = 0;
+                Check(SUCCEEDED(output->Lock(&data, &capacity, &length)), "native NV12 buffer locked");
+                Check(data && decoder.validOutputBuffer(capacity, length), "native NV12 output layout valid");
+                Check(data[0] != data[(height - 1) * decoder.stride() + width - 1], "decoded gradient preserved");
+                if (index == 0) {
+                    std::vector<BYTE> packed;
+                    packed.reserve(static_cast<size_t>(width) * height * 3 / 2);
+                    for (UINT32 row = 0; row < height * 3 / 2; ++row)
+                        packed.insert(packed.end(), data + row * decoder.stride(), data + row * decoder.stride() + width);
+                    if (range == llcv::video_color::RangeOverride::Auto) {
+                        automaticPixels = packed;
+                        automaticColor = decoder.colorConfiguration();
+                    } else {
+                        Check(packed == automaticPixels, "manual SDR range leaves native decoded pixels byte-identical");
+                        auto expected = automaticColor;
+                        expected.range = range == llcv::video_color::RangeOverride::Full
+                            ? llcv::video_color::Range::Full : llcv::video_color::Range::Limited;
+                        expected.rangeSource = llcv::video_color::Source::UserOverride;
+                        Check(decoder.colorConfiguration() == expected,
+                              "native manual range changes only interpretation, preserving detected matrix");
+                    }
+                }
+                output->Unlock(); ++decoded;
+            }
+            Check(decoded == 8, "native decoder outputs each frame without accumulating a queue");
+            const auto inputStats = decoder.inputAllocations(), outputStats = decoder.outputAllocations();
+            Check(inputStats.reuses > 0 && (!outputStats.allocations || outputStats.reuses > 0),
+                  "native decoder reuses memory buffers after their consumers release them");
+            if (range == llcv::video_color::RangeOverride::Auto) {
+                automaticInputAllocations = inputStats.allocations;
+                automaticOutputAllocations = outputStats.allocations;
+            } else {
+                Check(inputStats.allocations == automaticInputAllocations &&
+                      outputStats.allocations == automaticOutputAllocations,
+                      "manual range adds no native decoder buffer allocations");
+            }
+            std::printf("Native MJPEG: %u x %u, range %u, stride %ld, %u/8 frames passed.\n",
+                width, height, static_cast<unsigned>(range), decoder.stride(), decoded);
+            std::printf("MJPEG buffer allocations/reuses: input %u/%u, output %u/%u.\n",
+                inputStats.allocations, inputStats.reuses, outputStats.allocations, outputStats.reuses);
         }
-        Check(decoded == 8, "native decoder outputs each frame without accumulating a queue");
-        const auto inputStats = decoder.inputAllocations(), outputStats = decoder.outputAllocations();
-        Check(inputStats.reuses > 0 && (!outputStats.allocations || outputStats.reuses > 0),
-              "native decoder reuses memory buffers after their consumers release them");
-        std::printf("Native MJPEG: %u x %u, stride %ld, %u/8 frames passed.\n", width, height, decoder.stride(), decoded);
-        std::printf("MJPEG buffer allocations/reuses: input %u/%u, output %u/%u.\n",
-            inputStats.allocations, inputStats.reuses, outputStats.allocations, outputStats.reuses);
     }
     useSystemDecoder = false;
 }
@@ -467,7 +538,7 @@ int main(int argc, char** argv) {
         if (scenario == 5) candidates[0].info = E_FAIL;
         llcv::video::MjpegDecoder decoder;
         HRESULT hr = decoder.initialize(4, 2, 60, nullptr, nullptr,
-                                        llcv::video_color::Override::Auto, nullptr);
+                                        llcv::video_color::MatrixOverride::Auto, nullptr);
         Check((scenario == 3 ? FAILED(hr) : hr == S_OK), "first successful codec determines result");
         Check(liveActivations == 0, "every activation released including unused candidates");
         const unsigned chosen = scenario < 2 ? 0 : 1;
@@ -496,6 +567,7 @@ int main(int argc, char** argv) {
     }
     TestStreamChanges();
     TestRecordingFramePolicy();
+    TestColorSelection();
     TestInputTiming();
     TestBufferReuse();
     CoUninitialize();

@@ -9,6 +9,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -20,6 +21,8 @@ struct __declspec(uuid("548579DA-08A5-419C-A626-5F0D607D48CE")) IStorage : IUnkn
     virtual HRESULT STDMETHODCALLTYPE Result()=0;
     virtual HRESULT STDMETHODCALLTYPE Retire()=0;
     virtual HRESULT STDMETHODCALLTYPE Sibling(IMFByteStream*,IMFByteStream**)=0;
+    virtual HRESULT STDMETHODCALLTYPE RequestSpace(const wchar_t*)=0;
+    virtual StorageSpace STDMETHODCALLTYPE Space()=0;
 };
 constexpr GUID kTicketBytes{0x5f0d607d,0x48ce,0x419c,{0xa6,0x26,0x54,0x85,0x79,0xda,0x08,0xa5}};
 constexpr GUID kTicketKind{0x5f0d607e,0x48ce,0x419c,{0xa6,0x26,0x54,0x85,0x79,0xda,0x08,0xa5}};
@@ -27,7 +30,10 @@ struct File {
     ComPtr<IMFByteStream> bytes;
     std::atomic<bool> flushPending{false};
 };
-enum class Kind { Write,Read,Resize,Flush,Close };
+#ifdef LLCV_RECORDING_STORAGE_SPACE_TEST
+std::atomic<RecordingSpaceQuery> spaceQueryForTest{nullptr};
+#endif
+enum class Kind { Write,Read,Resize,Flush,Close,Space };
 struct Job {
     Kind kind=Kind::Write;
     std::shared_ptr<File> file;
@@ -36,6 +42,7 @@ struct Job {
     BYTE* read=nullptr;
     ULONG count=0,*transferred=nullptr;
     bool coalescedFlush=false;
+    std::wstring folder;
 };
 class Queue {
     StorageLimits limits_;
@@ -45,10 +52,23 @@ class Queue {
     size_t bytes_=0,operations_=0;
     uint64_t issued_=0,done_=0;
     bool stopping_=false;
+    bool spacePending_=false;
+    StorageSpace space_;
     std::atomic<HRESULT> error_{S_OK};
     std::thread worker_;
     void Fail(HRESULT hr) {
         if(FAILED(hr)){HRESULT ok=S_OK;error_.compare_exchange_strong(ok,hr);}
+    }
+    HRESULT PutLocked(Job&& job,uint64_t* sequence,bool finalControl) {
+        if(stopping_)return MF_E_SHUTDOWN;
+        if(!finalControl && FAILED(Result()))return Result();
+        if(!finalControl && (operations_>=limits_.operations || job.data.size()>limits_.bytes-bytes_))
+            return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
+        job.sequence=issued_+1;
+        jobs_.push_back(std::move(job));
+        ++issued_;++operations_;bytes_+=jobs_.back().data.size();
+        if(sequence)*sequence=issued_;
+        wake_.notify_one();return S_OK;
     }
     void Run() {
         const auto com=CoInitializeEx(nullptr,COINIT_MULTITHREADED);Fail(com);
@@ -60,13 +80,33 @@ class Queue {
                 job=std::move(jobs_.front());jobs_.pop_front();
             }
             HRESULT hr=Result();ULONG count=0;
+            StorageSpace queried;
 #ifdef LLCV_RECORDING_STORAGE_DELAY_TEST
             // Dedicated regression binary only; never enabled in the app.
             if(job.kind==Kind::Flush||job.kind==Kind::Close)Sleep(500);
 #endif
             // Even after a write failure, flush/close every owned file so a
             // usable prefix can survive and no split handle is leaked.
-            if(job.kind==Kind::Flush)hr=job.file->bytes->Flush();
+            if(job.kind==Kind::Space){
+#ifdef LLCV_RECORDING_SPACE_DELAY_TEST
+                // Dedicated regression build: expose the old encoder-worker
+                // stall without delaying capture or changing normal builds.
+                // Longer than even the 16-packet ring at 50 fps: passing must
+                // rely on asynchronous queries, not just the delivery margin.
+                Sleep(500);
+#endif
+                ULARGE_INTEGER free{};
+#ifdef LLCV_RECORDING_STORAGE_SPACE_TEST
+                const auto query=spaceQueryForTest.load();
+                queried.known=query?query(job.folder.c_str(),&free)!=FALSE:
+                    GetDiskFreeSpaceExW(job.folder.c_str(),&free,nullptr,nullptr)!=FALSE;
+#else
+                queried.known=GetDiskFreeSpaceExW(job.folder.c_str(),&free,nullptr,nullptr)!=FALSE;
+#endif
+                queried.completed=true;queried.freeBytes=queried.known?free.QuadPart:0;
+                // A failed informational query must not poison file writes.
+                hr=S_OK;
+            }else if(job.kind==Kind::Flush)hr=job.file->bytes->Flush();
             else if(job.kind==Kind::Close){
                 hr=job.file->bytes->Flush();
                 const auto close=job.file->bytes->Close();if(SUCCEEDED(hr))hr=close;
@@ -88,6 +128,7 @@ class Queue {
             if(job.coalescedFlush)job.file->flushPending=false;
             {
                 std::lock_guard lock(mutex_);bytes_-=job.data.size();--operations_;done_=job.sequence;
+                if(job.kind==Kind::Space){space_=queried;spacePending_=false;}
             }
             completed_.notify_all();
         }
@@ -108,17 +149,21 @@ public:
     HRESULT Put(Job job,uint64_t* sequence=nullptr,bool finalControl=false) noexcept {
         try{
             std::lock_guard lock(mutex_);
-            if(stopping_)return MF_E_SHUTDOWN;
-            if(!finalControl && FAILED(Result()))return Result();
-            if(!finalControl && (operations_>=limits_.operations || job.data.size()>limits_.bytes-bytes_))
-                return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
-            job.sequence=issued_+1;
-            jobs_.push_back(std::move(job));
-            ++issued_;++operations_;bytes_+=jobs_.back().data.size();
-            if(sequence)*sequence=issued_;
-            wake_.notify_one();return S_OK;
+            return PutLocked(std::move(job),sequence,finalControl);
         }catch(...){return E_OUTOFMEMORY;}
     }
+    HRESULT RequestSpace(const wchar_t* folder) noexcept {
+        if(!folder || !*folder)return E_INVALIDARG;
+        try{
+            std::lock_guard lock(mutex_);
+            if(spacePending_)return Result();
+            Job job;job.kind=Kind::Space;job.folder=folder;
+            const auto hr=PutLocked(std::move(job),nullptr,false);
+            if(SUCCEEDED(hr))spacePending_=true;
+            return hr;
+        }catch(...){return E_OUTOFMEMORY;}
+    }
+    StorageSpace Space() {std::lock_guard lock(mutex_);return space_;}
     HRESULT Wait(uint64_t sequence){
         std::unique_lock lock(mutex_);completed_.wait(lock,[&]{return done_>=sequence;});return Result();
     }
@@ -237,6 +282,8 @@ public:
         const auto hr=queue_->Put(std::move(job));if(FAILED(hr))file_->flushPending=false;return hr;
     }
     STDMETHODIMP Result() override {return queue_->Result();}
+    STDMETHODIMP RequestSpace(const wchar_t* folder) override {return queue_->RequestSpace(folder);}
+    StorageSpace STDMETHODCALLTYPE Space() override {return queue_->Space();}
     STDMETHODIMP Retire() override {return Seal(false);}
     STDMETHODIMP Sibling(IMFByteStream* file,IMFByteStream** result) override {
         try{*result=new Stream(file,queue_);return S_OK;}catch(HRESULT hr){return hr;}catch(...){return E_OUTOFMEMORY;}
@@ -259,6 +306,20 @@ HRESULT RecordingStorageResult(IMFByteStream* stream){
     if(!stream)return E_POINTER;ComPtr<IStorage> storage;
     return SUCCEEDED(stream->QueryInterface(IID_PPV_ARGS(&storage)))?storage->Result():S_OK;
 }
+HRESULT RequestRecordingSpace(IMFByteStream* stream,const wchar_t* folder){
+    if(!stream)return E_POINTER;
+    ComPtr<IStorage> storage;
+    const auto hr=stream->QueryInterface(IID_PPV_ARGS(&storage));
+    return FAILED(hr)?hr:storage->RequestSpace(folder);
+}
+StorageSpace RecordingStorageSpace(IMFByteStream* stream){
+    if(!stream)return {};
+    ComPtr<IStorage> storage;
+    return SUCCEEDED(stream->QueryInterface(IID_PPV_ARGS(&storage)))?storage->Space():StorageSpace{};
+}
+#ifdef LLCV_RECORDING_STORAGE_SPACE_TEST
+void SetRecordingSpaceQueryForTest(RecordingSpaceQuery query){spaceQueryForTest=query;}
+#endif
 HRESULT RetireRecordingStorage(IMFByteStream* stream){
     if(!stream)return E_POINTER;ComPtr<IStorage> storage;
     if(SUCCEEDED(stream->QueryInterface(IID_PPV_ARGS(&storage))))return storage->Retire();

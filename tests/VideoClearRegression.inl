@@ -21,6 +21,9 @@ static int RunVideoClearRegressionTests() {
     g_settings.presentationMode = PresentationMode::AllowTearing;
     g_settings.scalingMode = ScalingMode::Smooth;
     g_settings.videoPreset = VideoPreset::R1280x720;
+    // This fixture checks a fixed 720p display size, independently of the
+    // default capture-matched mode covered by the display-sizing regressions.
+    g_settings.displayMatchesCapture = false;
     g_fullscreen = false;
     g_osdVisible = false;
     g_audioOsdVisible = false;

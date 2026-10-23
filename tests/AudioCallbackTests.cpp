@@ -254,6 +254,7 @@ void TestCaptureColorStartupFallback() {
     for (DWORD flags : {pqLeft, hlgLeft}) {
         g_settings.capture40Fps = requested==40;
         g_settings.videoFrameRate = requested;
+        g_settings.allowUnlistedFps = requested==30;
         FakeVideoPin pin;
         pin.modes = {{60}};
         pin.modes[0].subtype = MFVideoFormat_P010;
@@ -269,8 +270,8 @@ void TestCaptureColorStartupFallback() {
         Require(SUCCEEDED(ConfigureVideoPin(&pin, 1920, 1080, requested,
             VideoPixelFormat::P010, bytes, stride, fps, format, candidate)),
             "production wrapper negotiates caps-only color driver");
-        Require(candidate.present == (requested!=60),
-            "ordinary capture retains its existing metadata lookup path");
+        Require(candidate.present,
+            "every explicit capture rate retains accepted candidate color metadata");
         AM_MEDIA_TYPE* active = nullptr;
         Require(SUCCEEDED(GetActiveVideoPinFormat(&pin, &active)), "read active color fixture");
         Require(ResolveInitialVideoColorMetadata(&pin, active, format, 1920, 1080,
@@ -311,6 +312,7 @@ void TestVsrLiveTestRateIsolation() {
         g_settings = saved;
         g_settings.capture40Fps = capture40;
         g_settings.videoFrameRate = rate;
+        g_settings.displayMatchesCapture = true;
         g_settings.audioMode = AudioMode::WasapiShared;
         g_settings.volumePercent = 73;
         ApplyVsrLiveTestSettings(g_settings);
@@ -319,6 +321,7 @@ void TestVsrLiveTestRateIsolation() {
             "live VSR experiment always requests 120fps regardless of saved override");
         Require(g_settings.videoPreset == VideoPreset::R2560x1440 &&
             g_settings.capturePreset == VideoPreset::R1920x1080 && g_settings.vsrEnabled &&
+            !g_settings.displayMatchesCapture && CurrentVideoPreset().preset == VideoPreset::R2560x1440 &&
             g_settings.pixelFormat == VideoPixelFormat::Nv12 &&
             g_settings.presentationMode == PresentationMode::AllowTearing &&
             g_settings.audioMode == AudioMode::WasapiShared && g_settings.volumePercent == 73,

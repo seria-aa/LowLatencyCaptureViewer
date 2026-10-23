@@ -173,7 +173,7 @@ bool SettingsTheme::IsSecondary(HWND hwnd) const {
     if(hwnd==c.recStatus||hwnd==c.recSpace||hwnd==c.recNote||hwnd==c.recSplitHint)return true;
 #endif
     return hwnd == c.pageSubtitle || hwnd == c.videoCapabilityStatus || hwnd == c.captureAudioStatus ||
-        hwnd == c.vsrStatus || hwnd == c.screenshotHelp || hwnd == c.skipStartupHint ||
+        hwnd == c.vsrStatus || hwnd == c.screenshotHelp || hwnd == c.skipStartupHint || hwnd == c.frameOptionsHint ||
         hwnd == c.preventSleepHint ||
         hwnd == c.versionWatermark || hwnd == c.fullscreenCursorHint || hwnd == c.fullscreenPositionHint || hwnd == c.surround51Hint ||
         hwnd == c.relativeSizeWarning || hwnd == c.guideDiagnosticsText || hwnd == c.guideVideoHint || hwnd == c.updateText ||
@@ -183,7 +183,10 @@ bool SettingsTheme::IsCardControl(HWND hwnd) const {
     const auto& c = *controls_;
     // Decoration follows the same functional grouping as the native controls;
     // it is never a child window and therefore cannot cover/capture input.
-    return hwnd && (hwnd == c.vsrCheck || hwnd == c.vsrGuideButton || hwnd == c.vsrStatus ||
+    return hwnd && ((c.frameOptionsOpen &&
+        (hwnd == c.frameOptionsTitle || hwnd == c.frameOptionsClose || hwnd == c.frameOptionsHint ||
+         hwnd == c.unlistedFpsCheck || hwnd == c.capture40Check || hwnd == c.capture40Help)) ||
+        hwnd == c.vsrCheck || hwnd == c.vsrGuideButton || hwnd == c.vsrStatus ||
         hwnd == c.displayResolutionLabel || hwnd == c.displayResolutionCombo ||
         hwnd == c.screenshotTitle || hwnd == c.screenshotClipboardCheck ||
         hwnd == c.screenshotFolderButton || hwnd == c.screenshotHelp ||
@@ -210,6 +213,12 @@ void SettingsTheme::PaintCards(HDC dc) {
         }
     };
     const auto& c = *controls_;
+    if (c.frameOptionsOpen) {
+        // Share the actual padded control bounds with outside-click handling.
+        const RECT bounds = SettingsFrameOptionsBounds(&c, owner_);
+        if (!IsRectEmpty(&bounds))
+            Rounded(dc, bounds, palette_.kCard, palette_.kCardEdge, Pixels(kCornerDiameterDip));
+    }
     paintGroup({c.vsrCheck, c.vsrGuideButton, c.displayResolutionLabel, c.displayResolutionCombo, c.vsrStatus});
     paintGroup({c.screenshotTitle, c.screenshotClipboardCheck, c.screenshotFolderButton, c.screenshotHelp});
     if (SettingsCompactLayout(&c)) {

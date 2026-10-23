@@ -146,7 +146,7 @@ int Run() {
     const std::array<std::vector<BYTE>, 2> jpeg{JpegFrame(false), JpegFrame(true)};
     video::MjpegDecoder viewerDecoder;
     const HRESULT decoderResult = viewerDecoder.initialize(640, 360, 30, nullptr, nullptr,
-        video_color::Override::Auto, nullptr);
+        video_color::MatrixOverride::Auto, nullptr);
     if (decoderResult == MF_E_TOPO_CODEC_NOT_FOUND) {
         std::puts("SKIP: system synchronous MJPEG decoder unavailable");
         return 77;

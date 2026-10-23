@@ -20,7 +20,8 @@ public:
     void Configure(const video::VideoSampleFormat&, const capture_audio::Format&,
                    video_color::Configuration, bool arrivalClock = false,
                    const Options& options = {}, const AM_MEDIA_TYPE* captureType = nullptr,
-                   video_color::Override mjpegColorOverride = video_color::Override::Auto);
+                   video_color::MatrixOverride mjpegColorOverride = video_color::MatrixOverride::Auto,
+                   video_color::RangeOverride sdrRangeOverride = video_color::RangeOverride::Auto);
     bool Start(const std::wstring& path, const Options* options=nullptr);
     void Stop() noexcept;
     bool SetPaused(bool paused);
@@ -34,9 +35,14 @@ private:
     friend struct RecorderTestAccess; // Regression-only access; no runtime hooks.
     struct Packet { Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer; LONGLONG time=0, duration=0; uint64_t pauseGeneration=0; bool video=false; };
     void Run(std::wstring path);
+    void PrepareQueues(); // Worker only; shared by deterministic regression fixtures.
     void PushAudioChunks(const BYTE* data, long length, LONGLONG start, uint64_t pauseGeneration);
     void Fail(HRESULT, Operation operation=Operation::Encoder) noexcept;
-    void UpdateStorage(const std::wstring& folder);
+    void UpdateStorage(IMFByteStream* stream);
+    enum class WorkerActivity : unsigned { Starting, Waiting, Storage, Video, Audio, WriteVideo, WriteAudio, Finalizing };
+    void TrackWorkerActivity(WorkerActivity activity) noexcept;
+    void ReportQueueFailure(bool video, LONGLONG incomingTime, const wchar_t* reason) noexcept;
+    std::atomic<uint64_t> workerActivity_{0}; // One packed stage/time snapshot, diagnostic only.
     std::mutex lifecycle_;
     mutable std::mutex statusMutex_;
     Snapshot snapshot_;
@@ -56,7 +62,8 @@ private:
     video::VideoSampleFormat video_{};
     GUID compressedFormatType_{};
     std::vector<BYTE> compressedFormat_;
-    video_color::Override mjpegColorOverride_=video_color::Override::Auto;
+    video_color::MatrixOverride mjpegColorOverride_=video_color::MatrixOverride::Auto;
+    video_color::RangeOverride sdrRangeOverride_=video_color::RangeOverride::Auto;
     capture_audio::Format audio_{};
     video_color::Configuration color_{};
     bool arrivalClock_=false;

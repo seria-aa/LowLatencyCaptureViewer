@@ -54,6 +54,7 @@
 #endif
 #include "capture/DirectShowGraphResources.h"
 #include "capture/LatestVideoSample.h"
+#include "diagnostics/CaptureFrameRateMonitor.h"
 #ifdef LLCV_RECORDING
 #include "recording/Recorder.h"
 #include "recording/RecordingGpuIndicator.h"
@@ -152,11 +153,11 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
 #if defined(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.4-audio-recovery-diagnostic";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.5-audio-recovery-diagnostic";
 #elif defined(LLCV_VSR_EXPERIMENT)
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.4-vsr-test";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.5-vsr-test";
 #else
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.4";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.5";
 #endif
 
 constexpr int kRecommendedCaptureBufferMs = 20;
@@ -482,6 +483,7 @@ static std::atomic<uint64_t> g_overlayGeneration{1};
 static std::atomic<uint64_t> g_overlayRenderedFrames{0};
 static std::atomic<double> g_osdInputFps{0.0};
 static std::atomic<double> g_osdPresentFps{0.0};
+static std::atomic<bool> g_captureFrameRateOverdelivery{false};
 static std::atomic<bool> g_osdVisible{false};
 static std::atomic<bool> g_audioOsdVisible{false};
 static std::atomic<int> g_audioOsdHoverTarget{0}; // 0 = none, 1 = left, 2 = right
@@ -873,7 +875,7 @@ static const VideoPresetInfo& VideoPresetDetails(VideoPreset preset) {
 }
 
 static const VideoPresetInfo& CurrentVideoPreset() {
-    return VideoPresetDetails(g_settings.videoPreset);
+    return VideoPresetDetails(llcv::settings::EffectiveDisplayPreset(g_settings));
 }
 
 static const VideoPresetInfo& CurrentCapturePreset() {
@@ -902,7 +904,11 @@ static int RequestedVideoFrameRate() {
 }
 
 static bool RequestsExactCaptureRate() {
-    return g_settings.capture40Fps || g_settings.videoFrameRate == 30;
+    return g_settings.capture40Fps || g_settings.videoFrameRate > 0;
+}
+static bool AllowsUnlistedCaptureRate() {
+    return g_settings.capture40Fps ||
+        (g_settings.allowUnlistedFps && g_settings.videoFrameRate == 30);
 }
 
 static constexpr int kRelativeScaleUnit = 1'000'000;
@@ -1947,6 +1953,23 @@ static void MergeVideoColorMetadata(
     llcv::video::MergeDirectShowColorMetadata(destination, overrideValues);
 }
 
+static llcv::video_color::RangeOverride SelectedSdrRange(VideoPixelFormat format) {
+    // HDR uses its own PQ/BT.2020 input policy. SDR preferences must never
+    // reinterpret P010 or relax the HDR range validation.
+    return format == VideoPixelFormat::P010
+        ? llcv::video_color::RangeOverride::Auto
+        : llcv::settings::EffectiveSdrRange(g_settings, format == VideoPixelFormat::Mjpeg);
+}
+
+static llcv::video_color::Configuration ResolveRawSdrVideoColor(
+    VideoPixelFormat format, int width, int height,
+    const DirectShowColorMetadata& metadata) {
+    if (format != VideoPixelFormat::Nv12 && format != VideoPixelFormat::Yuy2) return {};
+    return llcv::video_color::Resolve(false, width, height, {},
+        {metadata.transferMatrix, metadata.nominalRange},
+        llcv::video_color::MatrixOverride::Auto, SelectedSdrRange(format));
+}
+
 static bool ReadConnectedVideoSampleFormat(
     const AM_MEDIA_TYPE* type, int fps, DirectShowColorMetadata& effectiveColor,
     llcv::video::VideoSampleFormat& sampleFormat) {
@@ -1996,7 +2019,8 @@ static HRESULT ConfigureVideoPin(
         videoPin, wantedWidth, wantedHeight, wantedFps, wantedFormat,
         imageBytes, stride, configuredFps, configuredFormat,
         LogModuleMessage, RequestsExactCaptureRate(),
-        RequestsExactCaptureRate() ? &acceptedCandidateColor : nullptr);
+        RequestsExactCaptureRate() ? &acceptedCandidateColor : nullptr,
+        AllowsUnlistedCaptureRate());
 }
 
 static HRESULT GetActiveVideoPinFormat(
@@ -4296,15 +4320,15 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         const bool rawSdr = configuredFormat == VideoPixelFormat::Nv12 ||
                             configuredFormat == VideoPixelFormat::Yuy2;
         if (rawSdr) {
-            sdrColor = llcv::video_color::Resolve(false, preset.width, preset.height, {},
-                {directShowColorInfo.transferMatrix, directShowColorInfo.nominalRange});
+            sdrColor = ResolveRawSdrVideoColor(configuredFormat, preset.width,
+                preset.height, directShowColorInfo);
         }
         if (compressedVideo) {
             initializationStage = L"initialize Media Foundation compressed decoder";
             hr = compressedDecoder.initialize(
                 preset.width, preset.height, configuredFps, activeVideoType,
                 directShowColorMetadataDetected ? &directShowColorInfo : nullptr,
-                g_settings.mjpegColorOverride, LogModuleMessage);
+                g_settings.mjpegMatrixOverride, LogModuleMessage, SelectedSdrRange(configuredFormat));
             if (FAILED(hr)) {
                 LogHr(L"Media Foundation compressed decoder", hr);
                 break;
@@ -4401,8 +4425,8 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             hr = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
         if (SUCCEEDED(hr) && rawSdr) {
             LogDirectShowColorMetadata(L"raw SDR effective metadata", directShowColorInfo);
-            sdrColor = llcv::video_color::Resolve(false, preset.width, preset.height, {},
-                {directShowColorInfo.transferMatrix, directShowColorInfo.nominalRange});
+            sdrColor = ResolveRawSdrVideoColor(configuredFormat, preset.width,
+                preset.height, directShowColorInfo);
             fwprintf(stderr, L"[video-color] raw SDR: %s / %s (matrix: %s; range: %s)\n",
                 llcv::video_color::MatrixName(sdrColor.matrix),
                 llcv::video_color::RangeName(sdrColor.range),
@@ -4417,7 +4441,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             hr = compressedDecoder.initialize(
                 preset.width, preset.height, configuredFps, &connectedLayout,
                 directShowColorInfo.present ? &directShowColorInfo : nullptr,
-                g_settings.mjpegColorOverride, LogModuleMessage);
+                g_settings.mjpegMatrixOverride, LogModuleMessage, SelectedSdrRange(configuredFormat));
             if (SUCCEEDED(hr)) sdrColor = compressedDecoder.colorConfiguration();
             else LogHr(L"MJPEG connected-type color initialization", hr);
         }
@@ -4591,7 +4615,7 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         // copied by Start on the UI thread, including changes made during setup.
         llcv::recording::recorder.Configure(recordingFormat, selectedAudioFormat, sdrColor,
             true, llcv::recording::Options{},compressedVideo?&recordingType:nullptr,
-            g_settings.mjpegColorOverride);
+            g_settings.mjpegMatrixOverride, SelectedSdrRange(configuredFormat));
         FreeMediaType(recordingType);
 #endif
         hr = resources.events.Initialize(graph);
@@ -5486,11 +5510,35 @@ static bool HasExclusiveVerificationForSelection(
            state->selectedBufferMs >= verifiedBufferMs;
 }
 
+static int SelectedCaptureFrameRate(const SettingsDialogState* state) {
+    if (!state || !state->frameRateCombo) return 0;
+    const LRESULT index = SendMessageW(state->frameRateCombo, CB_GETCURSEL, 0, 0);
+    const LRESULT value = index >= 0
+        ? SendMessageW(state->frameRateCombo, CB_GETITEMDATA, index, 0) : CB_ERR;
+    return value == CB_ERR ? 0 : static_cast<int>(value);
+}
+
+static bool SettingsVideoSelectionAvailable(const SettingsDialogState* state) {
+    if (!state || state->videoModesPending) return false;
+    const auto format = SelectedPixelFormat(state);
+    const int fps = SelectedCaptureFrameRate(state);
+    const bool directRequest =
+        SendMessageW(state->capture40Check, BM_GETCHECK, 0, 0) == BST_CHECKED ||
+        (fps == 30 && SendMessageW(state->unlistedFpsCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    return std::any_of(state->pixelFormats.begin(), state->pixelFormats.end(),
+        [=](const PixelFormatSupport& mode) {
+            const bool matchesFormat = format == VideoPixelFormat::Auto
+                ? IsAutoSelectableVideoFormat(mode.format) : mode.format == format;
+            return matchesFormat && mode.selectedFps > 0 &&
+                (directRequest || fps == 0 || mode.selectedFps == fps);
+        });
+}
+
 static bool SettingsCanStart(const SettingsDialogState* state) {
     if (!state) return false;
     const bool audioOnly = state->audioOnlyCheck &&
         SendMessageW(state->audioOnlyCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    return (audioOnly || (!state->videoModesPending && !state->pixelFormats.empty())) &&
+    return (audioOnly || SettingsVideoSelectionAvailable(state)) &&
         HasExclusiveVerificationForSelection(state);
 }
 
@@ -5836,6 +5884,13 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
         SendMessageW(state->capture40Check, BM_GETCHECK, 0, 0) != BST_CHECKED;
     llcv::settings_ui::SetSettingsText(state->unlistedFpsStatus, showDirectRequest
         ? (IsEnglishUi() ? L"Direct request: 30 fps" : L"직접 요청: 30 fps") : L"");
+    if (supported && !audioOnly && !SettingsVideoSelectionAvailable(state)) {
+        llcv::settings_ui::SetSettingsText(state->unlistedFpsStatus, hasSelectedMode
+            ? (IsEnglishUi() ? L"Selected FPS unavailable: select another rate"
+                             : L"선택한 FPS 미지원 · 다른 FPS 선택")
+            : (IsEnglishUi() ? L"Selected format unavailable: select another format"
+                             : L"선택한 포맷 미지원 · 다른 포맷 선택"));
+    }
 
     std::wstring message;
     if (audioOnly) {
@@ -5903,7 +5958,7 @@ static void PopulateFrameRateCombo(SettingsDialogState* state) {
             reinterpret_cast<LPARAM>(FAILED(state->videoCapabilityQueryStatus)
                 ? (IsEnglishUi() ? L"Query failed" : L"조회 실패") : UI_TEXT(L"지원 프레임 없음")));
         SendMessageW(state->frameRateCombo, CB_SETITEMDATA,
-                     static_cast<WPARAM>(noModeIndex), 0);
+                     static_cast<WPARAM>(noModeIndex), desiredFrameRate);
         SendMessageW(state->frameRateCombo, CB_SETCURSEL,
                      static_cast<WPARAM>(noModeIndex), 0);
         return;
@@ -5913,7 +5968,7 @@ static void PopulateFrameRateCombo(SettingsDialogState* state) {
         reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Auto (recommended)" : L"자동 (권장)"));
     SendMessageW(state->frameRateCombo, CB_SETITEMDATA,
                  static_cast<WPARAM>(autoIndex), 0);
-    LRESULT selectedIndex = autoIndex;
+    LRESULT selectedIndex = desiredFrameRate == 0 ? autoIndex : CB_ERR;
     const VideoPixelFormat selectedFormat = SelectedPixelFormat(state);
     std::vector<int> frameRates;
     for (const auto& support : state->pixelFormats) {
@@ -5922,7 +5977,7 @@ static void PopulateFrameRateCombo(SettingsDialogState* state) {
         } else if (support.format != selectedFormat) {
             continue;
         }
-        frameRates.push_back(support.selectedFps);
+        if (support.selectedFps > 0) frameRates.push_back(support.selectedFps);
     }
     // Explicit request only. Keep detected capabilities truthful and leave
     // automatic selection untouched, even when the driver omits 30 fps.
@@ -5941,6 +5996,15 @@ static void PopulateFrameRateCombo(SettingsDialogState* state) {
         SendMessageW(state->frameRateCombo, CB_SETITEMDATA,
                      static_cast<WPARAM>(index), fps);
         if (fps == desiredFrameRate) selectedIndex = index;
+    }
+    // A refresh or mode change must never turn an explicit FPS into Auto.
+    // Preserve the choice visibly; Start stays disabled until it is available
+    // again or the user deliberately selects another rate.
+    if (selectedIndex == CB_ERR) {
+        wchar_t label[96]{};
+        swprintf_s(label, IsEnglishUi() ? L"%d fps (unavailable)" : L"%d fps (지원 안 됨)", desiredFrameRate);
+        selectedIndex = SendMessageW(state->frameRateCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+        SendMessageW(state->frameRateCombo, CB_SETITEMDATA, selectedIndex, desiredFrameRate);
     }
     SendMessageW(state->frameRateCombo, CB_SETCURSEL,
                  static_cast<WPARAM>(selectedIndex), 0);
@@ -5991,7 +6055,7 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
                 ? (IsEnglishUi() ? L"Query failed" : L"조회 실패") : UI_TEXT(L"지원 포맷 없음")));
         SendMessageW(state->pixelFormatCombo, CB_SETITEMDATA,
                      static_cast<WPARAM>(noModeIndex),
-                     static_cast<LPARAM>(VideoPixelFormat::Auto));
+                     static_cast<LPARAM>(desiredFormat));
         SendMessageW(state->pixelFormatCombo, CB_SETCURSEL,
                      static_cast<WPARAM>(noModeIndex), 0);
         PopulateFrameRateCombo(state);
@@ -6004,7 +6068,7 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
     SendMessageW(state->pixelFormatCombo, CB_SETITEMDATA,
                  static_cast<WPARAM>(autoIndex),
                  static_cast<LPARAM>(VideoPixelFormat::Auto));
-    LRESULT selectedIndex = autoIndex;
+    LRESULT selectedIndex = desiredFormat == VideoPixelFormat::Auto ? autoIndex : CB_ERR;
     for (const auto format : {VideoPixelFormat::Nv12,
                               VideoPixelFormat::Yuy2,
                               VideoPixelFormat::P010,
@@ -6031,6 +6095,12 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
                      static_cast<WPARAM>(index),
                      static_cast<LPARAM>(format));
         if (format == desiredFormat) selectedIndex = index;
+    }
+    if (selectedIndex == CB_ERR) {
+        const std::wstring label = std::wstring(PixelFormatName(desiredFormat)) +
+            (IsEnglishUi() ? L" (unavailable)" : L" (지원 안 됨)");
+        selectedIndex = SendMessageW(state->pixelFormatCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        SendMessageW(state->pixelFormatCombo, CB_SETITEMDATA, selectedIndex, static_cast<LPARAM>(desiredFormat));
     }
     SendMessageW(state->pixelFormatCombo, CB_SETCURSEL,
                  static_cast<WPARAM>(selectedIndex), 0);
@@ -6135,7 +6205,7 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
                      !SettingsCanStart(state))) return;
 
     if (accepted) {
-        const VideoPreset previousVideoPreset = g_settings.videoPreset;
+        const VideoPreset previousVideoPreset = llcv::settings::EffectiveDisplayPreset(g_settings);
         const bool previouslyRelative = g_settings.relativeWindowSize;
         RememberCurrentBufferChoice(state);
         const LRESULT audioIndex = SendMessageW(
@@ -6281,10 +6351,12 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
                 state->mjpegColorCombo, CB_GETITEMDATA,
                 static_cast<WPARAM>(mjpegColorIndex), 0);
             if (value != CB_ERR) {
-                g_settings.mjpegColorOverride =
-                    static_cast<llcv::video_color::Override>(value);
+                g_settings.mjpegMatrixOverride =
+                    static_cast<llcv::video_color::MatrixOverride>(value);
             }
         }
+        g_settings.sdrRangeOverride = state->sdrRangeOverride;
+        g_settings.legacyMjpegRangeOverride = state->legacyMjpegRangeOverride;
         g_settings.saveLog = SendMessageW(
             state->saveLogCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.screenshotClipboard = SendMessageW(
@@ -6348,7 +6420,7 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->relativeSizeCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (g_settings.relativeWindowSize) {
             if (!previouslyRelative ||
-                previousVideoPreset != g_settings.videoPreset ||
+                previousVideoPreset != llcv::settings::EffectiveDisplayPreset(g_settings) ||
                 g_settings.relativeWindowScalePpm <= 0) {
                 // The settings dialog can be moved independently. Relative
                 // viewer sizing must remain based on the monitor where the
@@ -6406,6 +6478,16 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
     }
 
+    const bool frameOptionsWereOpen = state && state->frameOptionsOpen;
+    const bool frameOptionsHandled = llcv::settings_ui::HandleFrameOptionsMessage(state, hwnd, msg, wParam, lParam);
+    if (state && frameOptionsWereOpen != state->frameOptionsOpen) {
+        // The flyout reuses controls over the format/color rows. Hide the old
+        // fields and enable/show the new ones as one redraw transaction so a
+        // help button cannot briefly paint disabled or behind an old field.
+        llcv::settings_ui::SettingsVisualUpdate visualUpdate(hwnd);
+        UpdateAdvancedControlVisibility(state);
+    }
+    if (frameOptionsHandled) return 0;
     LRESULT themedResult = 0;
     if (state && state->theme.HandleMessage(msg, wParam, lParam, themedResult)) {
         return themedResult;
@@ -6927,6 +7009,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
+        if (LOWORD(wParam) == IDC_SETTINGS_SDR_RANGE && HIWORD(wParam) == CBN_SELCHANGE) {
+            llcv::settings_ui::ApplySdrRangeSelection(state);
+            return 0;
+        }
         if (LOWORD(wParam) == IDC_SETTINGS_PRESENTATION_HELP &&
             HIWORD(wParam) == BN_CLICKED) {
             MessageBoxW(
@@ -6939,6 +7025,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             PopulateFrameRateCombo(state);
             UpdateVideoCapabilityStatus(state);
             UpdateAdvancedControlVisibility(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_FRAME_RATE && HIWORD(wParam) == CBN_SELCHANGE) {
+            UpdateVideoCapabilityStatus(state);
+            UpdateAdvancedControlVisibility(state);
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_CAPTURE_40 && HIWORD(wParam) == BN_CLICKED) {
@@ -6973,7 +7065,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             MessageBoxW(
                 hwnd,
                 SettingsHelpText(SettingsHelpTopic::MjpegColor,state).c_str(),
-                UI_TEXT(L"MJPEG 색상 해석"), MB_OK | MB_ICONINFORMATION);
+                IsEnglishUi() ? L"MJPEG color matrix" : L"MJPEG 색 공간", MB_OK | MB_ICONINFORMATION);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_SDR_RANGE_HELP && HIWORD(wParam) == BN_CLICKED) {
+            MessageBoxW(hwnd, SettingsHelpText(SettingsHelpTopic::SdrRange,state).c_str(),
+                IsEnglishUi() ? L"SDR color range" : L"SDR 색 범위", MB_OK | MB_ICONINFORMATION);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_HDR_CHROMA_HELP &&
@@ -8320,13 +8417,21 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
                          ? UI_TEXT(L"자동 · 보정 작동")
                          : UI_TEXT(L"자동 · 관찰 중"))
                   : UI_TEXT(L"끔 · 원본 PCM");
+    // Keep the fixed diagnostics panel's line count: the warning belongs next
+    // to actual input FPS, not on a new row below the audio diagnostics.
+    wchar_t captureRateWarning[64]{};
+    if (!g_settings.audioOnly && RequestsExactCaptureRate() &&
+        g_captureFrameRateOverdelivery.load(std::memory_order_relaxed)) {
+        swprintf_s(captureRateWarning, IsEnglishUi()
+            ? L" · Above requested %d" : L" · 요청 %d 초과", RequestedVideoFrameRate());
+    }
     const wchar_t* osdFormat = IsEnglishUi()
         ? L"Capture diagnostics                              [Tab close]\n"
           L"Path          %s · %s\n"
           L"Input         %d x %d @ %d fps · %s %s %s\n"
           L"Video quality %s\n"
           L"Display       %d x %d · %s · %s · %s\n"
-          L"Actual FPS    Input %.1f · Present %.1f\n"
+          L"Actual FPS    Input %.1f · Present %.1f%s\n"
           L"App latency   %s  (not total HDMI latency)\n"
           L"Frames        Input %llu · Output %llu · Replaced %llu\n"
            L"Audio output  %s\n"
@@ -8345,7 +8450,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
           L"입력          %d x %d @ %d fps · %s %s %s\n"
           L"영상 품질     %s\n"
           L"표시          %d x %d · %s · %s · %s\n"
-          L"실제 FPS      입력 %.1f · Present %.1f\n"
+          L"실제 FPS      입력 %.1f · Present %.1f%s\n"
           L"앱 처리 지연  %s  (총 HDMI 지연 아님)\n"
           L"프레임        입력 %llu · 출력 %llu · 최신화 건너뜀 %llu\n"
            L"오디오 출력   %s\n"
@@ -8370,7 +8475,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         llcv::presentation::PathName(g_settings.presentationMode),
         presentationText,
         g_osdInputFps.load(std::memory_order_acquire),
-        g_osdPresentFps.load(std::memory_order_acquire), latencyText,
+        g_osdPresentFps.load(std::memory_order_acquire), captureRateWarning, latencyText,
         static_cast<unsigned long long>(
             g_videoCapturedFrames.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(
@@ -8406,6 +8511,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
 }
 
 static void UpdateOsdRates() {
+    static llcv::diagnostics::CaptureFrameRateMonitor rateMonitor;
     static uint64_t previousCaptured = 0;
     static uint64_t previousPresented = 0;
     static auto previousTime = std::chrono::steady_clock::now();
@@ -8419,6 +8525,8 @@ static void UpdateOsdRates() {
     const uint64_t presented =
         g_videoPresentedFrames.load(std::memory_order_relaxed);
     if (!OsdTrackingActive()) {
+        rateMonitor.Reset();
+        g_captureFrameRateOverdelivery.store(false, std::memory_order_relaxed);
         trackingStarted = false;
         previousCaptured = captured;
         previousPresented = presented;
@@ -8426,6 +8534,14 @@ static void UpdateOsdRates() {
         g_osdInputFps.store(0.0, std::memory_order_release);
         g_osdPresentFps.store(0.0, std::memory_order_release);
         return;
+    }
+    const auto observed = rateMonitor.Observe(GetTickCount64(), captured,
+        !g_settings.audioOnly && RequestsExactCaptureRate() ? RequestedVideoFrameRate() : 0);
+    g_captureFrameRateOverdelivery.store(observed.overdelivery, std::memory_order_relaxed);
+    if (observed.event != llcv::diagnostics::CaptureFrameRateMonitor::Event::None) {
+        fwprintf(stderr, L"[video-rate] %s requested=%d measured-input=%.2f fps; input callbacks, not external frame generation.\n",
+            observed.overdelivery ? L"sustained-overdelivery" : L"delivery-recovered",
+            RequestedVideoFrameRate(), observed.measuredFps);
     }
     if (!trackingStarted) {
         trackingStarted = true;
@@ -9633,6 +9749,7 @@ static void ApplyVsrLiveTestSettings(AppSettings& settings) {
     // the fixed 1080p120 -> 1440p A/B measurement conditions.
     settings.videoPreset = VideoPreset::R2560x1440;
     settings.capturePreset = VideoPreset::R1920x1080;
+    settings.displayMatchesCapture = false;
     settings.vsrEnabled = true;
     settings.videoFrameRate = 120;
     settings.capture40Fps = false;
@@ -10160,10 +10277,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                         ? L"The driver did not apply the requested capture frame rate. Capture was stopped instead of using a different rate."
                         : L"드라이버가 요청한 캡처 FPS를 적용하지 않았습니다. 다른 FPS로 대신 시작하지 않고 중단했습니다.";
                 }
-                if (!g_settings.capture40Fps && g_settings.videoFrameRate == 30)
+                if (!g_settings.capture40Fps && RequestsExactCaptureRate()) {
+                    captureMessage += (IsEnglishUi() ? L"\n\nRequested capture rate: " : L"\n\n요청한 캡처 FPS: ") +
+                        std::to_wstring(RequestedVideoFrameRate()) + L" fps.";
                     captureMessage += IsEnglishUi()
-                        ? L"\n\n30 fps was requested directly. The device may reject this resolution/pixel-format combination or return a different rate. Select Auto or a detected frame rate to retry. Other startup failures are identified in the diagnostic log."
-                        : L"\n\n30fps를 직접 요청했습니다. 장치가 이 해상도·픽셀 포맷 조합을 거부하거나 다른 FPS를 반환할 수 있습니다. 프레임을 자동 또는 자동 인식된 FPS로 바꿔 다시 시도하세요. 다른 시작 오류는 진단 로그에서 확인할 수 있습니다.";
+                        ? L" A different rate is not used automatically. Select Auto or another supported rate to retry. See the log for the failed startup stage."
+                        : L" 다른 FPS로 자동 변경하지 않습니다. 자동 또는 지원되는 다른 FPS로 다시 시도하세요. 실패 단계는 진단 로그에서 확인할 수 있습니다.";
+                }
                 if (g_settings.capture40Fps) captureMessage += IsEnglishUi()
                     ? L"\n\n40 fps capture is enabled. This device/format may reject 40 fps or report a different rate. Uncheck '40 fps capture' to retry with the normal frame-rate selection. See the diagnostic log to distinguish a format rejection from other startup errors."
                     : L"\n\n40fps 캡처가 켜져 있습니다. 이 장치/형식이 40fps를 거부하거나 다른 FPS를 보고할 수 있습니다. '40fps 캡처'를 해제하면 기존 프레임 선택으로 다시 시도할 수 있습니다. 형식 거부인지 다른 시작 오류인지는 진단 로그에서 확인하세요.";

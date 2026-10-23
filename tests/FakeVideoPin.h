@@ -27,7 +27,13 @@ public:
     int rejectedRate = 0;
     DWORD rejectedControlFlags = 0;
     int formatQueries = 0;
+    int streamCapsQueries = 0;
     bool countFails = false;
+    bool negativeCapabilityCount = false;
+    bool allocateOnQueryFailure = false;
+    // Only inspected on an unbalanced reference count by the fault test, so
+    // it can clean up an intentionally reproduced pre-fix allocation leak.
+    AM_MEDIA_TYPE* lastFailedMedia = nullptr;
     bool nullActiveFormat = false;
     bool echoAcceptedFormat = false;
     bool stripReadbackColor = false;
@@ -50,15 +56,16 @@ public:
     STDMETHODIMP_(ULONG) Release() override { return --references; }
     STDMETHODIMP GetNumberOfCapabilities(int* count, int* bytes) override {
         if (countFails) return E_FAIL;
-        *count = static_cast<int>(modes.size());
+        *count = negativeCapabilityCount ? -1 : static_cast<int>(modes.size());
         *bytes = sizeof(VIDEO_STREAM_CONFIG_CAPS);
         return S_OK;
     }
     STDMETHODIMP GetStreamCaps(int index, AM_MEDIA_TYPE** output, BYTE* buffer) override {
+        ++streamCapsQueries;
         *output = nullptr;
         if (index < 0 || index >= static_cast<int>(modes.size())) return E_INVALIDARG;
         const auto& mode = modes[index];
-        if (mode.queryFails) return E_FAIL;
+        if (mode.queryFails && !allocateOnQueryFailure) return E_FAIL;
         auto* media = static_cast<AM_MEDIA_TYPE*>(CoTaskMemAlloc(sizeof(AM_MEDIA_TYPE)));
         auto* info = static_cast<VIDEOINFOHEADER2*>(CoTaskMemAlloc(sizeof(VIDEOINFOHEADER2)));
         if (!media || !info) {
@@ -90,6 +97,15 @@ public:
             media->cbFormat = 0;
         }
         *output = media;
+        if (mode.queryFails) {
+            // Failure HRESULTs do not guarantee a null out-parameter. Attach
+            // a counted COM reference to make release of the media type
+            // observable without changing ordinary fake-driver behavior.
+            media->pUnk = static_cast<IPin*>(this);
+            AddRef();
+            lastFailedMedia = media;
+            return E_FAIL;
+        }
         return S_OK;
     }
     STDMETHODIMP SetFormat(AM_MEDIA_TYPE* media) override {

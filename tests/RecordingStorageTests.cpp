@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <vector>
 using namespace llcv::recording;
 using Microsoft::WRL::ComPtr;
@@ -127,8 +128,124 @@ void Async(){
     Hr(stream->EndRead(readCb->result.Get(),&count),"end buffered read");Check(count==2&&memcmp(read,bytes,2)==0,"asynchronous read bytes");
     Hr(stream->Close(),"async close");cb.Reset();readCb.Reset();
 }
+#ifdef LLCV_RECORDING_STORAGE_SPACE_TEST
+struct SpaceProbe {
+    inline static SpaceProbe* current=nullptr;
+    HANDLE entered=CreateEventW(nullptr,TRUE,FALSE,nullptr),release=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    std::atomic<unsigned> calls{0};
+    bool known=true,block=false;
+    uint64_t freeBytes=64*1024*1024;
+    static BOOL Query(const wchar_t* folder,ULARGE_INTEGER* free){
+        auto& self=*current;
+        Check(std::wcscmp(folder,L"recording-test-folder")==0,"space query owns the requested folder");
+        ++self.calls;
+        if(self.block){SetEvent(self.entered);Check(WaitForSingleObject(self.release,5000)==WAIT_OBJECT_0,"release delayed space query");}
+        free->QuadPart=self.freeBytes;return self.known?TRUE:FALSE;
+    }
+    SpaceProbe(){current=this;SetRecordingSpaceQueryForTest(&Query);}
+    ~SpaceProbe(){SetRecordingSpaceQueryForTest(nullptr);current=nullptr;CloseHandle(entered);CloseHandle(release);}
+};
+void SpaceSnapshots(){
+    SpaceProbe probe;
+    ComPtr<File> file;file.Attach(new File());auto stream=Buffered(file.Get());
+    Check(!RecordingStorageSpace(stream.Get()).completed,"initial space cache does not replace startup free space");
+    Check(RequestRecordingSpace(nullptr,L"recording-test-folder")==E_POINTER,"space null stream rejected");
+    Check(RequestRecordingSpace(stream.Get(),nullptr)==E_INVALIDARG &&
+        RequestRecordingSpace(stream.Get(),L"")==E_INVALIDARG,"space empty folder rejected");
+    Check(RequestRecordingSpace(file.Get(),L"recording-test-folder")==E_NOINTERFACE,"raw stream never falls back to synchronous space query");
+    Check(!RecordingStorageSpace(nullptr).completed && !RecordingStorageSpace(file.Get()).completed,
+        "unsupported space snapshots remain unknown");
+    Check(probe.calls==0,"invalid or unsupported requests never query the filesystem");
+    Hr(RequestRecordingSpace(stream.Get(),L"recording-test-folder"),"request initial space");
+    Hr(stream->Flush(),"space cache completion barrier");
+    auto space=RecordingStorageSpace(stream.Get());
+    Check(space.completed && space.known && space.freeBytes==probe.freeBytes,"successful query publishes exact free bytes");
+    probe.known=false;probe.freeBytes=123;
+    Hr(RequestRecordingSpace(stream.Get(),L"recording-test-folder"),"request unavailable space");
+    Hr(stream->Flush(),"unavailable space completion barrier");space=RecordingStorageSpace(stream.Get());
+    Check(space.completed && !space.known && space.freeBytes==0,"failed query publishes unknown, not stale or false-zero capacity");
+    Check(SUCCEEDED(RecordingStorageResult(stream.Get())),"query failure never poisons recording writes");
+    Write(stream.Get(),{1,2});
+    probe.known=true;probe.freeBytes=0;
+    Hr(RequestRecordingSpace(stream.Get(),L"recording-test-folder"),"request exhausted space");
+    Hr(stream->Flush(),"exhausted space completion barrier");space=RecordingStorageSpace(stream.Get());
+    Check(space.completed && space.known && space.freeBytes==0,"zero capacity remains distinguishable from query failure");
+    Hr(stream->SetCurrentPosition(0),"read after failed informational query");BYTE read[2]{};ULONG count=0;
+    Hr(stream->Read(read,2,&count),"query result leaves writes intact");
+    Check(count==2 && read[0]==1 && read[1]==2 && probe.calls==3,"space refreshes preserve storage byte order");
+    probe.block=true;probe.freeBytes=987654321;
+    Hr(RequestRecordingSpace(stream.Get(),L"recording-test-folder"),"refresh an existing cache asynchronously");
+    Check(WaitForSingleObject(probe.entered,2000)==WAIT_OBJECT_0,"existing cache refresh held");
+    space=RecordingStorageSpace(stream.Get());
+    Check(space.completed && space.known && space.freeBytes==0,"in-flight refresh retains the last completed result");
+    SetEvent(probe.release);Hr(stream->Flush(),"replace existing cache after query completes");
+    Check(RecordingStorageSpace(stream.Get()).freeBytes==probe.freeBytes && probe.calls==4,
+        "completed refresh replaces the old cache atomically");
+    Hr(stream->Close(),"space cache close");
+}
+void SpaceBlockingAndBounds(){
+    SpaceProbe probe;probe.block=true;
+    ComPtr<File> file;file.Attach(new File());auto stream=Buffered(file.Get(),{8,2});
+    Hr(RequestRecordingSpace(stream.Get(),L"recording-test-folder"),"request blocked space query");
+    Check(WaitForSingleObject(probe.entered,2000)==WAIT_OBJECT_0,"space query blocks only the storage worker");
+    const auto started=GetTickCount64();
+    for(unsigned i=0;i<100;++i){
+        Hr(RequestRecordingSpace(stream.Get(),L"recording-test-folder"),"pending query requests coalesce");
+        Check(!RecordingStorageSpace(stream.Get()).completed,"pending query reads return immediately without inventing results");
+    }
+    Write(stream.Get(),{3,4});
+    Check(GetTickCount64()-started<250 && probe.calls==1 && file->writes==0,
+        "space request, cache reads and writes do not wait for the delayed query");
+    const BYTE extra=5;ULONG count=99;
+    Check(stream->Write(&extra,1,&count)==HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW) && count==0,
+        "space query consumes the existing bounded operation budget");
+    SetEvent(probe.release);Hr(stream->Flush(),"delayed query and queued write drain");
+    Check(file->writes==1 && probe.calls==1 && RecordingStorageSpace(stream.Get()).known,
+        "coalescing issues one query without losing queued writes");
+    Hr(stream->SetCurrentPosition(0),"read query-delayed bytes");BYTE read[2]{};
+    Hr(stream->Read(read,2,&count),"query-delayed write order");
+    Check(count==2 && read[0]==3 && read[1]==4,"query preserves delayed byte contents");
+    // A refused request must clear its pending flag so a later refresh retries.
+    file->blockFlush=true;ResetEvent(file->entered);ResetEvent(file->release);
+    Hr(RequestRecordingFlush(stream.Get()),"fill operation budget with blocked flush");
+    Check(WaitForSingleObject(file->entered,2000)==WAIT_OBJECT_0,"flush owns one operation");
+    Write(stream.Get(),{7});
+    Check(RequestRecordingSpace(stream.Get(),L"recording-test-folder")==HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW),
+        "space query cannot bypass a full operation budget");
+    SetEvent(file->release);Hr(stream->Flush(),"release operation budget");
+    probe.block=false;
+    Hr(RequestRecordingSpace(stream.Get(),L"recording-test-folder"),"space query retries after capacity returns");
+    Hr(stream->Flush(),"retried query barrier");
+    Check(probe.calls==2,"rejected request does not leave coalescing stuck");
+    Hr(stream->Close(),"space bounds close");
+}
+void SpaceSiblings(){
+    SpaceProbe probe;
+    ComPtr<File> first,second;first.Attach(new File());second.Attach(new File());
+    auto a=Buffered(first.Get());ComPtr<IMFByteStream> b;
+    Hr(BufferRecordingStorage(second.Get(),a.Get(),&b),"space sibling shares storage worker");
+    Write(a.Get(),{1});Hr(RetireRecordingStorage(a.Get()),"retire space original");Hr(a->Close(),"original physically closed");
+    Check(first->closes==1,"original file closed before cached-space request");
+    Write(b.Get(),{2});
+    Hr(RequestRecordingSpace(a.Get(),L"recording-test-folder"),"closed original still schedules on shared queue");
+    Hr(b->Flush(),"sibling space completion barrier");
+    const auto old=RecordingStorageSpace(a.Get()),next=RecordingStorageSpace(b.Get());
+    Check(old.completed && old.known && next.completed && next.known && old.freeBytes==next.freeBytes && probe.calls==1,
+        "retired original and next segment share the completed space cache");
+    probe.freeBytes=123456789;
+    Hr(RequestRecordingSpace(b.Get(),L"recording-test-folder"),"refresh through next sibling");
+    Hr(b->Flush(),"sibling refresh barrier");
+    Check(RecordingStorageSpace(a.Get()).freeBytes==probe.freeBytes && probe.calls==2,
+        "new segment refresh remains visible through original recorder handle");
+    Check(first->closes==1 && second->writes==1,"space requests never reopen or mutate retired files");
+    Hr(b->Close(),"space sibling close");
+}
+#endif
 int main(){
     Hr(CoInitializeEx(nullptr,COINIT_MULTITHREADED),"COM");Hr(MFStartup(MF_VERSION),"MF");
     Blocking(false);Blocking(true);Siblings();OperationBound();Errors();Async();
+#ifdef LLCV_RECORDING_STORAGE_SPACE_TEST
+    SpaceSnapshots();SpaceBlockingAndBounds();SpaceSiblings();
+#endif
     MFShutdown();CoUninitialize();puts("Recording storage blocking, bounds, ordering, faults and async contract passed.");
 }

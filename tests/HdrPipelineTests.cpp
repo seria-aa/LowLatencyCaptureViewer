@@ -269,14 +269,17 @@ static int TestRawSdr() {
         for (auto mode : {PresentationMode::AllowTearing, PresentationMode::VSync,
                           PresentationMode::Compatibility})
         for (auto format : {VideoPixelFormat::Nv12, VideoPixelFormat::Yuy2})
-        for (unsigned matrix : {1u, 2u}) for (unsigned range : {1u, 2u}) {
+        for (unsigned matrix : {1u, 2u}) for (unsigned reportedRange : {1u, 2u})
+        for (auto rangeOverride : {llcv::video_color::RangeOverride::Auto,
+                                  llcv::video_color::RangeOverride::Limited,
+                                  llcv::video_color::RangeOverride::Full}) {
             g_settings.presentationMode = mode;
             // Exercise the device metadata parser and connected-type override,
             // rather than handing the renderer a pre-decoded color tuple.
             VIDEOINFOHEADER2 info{};
             info.dwControlFlags = AMCONTROL_COLORINFO_PRESENT |
                 (matrix << DXVA_VideoTransferMatrixShift) |
-                (range << DXVA_NominalRangeShift);
+                (reportedRange << DXVA_NominalRangeShift);
             AM_MEDIA_TYPE mt{};
             mt.formattype = FORMAT_VideoInfo2;
             mt.pbFormat = reinterpret_cast<BYTE*>(&info); mt.cbFormat = sizeof(info);
@@ -284,10 +287,19 @@ static int TestRawSdr() {
             Require(ExtractVideoColorMetadata(&mt, connected), "raw connected metadata parsed");
             DirectShowColorMetadata selected{};
             selected.present = true; selected.transferMatrix = 3 - matrix;
-            selected.nominalRange = 3 - range;
+            selected.nominalRange = 3 - reportedRange;
             MergeVideoColorMetadata(selected, connected);
-            const auto color = llcv::video_color::Resolve(false, width, height, {},
-                {selected.transferMatrix, selected.nominalRange});
+            g_settings.sdrRangeOverride = rangeOverride;
+            g_settings.mjpegMatrixOverride = matrix == 1
+                ? llcv::video_color::MatrixOverride::Bt601 : llcv::video_color::MatrixOverride::Bt709;
+            const auto color = ResolveRawSdrVideoColor(format, width, height, selected);
+            const unsigned range = rangeOverride == llcv::video_color::RangeOverride::Auto
+                ? reportedRange : rangeOverride == llcv::video_color::RangeOverride::Full ? 1u : 2u;
+            Require(color.rangeSource == (rangeOverride == llcv::video_color::RangeOverride::Auto
+                    ? llcv::video_color::Source::DirectShow : llcv::video_color::Source::UserOverride),
+                "Auto preserves metadata provenance; explicit SDR range overrides metadata");
+            Require(color.matrixSource == llcv::video_color::Source::DirectShow,
+                "SDR range override does not replace the device matrix");
             Check(r.initialize(hwnd, width, height, 60, format, false, color), "4K SDR initialize");
             Require(r.outputWidth == width && r.outputHeight == height && !r.sharpScalingActive,
                 "4K 1:1 output has no sharp enhancement even when Sharp selected");
@@ -297,12 +309,21 @@ static int TestRawSdr() {
             D3D11_VIDEO_PROCESSOR_COLOR_SPACE outputColor{};
             r.videoContext->VideoProcessorGetOutputColorSpace(r.processor, &outputColor);
             Require(outputColor.RGB_Range == 0, "SDR output RGB is full range");
+            D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputColor{};
+            r.videoContext->VideoProcessorGetStreamColorSpace(r.processor, 0, &inputColor);
+            Require(inputColor.Nominal_Range == static_cast<unsigned>(range == 1
+                    ? D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255
+                    : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235),
+                "chosen SDR range reaches the actual GPU video processor");
             const UINT pitch = width * (format == VideoPixelFormat::Nv12 ? 1 : 2) + 64;
             const UINT rows = format == VideoPixelFormat::Nv12 ? height * 3 / 2 : height;
             std::vector<BYTE> pixels(static_cast<size_t>(pitch) * rows, 0xee);
             auto fill = [&](bool checker) {
                 for (UINT y = 0; y < height; ++y) for (UINT x = 0; x < width; ++x) {
-                    const BYTE luma = checker ? ((x + y) % 2 ? 192 : 64) : 100;
+                    constexpr BYTE endpoints[]{0, 16, 235, 255};
+                    const bool endpoint = checker && y >= 100 && y < 104 && x >= 120 && x < 136;
+                    const BYTE luma = endpoint ? endpoints[(x - 120) / 4]
+                        : checker ? ((x + y) % 2 ? 192 : 64) : 100;
                     if (format == VideoPixelFormat::Nv12) pixels[y * pitch + x] = luma;
                     else {
                         pixels[y * pitch + x * 2] = luma;
@@ -323,6 +344,26 @@ static int TestRawSdr() {
                 const double luma = (x + y) % 2 ? 192 : 64;
                 const double expected = range == 1 ? luma : (luma - 16) * 255 / 219;
                 for (unsigned c : Read(r, x, y)) Near(c, expected, 3, "4K single-pixel luma preserved");
+            }
+            const llcv::screenshot::Description shot{width, height,
+                format == VideoPixelFormat::Nv12 ? llcv::screenshot::Format::Nv12
+                    : llcv::screenshot::Format::Yuy2, color};
+            std::vector<BYTE> packed(llcv::screenshot::PackedSize(shot));
+            std::vector<BYTE> screenshotRow(width * 4);
+            Require(llcv::screenshot::CopyFrame(shot, pixels.data(), pixels.size(), pitch, packed) &&
+                    llcv::screenshot::ConvertRows(shot, packed, 102, 1, screenshotRow),
+                "screenshot converts SDR endpoint samples");
+            for (unsigned i = 0; i < 4; ++i) {
+                constexpr double endpoints[]{0, 16, 235, 255};
+                const double expected = std::clamp(range == 1 ? endpoints[i]
+                    : (endpoints[i] - 16) * 255 / 219, 0.0, 255.0);
+                const unsigned x = 122 + 4 * i;
+                const auto endpoint = Read(r, x, 102);
+                for (size_t c = 0; c < 3; ++c) {
+                    Near(endpoint[c], expected, 3, "SDR black/white clipping follows chosen range");
+                    Near(screenshotRow[x*4+2-c], endpoint[c], 3,
+                        "screenshot and GPU black/white endpoints agree");
+                }
             }
             // Independent YCbCr reference; compare flat color away from boundaries.
             fill(false);
@@ -351,19 +392,16 @@ static int TestRawSdr() {
                 Near(actual[c], std::clamp(expected[c], 0.0, 255.0), 3, "SDR matrix/range RGB reference");
             // Screenshot conversion must agree with the real renderer's
             // current source interpretation, not a hard-coded 709/limited path.
-            const llcv::screenshot::Description shot{width, height,
-                format == VideoPixelFormat::Nv12 ? llcv::screenshot::Format::Nv12
-                    : llcv::screenshot::Format::Yuy2, color};
-            std::vector<BYTE> packed(llcv::screenshot::PackedSize(shot));
-            std::vector<BYTE> screenshotRow(width * 4);
             Require(llcv::screenshot::CopyFrame(shot, pixels.data(), pixels.size(), pitch, packed),
                 "screenshot copies padded live-renderer layout");
             Require(llcv::screenshot::ConvertRows(shot, packed, 100, 1, screenshotRow),
                 "screenshot converts SDR row");
             for (size_t c = 0; c < 3; ++c)
                 Near(screenshotRow[100*4+2-c], actual[c], 3, "screenshot and GPU matrix/range agree");
-            std::printf("4K SDR mode=%u format=%u matrix=%u range=%u: pixel and color reference passed\n",
-                static_cast<unsigned>(mode), static_cast<unsigned>(format), matrix, range);
+            std::printf("4K SDR mode=%u format=%u matrix=%u reported=%u override=%u applied=%u: "
+                "pixel, color and screenshot reference passed\n",
+                static_cast<unsigned>(mode), static_cast<unsigned>(format), matrix, reportedRange,
+                static_cast<unsigned>(rangeOverride), range);
             RequireCleanGpu(r);
         }
         // A real scale still honors Sharp if the GPU exposes that filter.
@@ -1259,8 +1297,44 @@ int main(int argc, char** argv) {
         encodePatch({Pq(203), Pq(203), Pq(203)}); blit();
         const auto automaticWhite = Read(r, 400, 250);
         for (unsigned c : automaticWhite) Near(c, Pq(203)*1023, 2, "automatic HDR keeps absolute PQ white");
+        // Even when SDR correction and legacy MJPEG preferences are present,
+        // the production handoff must not apply them to P010 playback/export.
+        const auto savedSettings = g_settings;
+        encodePatch({Pq(203), Pq(40), Pq(10)}); blit();
+        const auto hdrColorBeforeSdrChoices = Read(r, 400, 250);
+        std::vector<BYTE> hdrScreenshot;
+        for (auto rangeOverride : {llcv::video_color::RangeOverride::Auto,
+                                  llcv::video_color::RangeOverride::Limited,
+                                  llcv::video_color::RangeOverride::Full}) {
+            g_settings.sdrRangeOverride = rangeOverride;
+            g_settings.legacyMjpegRangeOverride = llcv::video_color::RangeOverride::Full;
+            g_settings.mjpegMatrixOverride = llcv::video_color::MatrixOverride::Bt601;
+            Require(SelectedSdrRange(VideoPixelFormat::P010) == llcv::video_color::RangeOverride::Auto,
+                "P010 rejects current and legacy SDR range overrides at the production boundary");
+            const auto ignoredSdr = ResolveRawSdrVideoColor(VideoPixelFormat::P010, 64, 64, {});
+            Require(ignoredSdr == llcv::video_color::Configuration{},
+                "P010 has no SDR matrix/range interpretation");
+            Check(r.initialize(hwnd, 64, 64, 30, VideoPixelFormat::P010, true,
+                ignoredSdr, automaticHdr.colorSpace), "HDR initialize with SDR preference present");
+            blit();
+            Require(Read(r, 400, 250) == hdrColorBeforeSdrChoices,
+                "SDR range choices leave actual HDR GPU pixels identical");
+            // Poison the unused SDR description as an independent export guard.
+            const auto poison = llcv::video_color::Resolve(true, 64, 64, {}, {},
+                llcv::video_color::MatrixOverride::Bt601, rangeOverride);
+            const llcv::screenshot::Description shot{64, 64, llcv::screenshot::Format::P010, poison};
+            std::vector<BYTE> hdrScreenshotPacked(llcv::screenshot::PackedSize(shot)), bgra(64 * 4);
+            Require(llcv::screenshot::CopyFrame(shot, reinterpret_cast<const BYTE*>(p.data()),
+                    p.size() * sizeof(unsigned short), 128, hdrScreenshotPacked) &&
+                    llcv::screenshot::ConvertRows(shot, hdrScreenshotPacked, 32, 1, bgra),
+                "HDR screenshot conversion accepts P010 independently of SDR preferences");
+            if (hdrScreenshot.empty()) hdrScreenshot = bgra;
+            else Require(bgra == hdrScreenshot, "SDR range override leaves HDR screenshot pixels identical");
+            RequireCleanGpu(r);
+        }
+        g_settings = savedSettings;
         Check(r.initialize(hwnd, 64, 64, 30, VideoPixelFormat::P010, true), "forced HDR comparison");
-        blit();
+        encodePatch({Pq(203), Pq(203), Pq(203)}); blit();
         Require(Read(r, 400, 250) == automaticWhite, "automatic and forced HDR produce identical GPU pixels");
         RequireCleanGpu(r);
         Check(r.initialize(hwnd, 64, 64, 30, VideoPixelFormat::P010, true, {},

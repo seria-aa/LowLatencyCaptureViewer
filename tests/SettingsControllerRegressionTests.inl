@@ -1,4 +1,355 @@
-// Included by VsrExperimentTests: hidden HWNDs and injected workers only.
+// Included by VsrExperimentTests: hidden/offscreen HWNDs and injected workers only.
+struct FrameOptionsRedrawProbe {
+    bool observing = false;
+    unsigned transitions = 0;
+    unsigned unbatchedTransitions = 0;
+    unsigned intermediatePaints = 0;
+};
+static LRESULT CALLBACK ObserveFrameOptionsRedraw(HWND hwnd, UINT message, WPARAM wParam,
+                                                 LPARAM lParam, UINT_PTR, DWORD_PTR context) {
+    auto& probe = *reinterpret_cast<FrameOptionsRedrawProbe*>(context);
+    if (probe.observing) {
+        if (message == WM_SHOWWINDOW || message == WM_ENABLE) {
+            ++probe.transitions;
+            if (IsWindowVisible(GetParent(hwnd))) ++probe.unbatchedTransitions;
+        }
+        if (message == WM_PAINT) ++probe.intermediatePaints;
+    }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+static void TestFrameOptionsRedraw() {
+    // Unlike hidden fixtures and the separately batched preview, exercise a
+    // visible (offscreen, non-activating) production controller. A hidden owner
+    // cannot reveal intermediate native help-button painting.
+    WNDCLASSW wc{};
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpfnWndProc = SettingsControllerTestProc;
+    wc.lpszClassName = L"LLCV_FRAME_OPTIONS_REDRAW_TEST";
+    Require(RegisterClassW(&wc) != 0, "register flyout redraw fixture");
+    SettingsDialogState state;
+    state.activeTab = SettingsTab::VideoWindow;
+    HWND hwnd = CreateWindowExW(WS_EX_NOACTIVATE, wc.lpszClassName, L"Offscreen flyout fixture",
+        WS_POPUP | WS_CLIPCHILDREN, -32000, -32000, 1000, 650, nullptr, nullptr, wc.hInstance, &state);
+    Require(hwnd != nullptr, "create flyout redraw fixture");
+    const auto child = [&](const wchar_t* kind, DWORD style, int id) {
+        return CreateWindowW(kind, L"?", WS_CHILD | style, 516, 420, 24, 24,
+            hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), wc.hInstance, nullptr);
+    };
+    state.frameOptionsButton = child(L"BUTTON", BS_PUSHBUTTON, IDC_SETTINGS_FRAME_OPTIONS);
+    state.frameOptionsClose = child(L"BUTTON", BS_PUSHBUTTON, IDC_SETTINGS_FRAME_OPTIONS_CLOSE);
+    state.capture40Help = child(L"BUTTON", BS_PUSHBUTTON, IDC_SETTINGS_CAPTURE_40_HELP);
+    state.sdrRangeHelp = child(L"BUTTON", BS_PUSHBUTTON, IDC_SETTINGS_SDR_RANGE_HELP);
+    state.mjpegColorHelp = child(L"BUTTON", BS_PUSHBUTTON, IDC_SETTINGS_MJPEG_COLOR_HELP);
+    state.forceHdr10Help = child(L"BUTTON", BS_PUSHBUTTON, IDC_SETTINGS_FORCE_HDR10_HELP);
+    state.pixelFormatCombo = child(L"COMBOBOX", CBS_DROPDOWNLIST, IDC_SETTINGS_PIXEL_FORMAT);
+    const VideoPixelFormat formats[] = {VideoPixelFormat::Nv12, VideoPixelFormat::Mjpeg, VideoPixelFormat::P010};
+    for (const auto format : formats) {
+        const auto row = SendMessageW(state.pixelFormatCombo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(PixelFormatName(format)));
+        SendMessageW(state.pixelFormatCombo, CB_SETITEMDATA, row, static_cast<LPARAM>(format));
+    }
+    Require(state.theme.Attach(hwnd, &state), "attach real theme for flyout redraw regression");
+    FrameOptionsRedrawProbe probe;
+    const HWND watched[] = {state.capture40Help, state.sdrRangeHelp, state.mjpegColorHelp, state.forceHdr10Help};
+    for (HWND control : watched)
+        Require(SetWindowSubclass(control, ObserveFrameOptionsRedraw, 74,
+            reinterpret_cast<DWORD_PTR>(&probe)), "watch flyout help-button transitions");
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    for (int format = 0; format < 3; ++format) {
+        SendMessageW(state.pixelFormatCombo, CB_SETCURSEL, format, 0);
+        UpdateAdvancedControlVisibility(&state);
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        for (int cycle = 0; cycle < 20; ++cycle) {
+            const auto before = probe.transitions;
+            probe.observing = true;
+            SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDC_SETTINGS_FRAME_OPTIONS, BN_CLICKED), 0);
+            probe.observing = false;
+            Require(state.frameOptionsOpen && IsWindowVisible(hwnd) && IsWindowVisible(state.capture40Help) &&
+                    IsWindowEnabled(state.capture40Help), "flyout opens with a fully enabled visible help button");
+            Require(probe.transitions > before && !probe.unbatchedTransitions && !probe.intermediatePaints,
+                "production flyout batches every help-button show/hide/enable without intermediate paints");
+            Require(GetUpdateRect(state.capture40Help, nullptr, FALSE), "flyout help receives its final repaint");
+            UpdateWindow(state.capture40Help);
+            Require(!GetUpdateRect(state.capture40Help, nullptr, FALSE), "final help paint is consumed normally");
+            probe.observing = true;
+            SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDC_SETTINGS_FRAME_OPTIONS_CLOSE, BN_CLICKED), 0);
+            probe.observing = false;
+            Require(!state.frameOptionsOpen && IsWindowVisible(hwnd) && !IsWindowVisible(state.capture40Help) &&
+                    !probe.unbatchedTransitions && !probe.intermediatePaints,
+                "flyout close also batches restored format controls without hiding the owner");
+            Require(SendMessageW(state.pixelFormatCombo, CB_GETCURSEL, 0, 0) == format,
+                "repeated flyout transitions preserve the pending pixel format");
+        }
+    }
+    ShowWindow(hwnd, SW_HIDE);
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDC_SETTINGS_FRAME_OPTIONS, BN_CLICKED), 0);
+        Require(!IsWindowVisible(hwnd), "flyout transitions never reveal a hidden owner");
+    }
+    Require(!state.videoModeCache && !state.captureAudioProbeCache && !state.sharedProbeCache,
+        "flyout redraw never starts hardware or audio probing");
+    for (HWND control : watched) RemoveWindowSubclass(control, ObserveFrameOptionsRedraw, 74);
+    DestroyWindow(hwnd);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    std::puts("Flyout redraw: 60 production open/close cycles across SDR, MJPEG and HDR passed.");
+}
+static void TestExplicitCaptureRateSelection() {
+    const auto saved = g_settings;
+    const bool savedSuppress = g_suppressSettingsSave;
+    g_settings = {};
+    g_settings.videoFrameRate = 60;
+    g_suppressSettingsSave = true;
+    WNDCLASSW wc{};
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpfnWndProc = SettingsControllerTestProc;
+    wc.lpszClassName = L"LLCV_EXPLICIT_CAPTURE_RATE_TEST";
+    Require(RegisterClassW(&wc) != 0, "register explicit FPS fixture");
+    SettingsDialogState state;
+    state.activeTab = SettingsTab::VideoWindow;
+    HWND hwnd = CreateWindowW(wc.lpszClassName, L"Hidden FPS fixture", WS_POPUP,
+        -32000, -32000, 1000, 650, nullptr, nullptr, wc.hInstance, &state);
+    const auto child = [&](const wchar_t* kind, DWORD style, int id) {
+        return CreateWindowW(kind, L"", WS_CHILD | style, 0, 0, 420, 30,
+            hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), wc.hInstance, nullptr);
+    };
+    state.tabControl = child(L"LISTBOX", LBS_NOTIFY, IDC_SETTINGS_TAB);
+    for (int i = 0; i < llcv::settings_ui::kSettingsNavigationCount; ++i)
+        SendMessageW(state.tabControl, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Page"));
+    state.sectionNavigation = child(L"COMBOBOX", CBS_DROPDOWNLIST, IDC_SETTINGS_SECTION);
+    state.pixelFormatCombo = child(L"COMBOBOX", CBS_DROPDOWNLIST, IDC_SETTINGS_PIXEL_FORMAT);
+    state.frameRateCombo = child(L"COMBOBOX", CBS_DROPDOWNLIST, IDC_SETTINGS_FRAME_RATE);
+    state.startButton = child(L"BUTTON", BS_PUSHBUTTON, IDC_SETTINGS_START);
+    state.audioOnlyCheck = child(L"BUTTON", BS_AUTOCHECKBOX, IDC_SETTINGS_AUDIO_ONLY);
+    state.capture40Check = child(L"BUTTON", BS_AUTOCHECKBOX, IDC_SETTINGS_CAPTURE_40);
+    state.unlistedFpsCheck = child(L"BUTTON", BS_AUTOCHECKBOX, IDC_SETTINGS_UNLISTED_FPS);
+    state.frameOptionsButton = child(L"BUTTON", BS_PUSHBUTTON, IDC_SETTINGS_FRAME_OPTIONS);
+    state.frameOptionsClose = child(L"BUTTON", BS_PUSHBUTTON, IDC_SETTINGS_FRAME_OPTIONS_CLOSE);
+    state.videoCapabilityStatus = child(L"STATIC", SS_LEFT, 0);
+    state.unlistedFpsStatus = child(L"STATIC", SS_LEFT, 0);
+    for (auto format : {VideoPixelFormat::Auto, VideoPixelFormat::Nv12, VideoPixelFormat::Yuy2,
+                        VideoPixelFormat::P010, VideoPixelFormat::Mjpeg}) {
+        const auto row = SendMessageW(state.pixelFormatCombo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(PixelFormatName(format)));
+        SendMessageW(state.pixelFormatCombo, CB_SETITEMDATA, row, static_cast<LPARAM>(format));
+    }
+    const auto refresh = [&] {
+        PopulateFrameRateCombo(&state);
+        UpdateVideoCapabilityStatus(&state);
+        UpdateAdvancedControlVisibility(&state);
+    };
+    // The parent intentionally stays hidden: IsWindowVisible would always be
+    // false, so inspect the child style to verify actual show/hide decisions.
+    const auto warningVisible = [&] {
+        return (GetWindowLongPtrW(state.unlistedFpsStatus, GWL_STYLE) & WS_VISIBLE) != 0;
+    };
+    const auto selectTab = [&](SettingsTab tab) {
+        SendMessageW(state.tabControl, LB_SETCURSEL,
+            llcv::settings_ui::SettingsNavigationIndex(tab), 0);
+        SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDC_SETTINGS_TAB, LBN_SELCHANGE),
+            reinterpret_cast<LPARAM>(state.tabControl));
+        Require(state.activeTab == tab && IsWindow(hwnd) && !IsWindowVisible(hwnd),
+            "FPS warning fixture uses the real tab handler without showing a window");
+    };
+    const auto chooseRate = [&](int fps) {
+        for (LRESULT row = 0; row < SendMessageW(state.frameRateCombo, CB_GETCOUNT, 0, 0); ++row) {
+            if (SendMessageW(state.frameRateCombo, CB_GETITEMDATA, row, 0) != fps) continue;
+            SendMessageW(state.frameRateCombo, CB_SETCURSEL, row, 0);
+            SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDC_SETTINGS_FRAME_RATE, CBN_SELCHANGE), 0);
+            return;
+        }
+        Require(false, "requested fixture FPS row exists");
+    };
+    SendMessageW(state.pixelFormatCombo, CB_SETCURSEL, 0, 0);
+    state.pixelFormats = {{VideoPixelFormat::Nv12, 120}, {VideoPixelFormat::Yuy2, 60}};
+    refresh();
+    Require(SelectedCaptureFrameRate(&state) == 60 && SettingsCanStart(&state),
+        "explicit 60 survives automatic format union with faster NV12");
+    SendMessageW(state.pixelFormatCombo, CB_SETCURSEL, 1, 0);
+    refresh();
+    Require(SelectedCaptureFrameRate(&state) == 60 && !SettingsCanStart(&state) &&
+            !IsWindowEnabled(state.startButton) && GetWindowTextLengthW(state.unlistedFpsStatus) > 0 &&
+            warningVisible(),
+        "incompatible format preserves explicit FPS and explains disabled Start");
+    EnableWindow(state.startButton, TRUE);
+    FinishSettingsDialog(hwnd, &state, true);
+    Require(IsWindow(hwnd) && !state.accepted && g_settings.videoFrameRate == 60,
+        "stale enabled Start cannot save unavailable FPS as Auto");
+    chooseRate(120);
+    Require(SettingsCanStart(&state) && IsWindowEnabled(state.startButton) &&
+            GetWindowTextLengthW(state.unlistedFpsStatus) == 0 && !warningVisible(),
+        "valid FPS re-enables Start and immediately hides the cleared warning");
+    selectTab(SettingsTab::Audio);
+    selectTab(SettingsTab::VideoWindow);
+    Require(!warningVisible(), "cleared FPS warning remains hidden after a tab roundtrip");
+    chooseRate(60);
+    Require(!SettingsCanStart(&state) && !IsWindowEnabled(state.startButton) &&
+            GetWindowTextLengthW(state.unlistedFpsStatus) > 0 && warningVisible(),
+        "retained unavailable FPS shows its warning again after a tab roundtrip");
+    chooseRate(120);
+
+    // A compact page only lays out nonempty warnings. Reintroducing a warning
+    // must refresh both its page mask and its bounds, not merely its text.
+    llcv::settings_ui::FitSettingsClientArea(&state, SIZE{760, 520}, 96);
+    state.layoutDpi = 96;
+    UpdateAdvancedControlVisibility(&state);
+    const auto formatPage = std::find(state.compactPageNames.begin(), state.compactPageNames.end(),
+        state.english ? L"Video format" : L"영상 형식");
+    Require(formatPage != state.compactPageNames.end(), "compact video format page exists");
+    SendMessageW(state.sectionNavigation, CB_SETCURSEL,
+        static_cast<WPARAM>(formatPage - state.compactPageNames.begin()), 0);
+    SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDC_SETTINGS_SECTION, CBN_SELCHANGE),
+        reinterpret_cast<LPARAM>(state.sectionNavigation));
+    const auto requireCompactWarning = [&] {
+        RECT warning{}, capability{};
+        GetWindowRect(state.unlistedFpsStatus, &warning);
+        GetWindowRect(state.videoCapabilityStatus, &capability);
+        MapWindowPoints(nullptr, hwnd, reinterpret_cast<POINT*>(&warning), 2);
+        MapWindowPoints(nullptr, hwnd, reinterpret_cast<POINT*>(&capability), 2);
+        Require(!SettingsCanStart(&state) && !IsWindowEnabled(state.startButton) &&
+                GetWindowTextLengthW(state.unlistedFpsStatus) > 0 && warningVisible() &&
+                llcv::settings_ui::SettingsControlOnCurrentPage(state.unlistedFpsStatus),
+            "compact unavailable FPS has a visible warning on the current page");
+        Require(warning.left == capability.left && warning.right == capability.right &&
+                warning.top >= capability.bottom && warning.bottom > warning.top &&
+                warning.left >= state.sidebarWidthDip + 20 &&
+                warning.right <= state.clientWidthDip - 24 && warning.bottom <= state.footerTopDip - 16,
+            "compact FPS warning stays aligned below capabilities and above the footer");
+    };
+    chooseRate(60);
+    requireCompactWarning();
+    chooseRate(120);
+    Require(SettingsCanStart(&state) && IsWindowEnabled(state.startButton) &&
+            GetWindowTextLengthW(state.unlistedFpsStatus) == 0 && !warningVisible() &&
+            !llcv::settings_ui::SettingsControlOnCurrentPage(state.unlistedFpsStatus),
+        "valid compact FPS removes the empty warning from both visibility and page layout");
+    selectTab(SettingsTab::Audio);
+    selectTab(SettingsTab::VideoWindow);
+    chooseRate(60);
+    requireCompactWarning();
+    chooseRate(120);
+    llcv::settings_ui::FitSettingsClientArea(&state, SIZE{1000, 650}, 96);
+    UpdateAdvancedControlVisibility(&state);
+    state.pixelFormats.clear(); state.videoCapabilityQueryStatus = E_FAIL;
+    refresh();
+    Require(SelectedCaptureFrameRate(&state) == 120 && !SettingsCanStart(&state),
+        "failed capability refresh preserves the working FPS");
+    state.pixelFormats = {{VideoPixelFormat::Nv12, 120}}; state.videoCapabilityQueryStatus = S_OK;
+    refresh();
+    Require(SelectedCaptureFrameRate(&state) == 120 && SettingsCanStart(&state),
+        "successful refresh restores the prior FPS without changing it");
+    SendMessageW(state.unlistedFpsCheck, BM_SETCHECK, BST_CHECKED, 0);
+    refresh(); chooseRate(30);
+    Require(SettingsCanStart(&state), "explicit unlisted 30 is enabled only by opt-in");
+    SendMessageW(state.unlistedFpsCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+    refresh();
+    Require(SelectedCaptureFrameRate(&state) == 30 && !SettingsCanStart(&state),
+        "turning off unlisted requests does not silently select faster Auto");
+    SendMessageW(state.capture40Check, BM_SETCHECK, BST_CHECKED, 0);
+    UpdateVideoCapabilityStatus(&state);
+    Require(SettingsCanStart(&state) && SelectedCaptureFrameRate(&state) == 30,
+        "40fps overrides without erasing the normal FPS selection");
+    SendMessageW(state.capture40Check, BM_SETCHECK, BST_UNCHECKED, 0);
+    UpdateVideoCapabilityStatus(&state);
+    Require(!SettingsCanStart(&state), "leaving 40fps restores the explicit unavailable rate guard");
+    // Exercise production routing, not a standalone view approximation.
+    // Closing the flyout via Escape must not cancel/destroy the settings dialog.
+    const auto persistedRate = g_settings.videoFrameRate;
+    SendMessageW(hwnd,WM_COMMAND,MAKEWPARAM(IDC_SETTINGS_FRAME_OPTIONS,BN_CLICKED),0);
+    Require(state.frameOptionsOpen,"controller opens frame options");
+    SendMessageW(state.unlistedFpsCheck,BM_SETCHECK,BST_CHECKED,0);
+    SendMessageW(hwnd,WM_COMMAND,MAKEWPARAM(IDC_SETTINGS_UNLISTED_FPS,BN_CLICKED),0);
+    Require(state.frameOptionsOpen && SelectedCaptureFrameRate(&state)==30 && SettingsCanStart(&state),
+        "flyout opt-in uses existing FPS negotiation and preserves selected 30");
+    SendMessageW(hwnd,WM_COMMAND,IDCANCEL,0);
+    Require(IsWindow(hwnd) && !state.frameOptionsOpen && SelectedCaptureFrameRate(&state)==30 &&
+            SendMessageW(state.unlistedFpsCheck,BM_GETCHECK,0,0)==BST_CHECKED &&
+            g_settings.videoFrameRate==persistedRate,
+        "Escape dismisses flyout without committing or discarding pending capture settings");
+    SendMessageW(hwnd,WM_COMMAND,MAKEWPARAM(IDC_SETTINGS_FRAME_OPTIONS,BN_CLICKED),0);
+    SendMessageW(hwnd,WM_ACTIVATE,WA_INACTIVE,0);
+    Require(!state.frameOptionsOpen && IsWindow(hwnd),"Alt+Tab dismisses flyout without closing settings");
+    SendMessageW(state.unlistedFpsCheck,BM_SETCHECK,BST_UNCHECKED,0);
+    refresh();
+    chooseRate(0);
+    for (const auto format : {VideoPixelFormat::P010, VideoPixelFormat::Mjpeg}) {
+        SendMessageW(state.pixelFormatCombo, CB_SETCURSEL, 0, 0);
+        state.pixelFormats = {{format, 60}};
+        refresh();
+        Require(!SettingsCanStart(&state), "Auto must not enable unsupported HDR/compressed-only selection");
+        SendMessageW(state.pixelFormatCombo, CB_SETCURSEL, format == VideoPixelFormat::P010 ? 3 : 4, 0);
+        refresh();
+        Require(SettingsCanStart(&state), "explicit HDR/compressed formats remain available");
+    }
+    state.videoModesPending = true;
+    Require(!SettingsCanStart(&state), "pending refresh cannot start stale video settings");
+    SendMessageW(state.audioOnlyCheck, BM_SETCHECK, BST_CHECKED, 0);
+    Require(SettingsCanStart(&state), "audio-only remains independent of video rate availability");
+    for (int fps : {30, 60, 120, 144, 240}) {
+        g_settings.videoFrameRate = fps;
+        Require(RequestsExactCaptureRate() && RequestedVideoFrameRate() == fps && !AllowsUnlistedCaptureRate(),
+            "every explicit FPS is strict without implicit direct requests");
+    }
+    g_settings.allowUnlistedFps = true; g_settings.videoFrameRate = 30;
+    Require(AllowsUnlistedCaptureRate(), "30fps direct requests require explicit permission");
+    g_settings.videoFrameRate = 60;
+    Require(!AllowsUnlistedCaptureRate(), "unlisted opt-in never forces arbitrary unsupported rates");
+    g_settings.videoFrameRate = 0;
+    Require(!RequestsExactCaptureRate(), "Auto keeps automatic mode selection");
+    Require(!state.videoModeCache && !state.captureAudioProbeCache && !state.sharedProbeCache,
+        "FPS edits never initiate hardware or output probes");
+    // Exercise the real asynchronous format-list rebuild too, not only the
+    // rate list. A missing HDR format must not silently become SDR Auto.
+    state.videoCombo = child(L"COMBOBOX", CBS_DROPDOWNLIST, IDC_SETTINGS_VIDEO);
+    for (const auto& preset : kVideoPresets)
+        SendMessageW(state.videoCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(preset.label));
+    SendMessageW(state.videoCombo, CB_SETCURSEL, 1, 0);
+    SendMessageW(state.audioOnlyCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(state.pixelFormatCombo, CB_SETCURSEL, 3, 0);
+    SendMessageW(state.frameRateCombo, CB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+    g_settings.videoFrameRate = 60;
+    std::atomic<int> queryPhase{0};
+    state.videoModeCache = std::make_unique<llcv::settings_ui::SettingsModeCache<SettingsVideoModes>>(
+        [&](const auto&) {
+            SettingsVideoModes modes;
+            const int phase = queryPhase.load();
+            if (phase == 2) modes.status = E_FAIL;
+            else modes.formats = {{phase == 1 || phase == 4 ? VideoPixelFormat::Nv12 : VideoPixelFormat::P010, 60}};
+            return modes;
+        }, [] {});
+    const auto query = [&](int phase) {
+        queryPhase = phase;
+        state.videoModeCache->Invalidate();
+        state.appliedVideoModeKey.reset();
+        const auto deadline = GetTickCount64() + 2000;
+        do {
+            PopulatePixelFormatCombo(&state);
+            if (state.videoModesPending) Sleep(1);
+        } while (state.videoModesPending && GetTickCount64() < deadline);
+        Require(!state.videoModesPending, "synthetic video-mode query completes");
+    };
+    for (int phase : {0, 1, 2, 3}) {
+        query(phase);
+        Require(SelectedPixelFormat(&state) == VideoPixelFormat::P010 && SelectedCaptureFrameRate(&state) == 60,
+            "format rebuild/query failure never replaces explicit P010 or 60fps");
+        Require(SettingsCanStart(&state) == (phase == 0 || phase == 3),
+            "missing format blocks startup and recovered format restores it");
+    }
+    query(4);
+    for (LRESULT row = 0; row < SendMessageW(state.pixelFormatCombo, CB_GETCOUNT, 0, 0); ++row) {
+        if (SendMessageW(state.pixelFormatCombo, CB_GETITEMDATA, row, 0) == static_cast<LPARAM>(VideoPixelFormat::Nv12))
+            SendMessageW(state.pixelFormatCombo, CB_SETCURSEL, row, 0);
+    }
+    refresh();
+    Require(SettingsCanStart(&state), "explicit user format change restores startup");
+    query(4);
+    Require(SelectedPixelFormat(&state) == VideoPixelFormat::Nv12 && SelectedCaptureFrameRate(&state) == 60 && SettingsCanStart(&state),
+        "later refresh retains the user's new format and FPS");
+    state.videoModeCache.reset();
+    DestroyWindow(hwnd); UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    g_settings = saved; g_suppressSettingsSave = savedSuppress;
+    std::puts("Explicit capture FPS: preservation, invalid-choice gate, opt-in, format availability and Auto passed.");
+}
+
 #ifdef LLCV_RECORDING
 static void TestOrdinarySettingsRecordingNavigation() {
     const auto saved = g_settings;

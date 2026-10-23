@@ -71,6 +71,10 @@ inline constexpr int IDC_SETTINGS_LS_GUIDE = 2059;
 inline constexpr int IDC_SETTINGS_SHORTCUT_RESET = 2060;
 inline constexpr int IDC_SETTINGS_FULLSCREEN_POSITION = 2061;
 inline constexpr int IDC_SETTINGS_UNLISTED_FPS = 2078;
+inline constexpr int IDC_SETTINGS_SDR_RANGE = 2079;
+inline constexpr int IDC_SETTINGS_SDR_RANGE_HELP = 2080;
+inline constexpr int IDC_SETTINGS_FRAME_OPTIONS = 2081;
+inline constexpr int IDC_SETTINGS_FRAME_OPTIONS_CLOSE = 2082;
 inline constexpr int IDC_SETTINGS_SHORTCUT_FIRST = 2100;
 } // namespace control_id
 

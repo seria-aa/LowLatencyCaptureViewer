@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 2.1.4 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 2.1.5 LANGUAGES CXX)
 
 include(cmake/MsvcDependencies.cmake)
 
@@ -590,6 +590,15 @@ if (BUILD_TESTING)
     endif()
     add_test(NAME LatestVideoSampleTests COMMAND LatestVideoSampleTests)
     set_tests_properties(LatestVideoSampleTests PROPERTIES TIMEOUT 15)
+
+    add_executable(CaptureFrameRateMonitorTests tests/CaptureFrameRateMonitorTests.cpp)
+    target_include_directories(CaptureFrameRateMonitorTests PRIVATE src)
+    set_target_properties(CaptureFrameRateMonitorTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    if(MSVC)
+        target_compile_options(CaptureFrameRateMonitorTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    endif()
+    add_test(NAME CaptureFrameRateMonitorTests COMMAND CaptureFrameRateMonitorTests)
+    set_tests_properties(CaptureFrameRateMonitorTests PROPERTIES TIMEOUT 15)
     # Exercise application callbacks and the ASIO notification protocol without
     # enumerating/opening hardware. This target is never installed.
     # These test translation units include the implementation directly. Keep
@@ -609,6 +618,7 @@ if (BUILD_TESTING)
             "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/video/VsrExperiment.h"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/SettingsControllerRegressionTests.inl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/CaptureFrameRateOsdTests.inl"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/ViewerLifecycleTests.inl"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/ExclusiveViewerLifecycleTests.inl"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/ExclusiveRendererRegression.inl"
@@ -629,6 +639,8 @@ if (BUILD_TESTING)
         set_tests_properties(VideoClearRegression PROPERTIES
             TIMEOUT 90 RUN_SERIAL TRUE SKIP_RETURN_CODE 77 LABELS GPU)
         add_test(NAME SettingsControllerTests COMMAND VsrExperimentTests --settings-controller)
+        add_test(NAME CaptureFrameRateOsdTests COMMAND VsrExperimentTests --capture-fps-osd)
+        set_tests_properties(CaptureFrameRateOsdTests PROPERTIES TIMEOUT 30)
         add_test(NAME ViewerLifecycleTests COMMAND VsrExperimentTests --viewer-lifecycle --smoke-test)
         set_tests_properties(ViewerLifecycleTests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         add_test(NAME ExclusiveViewerLifecycleTests COMMAND VsrExperimentTests --exclusive-viewer-lifecycle)
@@ -1004,6 +1016,53 @@ if(BUILD_TESTING)
     set_target_properties(RecordingStorageTests PROPERTIES WIN32_EXECUTABLE FALSE)
     add_test(NAME RecordingStorageTests COMMAND RecordingStorageTests)
     set_tests_properties(RecordingStorageTests PROPERTIES TIMEOUT 30)
+
+    add_executable(RecordingStorageSpaceTests tests/RecordingStorageTests.cpp src/recording/RecordingStorage.cpp)
+    target_include_directories(RecordingStorageSpaceTests PRIVATE src)
+    target_compile_definitions(RecordingStorageSpaceTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN LLCV_RECORDING_STORAGE_SPACE_TEST)
+    target_compile_options(RecordingStorageSpaceTests PRIVATE /W4 /EHsc /utf-8)
+    target_link_libraries(RecordingStorageSpaceTests PRIVATE ole32 mfplat mfuuid)
+    set_target_properties(RecordingStorageSpaceTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_test(NAME RecordingStorageSpaceTests COMMAND RecordingStorageSpaceTests)
+    set_tests_properties(RecordingStorageSpaceTests PROPERTIES TIMEOUT 30)
+
+    add_executable(RecordingLowSpaceTests tests/RecordingLowSpaceTests.cpp src/recording/Recorder.cpp
+        src/recording/RecordingOptions.cpp src/recording/EncoderSupport.cpp src/recording/RecordingStorage.cpp)
+    target_include_directories(RecordingLowSpaceTests PRIVATE src)
+    target_compile_definitions(RecordingLowSpaceTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN LLCV_RECORDING_STORAGE_SPACE_TEST)
+    target_compile_options(RecordingLowSpaceTests PRIVATE /W4 /EHsc /utf-8)
+    target_link_libraries(RecordingLowSpaceTests PRIVATE ole32 oleaut32 shell32 strmiids mfplat mfreadwrite mfuuid)
+    set_target_properties(RecordingLowSpaceTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_test(NAME RecordingLowSpaceTests COMMAND RecordingLowSpaceTests)
+    set_tests_properties(RecordingLowSpaceTests PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+
+    add_executable(RecordingQueueTests tests/RecordingQueueTests.cpp src/recording/Recorder.cpp
+        src/recording/RecordingOptions.cpp src/recording/EncoderSupport.cpp)
+    target_include_directories(RecordingQueueTests PRIVATE src)
+    target_compile_definitions(RecordingQueueTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(RecordingQueueTests PRIVATE /W4 /EHsc /utf-8)
+    target_link_libraries(RecordingQueueTests PRIVATE ole32 oleaut32 shell32 strmiids mfplat mfreadwrite mfuuid)
+    set_target_properties(RecordingQueueTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_test(NAME RecordingQueueTests COMMAND RecordingQueueTests)
+    set_tests_properties(RecordingQueueTests PROPERTIES TIMEOUT 30)
+
+    add_executable(RecordingSpaceDelayTests tests/RecordingTests.cpp src/recording/Recorder.cpp
+        src/recording/RecordingOptions.cpp src/recording/EncoderSupport.cpp src/recording/RecordingStorage.cpp)
+    target_include_directories(RecordingSpaceDelayTests PRIVATE src)
+    target_compile_definitions(RecordingSpaceDelayTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN LLCV_RECORDING_SPACE_DELAY_TEST)
+    target_compile_options(RecordingSpaceDelayTests PRIVATE /W4 /EHsc /utf-8)
+    target_link_libraries(RecordingSpaceDelayTests PRIVATE ole32 oleaut32 shell32 strmiids mfplat mfreadwrite mfuuid)
+    set_target_properties(RecordingSpaceDelayTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    foreach(case arrival mjpeg-arrival pause-unaligned split-pause hevc-arrival)
+        if((NOT case STREQUAL "split-pause" AND NOT case STREQUAL "hevc-arrival" AND
+            NOT case STREQUAL "mjpeg-arrival") OR LLCV_RECORDING_FFMPEG_ROOT)
+            add_test(NAME RecordingSpaceDelay_${case} COMMAND RecordingSpaceDelayTests --${case})
+            set_tests_properties(RecordingSpaceDelay_${case} PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+            if(case STREQUAL "hevc-arrival")
+                set_tests_properties(RecordingSpaceDelay_${case} PROPERTIES SKIP_RETURN_CODE 77)
+            endif()
+        endif()
+    endforeach()
 
     add_executable(RecordingStorageDelayTests tests/RecordingTests.cpp src/recording/Recorder.cpp
         src/recording/RecordingOptions.cpp src/recording/EncoderSupport.cpp src/recording/RecordingStorage.cpp)

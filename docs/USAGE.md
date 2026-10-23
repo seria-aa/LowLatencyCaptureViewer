@@ -16,11 +16,12 @@ Get one of the files from the [latest release](https://github.com/seria-aa/LowLa
   shortcut is created automatically; the desktop shortcut is optional.
 - **x64.zip — portable:** extract it, then run `LowLatencyCaptureViewer.exe`.
 
-**Updating to 2.1.4:** F2 opens the default settings page; recording options remain on the Recording tab.
+**Updating to 2.1.5:** stricter explicit FPS checks, SDR range controls and capture-matched display sizing.
+Use **More** beside Frame rate for optional FPS requests. F2 still opens the default settings page.
 Existing installation paths, settings and custom shortcuts are retained.
-[Recording guide](RECORDING.md) · [2.1.4 release notes](release-notes-v2.1.4.md)
+[Recording guide](RECORDING.md) · [2.1.5 release notes](release-notes-v2.1.5.md)
 **40 fps capture**, added in [2.0.4](release-notes-v2.0.4.md),
-remains off by default; enable it under **Video** only when needed.
+remains off by default; enable it under **Video → More beside Frame rate** only when needed.
 Sleep prevention and earlier settings improvements are covered in the
 [2.0.3 release notes](release-notes-v2.0.3.md).
 The earlier installer-only refresh is recorded in the [2.0.2 release notes](release-notes-v2.0.2.md).
@@ -73,7 +74,8 @@ returns to settings; **No** keeps playback and the current recording state.
 
 The sidebar separates **Video**, **Audio**, **Recording**, **Window**, **Guide & logs**, and **App**.
 [Recording](RECORDING.md) contains codec, quality, size/rate limits, AAC, recording volume, splitting and storage settings.
-Video contains capture/display settings, VSR, unlisted FPS requests, 40 fps capture and screenshot options.
+Video contains capture/display settings, VSR and screenshot options. **More** next
+to Frame rate contains unlisted FPS requests and 40 fps capture.
 Audio contains output devices, buffers, volume options, audio-only mode, and LPCM 5.1.
 Window controls placement, resizing, borders, and cursor behavior.
 Guide & logs groups shortcut editing and reset, 40 fps capture guidance, and diagnostic logging; App contains language,
@@ -113,7 +115,7 @@ change Windows power settings or disable screen savers or security locks.
 | Setting | Good starting choice |
 | --- | --- |
 | Capture resolution | Start with **1920 × 1080**; this is the input size. |
-| Display resolution | Select independently of VSR. Fullscreen retains this video size with black margins. |
+| Display resolution | **Same as capture (new-profile default)** or a fixed size, independently of VSR. Fullscreen retains this size with black margins. Equal legacy capture/display sizes migrate to matching; different sizes remain fixed. |
 | Pixel format | **Auto (NV12 preferred)** |
 | Frame rate | **Auto**, or the source's actual output rate |
 | 40 fps capture | **Off (default)**. Enable to request 40 fps instead of the normal frame-rate selection; support is checked at startup |
@@ -420,11 +422,11 @@ capture devices are supported, but driver differences mean that every model
 cannot be guaranteed.
 
 - Standard support: compatible 48 kHz mono/stereo PCM or 32-bit float input, and progressive NV12/YUY2 video
+- **SDR color range**: Auto / Limited / Full, shared by playback, screenshots and recording; not applied to P010/HDR.
 - Compatibility mode: MJPEG, always listed for manual selection when the device
   exposes it, with automatic decoder-metadata-based range and BT.601/709 handling.
-  When colors still differ from another application, **MJPEG color
-  interpretation** appears for an explicit MJPEG selection and permits a manual
-  matrix/range override.
+  If needed, select BT.709/BT.601 under **MJPEG matrix** and the range under the
+  common **SDR color range** control.
 - HDR10 requires supported P010 input and an HDR-capable display/output path; ASIO requires a compatible installed driver.
 - Console LPCM 5.1 requires 48 kHz multichannel PCM capture and WASAPI Shared output.
 - Experimental: NVIDIA VSR

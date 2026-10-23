@@ -138,12 +138,13 @@ source as 4K does not create additional detail.
 Some MJPEG devices omit Full/Limited range or BT.601/709 information. The
 viewer resolves it from the Media Foundation decoder, DirectShow metadata, and
 finally the MJPEG fallback. Color metadata from the final connected capture format
-is also used for playback and recording. Check **Video quality** in the Tab overlay and the
+is also used for playback, screenshots and recording. Check **Video quality** in the Tab overlay and the
 `[video] MJPEG color` log line for the applied result. If another application
-still differs, explicitly select MJPEG and use the **MJPEG color
-interpretation** control that appears. Compare BT.709 Full/Limited first, then
-BT.601 combinations for SD input. If none matches, include screenshots of the
-same scene with the diagnostic log. The manual setting affects MJPEG only.
+still differs, start from Auto: check **SDR color range → Limited / Full** for
+black/white levels, or **MJPEG matrix → BT.709 / BT.601** for color differences.
+The matrix control appears only for an explicit MJPEG selection. The range
+control also applies to NV12/YUY2, but never to P010/HDR. If no setting matches,
+include screenshots of the same scene with the diagnostic log.
 
 <br>
 

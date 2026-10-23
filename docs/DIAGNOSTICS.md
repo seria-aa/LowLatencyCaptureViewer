@@ -41,6 +41,8 @@ With 40 fps capture enabled, check the measured Input rate under **Actual FPS**,
 not just the format's nominal FPS. This counts samples arriving at the app, not
 unique game frames or the console's HDMI output Hz. Repeated pictures count as
 input samples too. Frames generated later by LS are not part of LLCV's Present FPS.
+Sustained input above an explicitly selected rate adds a warning on the same line and in the log.
+This reports driver delivery behavior; it does not add a software frame limiter.
 
 <br>
 

@@ -439,6 +439,7 @@ bool FindMatchingDirectShowColorMetadata(
         AM_MEDIA_TYPE* candidate = nullptr;
         if (FAILED(config->GetStreamCaps(i, &candidate, caps.data())) ||
             !candidate) {
+            DeleteMediaType(candidate);
             continue;
         }
         int width = 0;
@@ -465,13 +466,19 @@ bool FindMatchingDirectShowColorMetadata(
 }
 
 bool IsRequestedFrameRate(const AM_MEDIA_TYPE* mediaType, int fps) {
-    if (fps != 30 && fps != 40) return false;
+    if (fps <= 0 || fps > 10'000'000) return false;
     int width = 0, height = 0;
     REFERENCE_TIME duration = 0;
     DWORD bytes = 0;
+    const REFERENCE_TIME wantedDuration = FrameDurationForRate(fps);
+    // Preserve the established 30/40fps tolerance. At higher rates a fixed
+    // 100us window can accept a different nominal rate (e.g. 239 vs 240).
+    // 0.2% still accepts 1000/1001 timing such as 59.94 and 119.88fps.
+    const REFERENCE_TIME tolerance = fps == 30 || fps == 40 ? 1000 :
+        std::clamp<REFERENCE_TIME>(wantedDuration / 500, 1, 1000);
     return VideoFormatDetails(mediaType, width, height, duration, bytes) &&
-        duration >= FrameDurationForRate(fps) - 1000 &&
-        duration <= FrameDurationForRate(fps) + 1000;
+        duration > 0 && duration >= wantedDuration - tolerance &&
+        duration <= wantedDuration + tolerance;
 }
 
 HRESULT ConfigureVideoPin(
@@ -479,10 +486,11 @@ HRESULT ConfigureVideoPin(
     VideoPixelFormat wantedFormat, DWORD& imageBytes, UINT32& stride,
     int& configuredFps, VideoPixelFormat& configuredFormat,
     LogCallback logCallback, bool requestExactFps,
-    CaptureColorMetadata* acceptedCandidateColor) {
+    CaptureColorMetadata* acceptedCandidateColor, bool allowUnlistedFps) {
     if (acceptedCandidateColor) *acceptedCandidateColor = {};
     if (!videoPin) return E_POINTER;
-    if (requestExactFps && wantedFps != 30 && wantedFps != 40) return E_INVALIDARG;
+    if (requestExactFps && (wantedFps <= 0 || wantedFps > 10'000'000)) return E_INVALIDARG;
+    if (allowUnlistedFps && !requestExactFps) return E_INVALIDARG;
     IAMStreamConfig* config = nullptr;
     HRESULT hr = videoPin->QueryInterface(IID_PPV_ARGS(&config));
     if (FAILED(hr)) return hr;
@@ -490,7 +498,7 @@ HRESULT ConfigureVideoPin(
     int count = 0;
     int capBytes = 0;
     hr = config->GetNumberOfCapabilities(&count, &capBytes);
-    if (FAILED(hr) ||
+    if (FAILED(hr) || count < 0 ||
         capBytes < static_cast<int>(sizeof(VIDEO_STREAM_CONFIG_CAPS))) {
         LogQuery(logCallback, L"configure/count", count, FAILED(hr) ? hr : E_FAIL);
         SafeRelease(config);
@@ -502,6 +510,7 @@ HRESULT ConfigureVideoPin(
         int fps = 0;
         DWORD imageBytes = 0;
         VideoPixelFormat format = VideoPixelFormat::Nv12;
+        bool unlistedProbe = false;
     };
     std::vector<BYTE> caps(static_cast<size_t>(capBytes));
     std::vector<FormatCandidate> candidates;
@@ -530,11 +539,12 @@ HRESULT ConfigureVideoPin(
         if (details && formatMatches && width == wantedWidth &&
             height == wantedHeight && duration >= 0) {
             LogMode(logCallback, i, format, width, height, duration, streamCaps);
+            const bool rateAllowed = FrameRateAllowedByCaps(streamCaps, wantedFps);
             if (wantedFps > 0 && fps != wantedFps &&
-                (FrameRateAllowedByCaps(streamCaps, wantedFps) || requestExactFps)) {
+                (rateAllowed || (requestExactFps && allowUnlistedFps))) {
                 auto* adjusted = CloneMediaType(candidate);
                 if (adjusted && SetVideoFrameDuration(adjusted, FrameDurationForRate(wantedFps)))
-                    candidates.push_back({adjusted, wantedFps, bytes, format});
+                    candidates.push_back({adjusted, wantedFps, bytes, format, !rateAllowed});
                 else DeleteMediaType(adjusted);
             }
             // A zero default duration is not an executable fallback. The
@@ -556,6 +566,10 @@ HRESULT ConfigureVideoPin(
         candidates.begin(), candidates.end(),
         [wantedFps, wantedFormat](const FormatCandidate& a,
                                  const FormatCandidate& b) {
+            // A supported exact-rate format wins over an unlisted timing probe
+            // in another format. Auto's normal format/fallback order is intact.
+            if (a.unlistedProbe != b.unlistedProbe)
+                return !a.unlistedProbe;
             if (wantedFormat == VideoPixelFormat::Auto &&
                 a.format != b.format) {
                 return PixelFormatRank(a.format) < PixelFormatRank(b.format);
@@ -573,12 +587,12 @@ HRESULT ConfigureVideoPin(
     FormatCandidate* selected = nullptr;
     bool requestedRateAdvertised = false;
     for (const auto& candidate : candidates)
-        requestedRateAdvertised |= candidate.fps == wantedFps;
+        requestedRateAdvertised |= candidate.fps == wantedFps && !candidate.unlistedProbe;
     if (!requestedRateAdvertised) LogQuery(logCallback, L"requested-rate-not-advertised", wantedFps,
                                           HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
     for (auto& candidate : candidates) {
-        // Explicit opt-in only: never substitute another rate or advertise
-        // synthetic capabilities. Some drivers accept rates absent from caps.
+        // An explicit selection must never substitute another rate. Unlisted
+        // requests are separate and must not contaminate advertised caps.
         if (requestExactFps && candidate.fps != wantedFps) continue;
         DWORD candidateBytes = 0;
         UINT32 candidateStride = 0;

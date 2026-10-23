@@ -108,6 +108,10 @@ LRESULT CALLBACK Proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
     }
     if (state) {
+        const bool wasOpen=state->controls.frameOptionsOpen;
+        const bool handled=HandleFrameOptionsMessage(&state->controls,hwnd,message,wParam,lParam);
+        if (wasOpen!=state->controls.frameOptionsOpen) RefreshPreview(*state);
+        if (handled) return 0;
         LRESULT result = 0;
         if (state->theme.HandleMessage(message, wParam, lParam, result)) return result;
         if (message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED) ++state->clicks;
@@ -451,13 +455,14 @@ void CheckActualTabOrder() {
                 expected.push_back(c.videoRefreshButton);
                 expected.push_back(c.captureDeviceCombo);
                 if (externalCaptureAudio) expected.push_back(c.captureAudioDeviceCombo);
-                expected.insert(expected.end(), {c.videoCombo, c.frameRateCombo, c.pixelFormatCombo});
+                expected.insert(expected.end(), {c.videoCombo, c.frameRateCombo, c.frameOptionsButton, c.pixelFormatCombo});
                 if (format == VideoPixelFormat::P010)
                     expected.insert(expected.end(), {c.forceHdr10Check, c.forceHdr10Help,
                         c.hdrChromaCombo, c.hdrChromaHelp});
+                if (format != VideoPixelFormat::P010)
+                    expected.insert(expected.end(), {c.sdrRangeCombo, c.sdrRangeHelp});
                 if (format == VideoPixelFormat::Mjpeg)
                     expected.insert(expected.end(), {c.mjpegColorCombo, c.mjpegColorHelp});
-                expected.insert(expected.end(), {c.unlistedFpsCheck, c.capture40Check, c.capture40Help});
                 expected.insert(expected.end(), {c.presentationCombo, c.presentationHelp,
                     c.displayMonitorCombo, c.pixelCheck});
                 if (!pixelPerfect) expected.push_back(c.scalingCombo); // fixture uses equal capture/display sizes
@@ -513,6 +518,7 @@ void CheckActualTabOrder() {
                 {c.pcmQueueLabel, c.pcmQueueCombo, c.pcmQueueHelp},
                 {c.hdrChromaLabel, c.hdrChromaCombo, c.hdrChromaHelp},
                 {c.mjpegColorLabel, c.mjpegColorCombo, c.mjpegColorHelp},
+                {c.sdrRangeLabel, c.sdrRangeCombo, c.sdrRangeHelp},
             };
             for (const auto& group : labelledFields) {
                 Check(GetWindow(group[1], GW_HWNDPREV) == group[0] &&
@@ -1037,6 +1043,29 @@ void ActualSnapshots(const wchar_t* directory, bool videoOnly = false, bool wind
                 SendMessageW(c.vsrCheck, BM_SETCHECK, vsr, 0);
                 UpdateAdvancedControlVisibility(&c, false, VideoPixelFormat::Nv12);
             }
+        }
+        if (videoOnly) {
+            c.activeTab = SettingsTab::VideoWindow;
+            SendMessageW(c.pixelFormatCombo, CB_RESETCONTENT, 0, 0);
+            AddComboItem(c.pixelFormatCombo, L"MJPEG");
+            UpdateAdvancedControlVisibility(&c, false, VideoPixelFormat::Mjpeg);
+            SetSettingsControlVisible(c.captureAudioDeviceCombo, true);
+            SetSettingsControlVisible(c.captureAudioStatus, false);
+            SaveSnapshot(hwnd, (std::wstring(directory) + (light ? L"/light" : L"/dark") +
+                (english ? L"-en-sdr-mjpeg-144dpi.bmp" : L"-ko-sdr-mjpeg-144dpi.bmp")).c_str());
+            const auto savedDisplay = SendMessageW(c.displayResolutionCombo, CB_GETCURSEL, 0, 0);
+            const auto matchCapture = SendMessageW(c.displayResolutionCombo, CB_GETCOUNT, 0, 0) - 1;
+            SendMessageW(c.displayResolutionCombo, CB_SETCURSEL, matchCapture, 0);
+            UpdateAdvancedControlVisibility(&c,false,VideoPixelFormat::Mjpeg);
+            SaveSnapshot(hwnd, (std::wstring(directory) + (light ? L"/light" : L"/dark") +
+                (english ? L"-en-match-capture.bmp" : L"-ko-match-capture.bmp")).c_str());
+            c.frameOptionsOpen=true;
+            UpdateAdvancedControlVisibility(&c,false,VideoPixelFormat::Mjpeg);
+            SaveSnapshot(hwnd, (std::wstring(directory) + (light ? L"/light" : L"/dark") +
+                (english ? L"-en-frame-options.bmp" : L"-ko-frame-options.bmp")).c_str());
+            c.frameOptionsOpen=false;
+            SendMessageW(c.displayResolutionCombo, CB_SETCURSEL, savedDisplay, 0);
+            UpdateAdvancedControlVisibility(&c,false,VideoPixelFormat::Mjpeg);
         }
         if (!videoOnly && !windowOnly && dpi == 96) {
             c.activeTab = SettingsTab::VideoWindow;

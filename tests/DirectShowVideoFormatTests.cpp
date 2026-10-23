@@ -214,7 +214,7 @@ void TestExplicitFrameRates() {
         auto configure = [&](bool enabled) {
             pin.attemptedRates.clear();
             return ConfigureVideoPin(&pin,1920,1080,requested,format,
-                bytes,stride,fps,actual,nullptr,enabled);
+                bytes,stride,fps,actual,nullptr,enabled,nullptr,enabled);
         };
         Check(SUCCEEDED(configure(true)) && fps == requested && actual == format &&
             pin.attemptedRates == std::vector<int>{requested},
@@ -259,6 +259,115 @@ void TestExplicitFrameRates() {
     }
 }
 
+void TestStrictListedFrameRates() {
+    using namespace llcv::video;
+    for (const int requested : {30, 40, 60, 90, 100, 120, 144, 165, 180, 200, 240}) {
+        for (const auto subtype : {MEDIASUBTYPE_NV12, MEDIASUBTYPE_YUY2,
+                                    MFVideoFormat_P010, MEDIASUBTYPE_MJPG}) {
+            for (const auto dimensions : {SIZE{1920,1080}, SIZE{2560,1440}, SIZE{3840,2160}}) {
+                FakeVideoPin pin;
+                pin.modes = {{requested, dimensions.cx, dimensions.cy}};
+                pin.modes[0].subtype = subtype;
+                pin.modes[0].imageBytes = 0;
+                pin.echoAcceptedFormat = true;
+                DWORD bytes = 0; UINT32 stride = 0; int fps = 0;
+                VideoPixelFormat actual{};
+                Check(SUCCEEDED(ConfigureVideoPin(&pin, dimensions.cx, dimensions.cy,
+                    requested, PixelFormatFromSubtype(subtype), bytes, stride, fps,
+                    actual, nullptr, true)) && fps == requested &&
+                    actual == PixelFormatFromSubtype(subtype) &&
+                    pin.attemptedRates == std::vector<int>{requested} &&
+                    pin.formatQueries == 1 && pin.references == 1,
+                    "explicit listed rates are strictly read back across formats/resolutions");
+            }
+        }
+    }
+
+    FakeVideoPin pin;
+    pin.echoAcceptedFormat = true;
+    DWORD bytes = 123; UINT32 stride = 456; int fps = 77;
+    VideoPixelFormat format = VideoPixelFormat::Mjpeg;
+    const auto configure = [&](bool strict = true, bool unlisted = false) {
+        pin.attemptedRates.clear();
+        return ConfigureVideoPin(&pin, 1920, 1080, 60, VideoPixelFormat::Auto,
+            bytes, stride, fps, format, SelectionLog, strict, nullptr, unlisted);
+    };
+    pin.modes = {{120}};
+    Check(FAILED(configure()) && pin.attemptedRates.empty() &&
+        bytes == 123 && stride == 456 && fps == 77 && format == VideoPixelFormat::Mjpeg,
+        "explicit 60 cannot fall back to advertised 120 or force an unlisted mode");
+    pin.modes.push_back({60});
+    pin.modes[1].subtype = MEDIASUBTYPE_YUY2;
+    pin.modes[1].imageBytes = 1920 * 1080 * 2;
+    Check(SUCCEEDED(configure()) && fps == 60 && format == VideoPixelFormat::Yuy2 &&
+        pin.attemptedRates == std::vector<int>{60},
+        "explicit 60 chooses available YUY2 60 instead of preferred NV12 120");
+    Check(SUCCEEDED(configure(true, true)) && fps == 60 && format == VideoPixelFormat::Yuy2 &&
+        pin.attemptedRates == std::vector<int>{60},
+        "advertised exact-rate format wins over an unlisted NV12 timing probe");
+    Check(SUCCEEDED(configure(false)) && fps == 120 && format == VideoPixelFormat::Nv12,
+        "automatic rate retains its original preferred-format fallback policy");
+    pin.rejectedRate = 60;
+    Check(FAILED(configure()) && pin.attemptedRates == std::vector<int>{60},
+        "explicit 60 driver refusal never tries the available 120 fallback");
+    pin.rejectedRate = 0;
+    pin.echoAcceptedFormat = false;
+    Check(configure() == kRequestedFrameRateMismatch &&
+        pin.attemptedRates == std::vector<int>{60},
+        "successful SetFormat followed by substituted 120 timing fails explicitly");
+    pin.nullActiveFormat = true;
+    Check(FAILED(configure()), "strict listed FPS refuses a successful but null readback");
+    pin.nullActiveFormat = false;
+    pin.modes = {{60, 1280, 720}, {60}};
+    bytes = 123; stride = 456; fps = 77; format = VideoPixelFormat::Mjpeg;
+    Check(FAILED(configure()) && bytes == 123 && stride == 456 && fps == 77 &&
+        format == VideoPixelFormat::Mjpeg && pin.attemptedRates == std::vector<int>{60},
+        "matching FPS readback cannot conceal a substituted resolution or publish partial outputs");
+    pin.modes = {{60}, {60}};
+    pin.modes.front().subtype = MEDIASUBTYPE_YUY2;
+    pin.modes.front().imageBytes = 1920 * 1080 * 2;
+    pin.attemptedRates.clear();
+    Check(FAILED(ConfigureVideoPin(&pin, 1920, 1080, 60, VideoPixelFormat::Nv12,
+        bytes, stride, fps, format, nullptr, true)) && bytes == 123 && stride == 456 &&
+        fps == 77 && format == VideoPixelFormat::Mjpeg,
+        "matching FPS readback cannot conceal a substituted pixel format");
+    pin.echoAcceptedFormat = true;
+    pin.modes = {{120}};
+    pin.modes.front().minimumInterval = 83333;
+    pin.modes.front().maximumInterval = 166667;
+    Check(SUCCEEDED(configure()) && fps == 60 && pin.attemptedRates == std::vector<int>{60},
+        "strict listed rate permits explicit intervals within advertised caps");
+    pin.modes.front().minimumInterval = 0;
+    pin.modes.front().maximumInterval = 0;
+    Check(FAILED(configure()) && pin.attemptedRates.empty(),
+        "strict rate does not treat support in a previous caps response as current support");
+    Check(configure(false, true) == E_INVALIDARG && pin.attemptedRates.empty(),
+        "unlisted probes cannot be requested without strict verification");
+    Check(pin.references == 1, "strict negotiation failures do not leak the config interface");
+
+    VIDEOINFOHEADER2 info{};
+    info.bmiHeader.biWidth = 1920; info.bmiHeader.biHeight = 1080;
+    AM_MEDIA_TYPE media{};
+    media.majortype = MEDIATYPE_Video; media.subtype = MEDIASUBTYPE_NV12;
+    media.formattype = FORMAT_VideoInfo2; media.cbFormat = sizeof(info);
+    media.pbFormat = reinterpret_cast<BYTE*>(&info);
+    for (const int requested : {30, 40, 60, 90, 100, 120, 144, 165, 180, 200, 240}) {
+        info.AvgTimePerFrame = 10'000'000 / requested;
+        Check(IsRequestedFrameRate(&media, requested), "strict timing accepts nominal integer FPS");
+        info.AvgTimePerFrame = 10'010'000 / requested;
+        Check(IsRequestedFrameRate(&media, requested), "strict timing accepts 1000/1001 fractional FPS");
+        for (const int substituted : {requested - 1, requested + 1, requested * 2}) {
+            info.AvgTimePerFrame = 10'000'000 / substituted;
+            Check(!IsRequestedFrameRate(&media, requested),
+                "strict timing rejects neighboring rates and doubled rate even at high FPS");
+        }
+        info.AvgTimePerFrame = 0;
+        Check(!IsRequestedFrameRate(&media, requested), "strict timing rejects omitted duration");
+    }
+    for (const int invalid : {-1, 0, 10'000'001, (std::numeric_limits<int>::max)()})
+        Check(!IsRequestedFrameRate(&media, invalid), "strict timing rejects invalid requested FPS");
+}
+
 void TestAcceptedCandidateColorMetadata() {
     using namespace llcv::video;
     // DXVA extended color data: left chroma, studio range, BT.2020 NCL/PQ.
@@ -280,7 +389,7 @@ void TestAcceptedCandidateColorMetadata() {
     auto configure = [&](FakeVideoPin& pin, bool request40 = true) {
         return ConfigureVideoPin(&pin, 1920, 1080, request40 ? 40 : 60,
             VideoPixelFormat::P010, bytes, stride, fps, format, nullptr,
-            request40, &selected);
+            request40, &selected, request40);
     };
 
     for (const DWORD flags : {pqLeft, hlgLeft}) {
@@ -473,6 +582,70 @@ void TestLayoutBoundariesAndProbeErrors() {
           "recovery clears prior partial error state");
 }
 
+void TestMalformedCapabilityOwnership() {
+    using namespace llcv::video;
+    FakeVideoPin pin;
+    pin.modes = {{60}};
+    pin.modes.front().queryFails = true;
+    pin.allocateOnQueryFailure = true;
+    const auto checkMediaReleased = [&](const char* message) {
+        Check(pin.lastFailedMedia != nullptr, "fault fixture actually returned allocated failed media");
+        Check(pin.references == 1, message);
+        // Keep the fixture leak-free even when replayed against the old code.
+        // The extra media-owned reference proves this pointer is still live.
+        if (pin.references == 2 && pin.lastFailedMedia) {
+            CoTaskMemFree(pin.lastFailedMedia->pbFormat);
+            pin.lastFailedMedia->pUnk->Release();
+            CoTaskMemFree(pin.lastFailedMedia);
+        }
+        pin.lastFailedMedia = nullptr;
+    };
+
+    CaptureColorMetadata metadata{};
+    metadata.present = true;
+    Check(!FindMatchingDirectShowColorMetadata(&pin, VideoPixelFormat::Nv12,
+        1920, 1080, 60, metadata) && !metadata.present,
+        "failed color-capability query does not expose stale metadata");
+    checkMediaReleased("color metadata query releases media allocated despite failure HRESULT");
+
+    DWORD bytes = 123; UINT32 stride = 456; int fps = 77;
+    VideoPixelFormat format = VideoPixelFormat::Mjpeg;
+    Check(FAILED(ConfigureVideoPin(&pin, 1920, 1080, 60, VideoPixelFormat::Nv12,
+        bytes, stride, fps, format, nullptr, true)) && bytes == 123 && stride == 456 &&
+        fps == 77 && format == VideoPixelFormat::Mjpeg,
+        "failed allocated capability cannot publish a format selection");
+    checkMediaReleased("format negotiation releases media allocated despite failure HRESULT");
+
+    HRESULT query = S_OK;
+    Check(ProbePixelFormats(&pin, 1920, 1080, &query).empty() && FAILED(query),
+        "failed allocated capability remains an explicit probe failure");
+    checkMediaReleased("format probe releases media allocated despite failure HRESULT");
+
+    pin.allocateOnQueryFailure = false;
+    pin.modes.front().queryFails = false;
+    pin.negativeCapabilityCount = true;
+    pin.streamCapsQueries = 0;
+    Check(ConfigureVideoPin(&pin, 1920, 1080, 60, VideoPixelFormat::Nv12,
+        bytes, stride, fps, format, nullptr, true) == E_FAIL &&
+        pin.streamCapsQueries == 0 && pin.attemptedRates.empty() &&
+        bytes == 123 && stride == 456 && fps == 77 && format == VideoPixelFormat::Mjpeg,
+        "negative capability count is rejected before enumeration or output changes");
+    Check(ProbePixelFormats(&pin, 1920, 1080, &query).empty() && query == E_FAIL &&
+        pin.streamCapsQueries == 0,
+        "negative probe count is malformed data rather than a successful empty list");
+    metadata.present = true;
+    Check(!FindMatchingDirectShowColorMetadata(&pin, VideoPixelFormat::Nv12,
+        1920, 1080, 60, metadata) && !metadata.present && pin.streamCapsQueries == 0,
+        "negative color-capability count is rejected without enumeration");
+    Check(pin.references == 1, "malformed capability count releases the config interface");
+
+    pin.negativeCapabilityCount = false;
+    pin.echoAcceptedFormat = true;
+    Check(SUCCEEDED(ConfigureVideoPin(&pin, 1920, 1080, 60, VideoPixelFormat::Nv12,
+        bytes, stride, fps, format, nullptr, true)) && fps == 60 && pin.references == 1,
+        "normal enumeration and selection recover after malformed capability responses");
+}
+
 }  // namespace
 
 #include "VideoFaultInjection.inl"
@@ -486,8 +659,10 @@ int main(int argc, char** argv) {
     TestChangingDriverCapabilities();
     TestSelectedVersusActiveFormat();
     TestExplicitFrameRates();
+    TestStrictListedFrameRates();
     TestAcceptedCandidateColorMetadata();
     TestLayoutBoundariesAndProbeErrors();
+    TestMalformedCapabilityOwnership();
     if (failures != 0) {
         std::fprintf(stderr, "%d test(s) failed.\n", failures);
         return 1;
