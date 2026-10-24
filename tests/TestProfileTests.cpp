@@ -31,6 +31,9 @@ int main(){
     Check(recording::LoadOptions(real+L"recording-prototype.ini").audioVolumePercent==recording::Options{}.audioVolumePercent,"real recording profile is not loaded by test");
     Check(!settings::SaveToIni(real+L"settings.ini",settings,&error) && error==ERROR_ACCESS_DENIED,"real settings write rejected before opening file");
     Check(!settings::MigrateLegacyPcmQueueTarget(real+L"settings.ini"),"real migration rejected");
+    Check(!settings::StartupReviewRequired(real+L"settings.ini",L"v-test"),"test does not inspect real startup marker");
+    Check(!settings::MarkStartupSettingsShown(real+L"settings.ini",L"v-test",&error) && error==ERROR_ACCESS_DENIED,
+        "startup marker cannot modify real settings in test builds");
     Check(!recording::SaveOptions(options,real+L"recording-prototype.ini"),"real recording write rejected");
     std::printf("PASS: isolated defaults and explicit real-profile access denial. root=%ls\n",folder.c_str());
 }

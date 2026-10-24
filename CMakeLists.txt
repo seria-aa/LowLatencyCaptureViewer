@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 2.1.6 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 2.1.7 LANGUAGES CXX)
 
 include(cmake/MsvcDependencies.cmake)
 

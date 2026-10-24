@@ -622,7 +622,8 @@ static void TestSettingsBufferModeTransitions() {
     SendMessageW(state.nisSharpnessCombo,CB_SETCURSEL,25,0);
     SendMessageW(state.preventSleepCheck, BM_SETCHECK, BST_UNCHECKED, 0);
     FinishSettingsDialog(hwnd, &state, true);
-    Require(g_settings.cmaaNisEnabled && !g_settings.vsrEnabled && g_settings.nisSharpnessPercent==25,
+    Require(g_settings.cmaaNisEnabled && !g_settings.vsrEnabled && g_settings.nisSharpnessPercent==25 &&
+        g_settings.preferredUpscaler==llcv::settings::UpscalingMethod::CmaaNis,
         "accepted settings save exclusive upscaler mode and exact sharpness");
     Require(state.accepted && !IsWindow(hwnd) && g_settings.audioMode == AudioMode::Asio &&
             g_settings.wasapiBufferMs == 30 && g_settings.wasapiSharedPeriodFrames == 960,

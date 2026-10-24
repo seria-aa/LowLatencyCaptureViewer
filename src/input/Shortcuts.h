@@ -6,6 +6,8 @@
 #include <cwchar>
 
 namespace llcv::shortcuts {
+// Keep the legacy Vsr action/key name so existing remapped F6 bindings survive.
+// Its user-facing action now toggles the selected upscaling method.
 enum class Action : size_t { Help, Settings, AudioOsd, PixelPerfect, Vsr, Fullscreen, Screenshot, Diagnostics, Exit,
 #ifdef LLCV_RECORDING
     Recording,

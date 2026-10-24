@@ -3,6 +3,13 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 namespace llcv::upscaling {
+// One atomic request carries selection, enable state and retained sharpness.
+// -1: VSR selected; 0..100: CMAA/NIS on; -2..-102: CMAA/NIS off.
+inline int Request(bool enabled, int sharpness) {
+    sharpness = sharpness < 0 ? 0 : sharpness > 100 ? 100 : sharpness;
+    return enabled ? sharpness : -sharpness - 2;
+}
+inline int RequestSharpness(int request) { return request >= 0 ? request : -request - 2; }
 bool Eligible(bool enabled, unsigned width, unsigned height, const RECT& destination);
 class CmaaPipeline {
     friend struct PipelineTestAccess;

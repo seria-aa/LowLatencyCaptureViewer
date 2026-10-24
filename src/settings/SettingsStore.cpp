@@ -411,6 +411,9 @@ LoadResult LoadFromIni(const std::wstring& path) {
     const int nisSharpness = ReadInt(path, L"Video", L"NisSharpness", 15);
     settings.nisSharpnessPercent = nisSharpness >= 0 && nisSharpness <= 100 ? nisSharpness : 15;
     if (settings.cmaaNisEnabled) settings.vsrEnabled = false;
+    settings.preferredUpscaler = ReadInt(path, L"Video", L"PreferredUpscaler", 1) == 0
+        ? UpscalingMethod::NvidiaVsr : UpscalingMethod::CmaaNis;
+    settings.preferredUpscaler = SelectedUpscaler(settings);
     // Legacy profiles used Resolution for capture while VSR was off. Do not
     // activate a dormant VsrCaptureResolution when migrating those profiles.
     const std::wstring legacyCapture = settings.vsrEnabled
@@ -583,14 +586,16 @@ static DWORD WriteSettings(const std::wstring& file, const AppSettings& settings
     WriteInt(path, L"Screenshot", L"CopyToClipboard", settings.screenshotClipboard ? 1 : 0);
     WriteInt(path, L"Video", L"VsrEnabled", settings.vsrEnabled && !settings.cmaaNisEnabled ? 1 : 0);
     WriteInt(path, L"Video", L"CmaaNisEnabled", settings.cmaaNisEnabled ? 1 : 0);
+    WriteInt(path, L"Video", L"PreferredUpscaler", static_cast<int>(SelectedUpscaler(settings)));
     WriteInt(path, L"Video", L"NisSharpness", std::clamp(settings.nisSharpnessPercent, 0, 100));
     WriteInt(path, L"Diagnostics", L"ShowConsole",
              settings.showDiagnosticConsole ? 1 : 0);
     return path.error;
 }
 
-bool SaveToIni(const std::wstring& path, const AppSettings& settings,
-               unsigned long* error) {
+template<class Writer>
+static bool UpdateIniAtomically(const std::wstring& path, Writer write,
+                                unsigned long* error) {
     const auto fail = [error](DWORD code) {
         if (error) *error = code ? code : ERROR_WRITE_FAULT;
         return false;
@@ -651,7 +656,7 @@ bool SaveToIni(const std::wstring& path, const AppSettings& settings,
         return fail(GetLastError());
     if (existing && !SetFileSecurityW(temporary.c_str(), securityFlags, security.data()))
         return fail(GetLastError());
-    const DWORD writeError = WriteSettings(temporary, settings);
+    const DWORD writeError = write(temporary);
     if (writeError) return fail(writeError);
     // Flush the profile API's cache before file-level replacement.
     WritePrivateProfileStringW(nullptr, nullptr, nullptr, temporary.c_str());
@@ -669,6 +674,31 @@ bool SaveToIni(const std::wstring& path, const AppSettings& settings,
     if (!replaced) return fail(GetLastError());
     WritePrivateProfileStringW(nullptr, nullptr, nullptr, path.c_str());
     return true;
+}
+
+bool SaveToIni(const std::wstring& path, const AppSettings& settings,
+               unsigned long* error) {
+    return UpdateIniAtomically(path, [&](const auto& temporary) {
+        return WriteSettings(temporary, settings);
+    }, error);
+}
+
+bool StartupReviewRequired(const std::wstring& path, const std::wstring& version) {
+    if (version.empty() || test_profile::Protected(path)) return false;
+    return ReadString(path,L"General",L"StartupSettingsVersion") != version;
+}
+
+bool MarkStartupSettingsShown(const std::wstring& path, const std::wstring& version,
+                             unsigned long* error) {
+    if (version.empty()) {
+        if (error) *error=ERROR_INVALID_PARAMETER;
+        return false;
+    }
+    return UpdateIniAtomically(path, [&](const auto& temporary) {
+        IniWriter writer{temporary};
+        WriteString(writer,L"General",L"StartupSettingsVersion",version.c_str());
+        return writer.error;
+    }, error);
 }
 
 }  // namespace llcv::settings

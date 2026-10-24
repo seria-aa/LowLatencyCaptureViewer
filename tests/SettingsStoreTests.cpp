@@ -878,7 +878,8 @@ int main(int argc, char** argv) {
     {
         using namespace llcv::settings;
         AppSettings settings;
-        Check(!settings.cmaaNisEnabled && settings.nisSharpnessPercent==15,"CMAA/NIS opt-in with 0.15 default");
+        Check(!settings.cmaaNisEnabled && !settings.vsrEnabled && settings.nisSharpnessPercent==15 &&
+            SelectedUpscaler(settings)==UpscalingMethod::CmaaNis,"default OFF, first F6 selects CMAA/NIS 0.15");
         for(bool cmaa:{false,true}) for(bool vsr:{false,true}) for(int sharp:{0,15,100}) {
             settings.cmaaNisEnabled=cmaa;settings.vsrEnabled=vsr;settings.nisSharpnessPercent=sharp;
             CheckSaved(path,settings,"save upscaler");
@@ -890,11 +891,69 @@ int main(int argc, char** argv) {
             WritePrivateProfileStringW(L"Video",L"NisSharpness",value,path.c_str());
             Check(LoadFromIni(path).settings.nisSharpnessPercent==15,"damaged sharpness defaults to 0.15");
         }
+        for(const auto method:{UpscalingMethod::NvidiaVsr,UpscalingMethod::CmaaNis}) {
+            settings.cmaaNisEnabled=false;settings.vsrEnabled=false;
+            settings.preferredUpscaler=method;settings.nisSharpnessPercent=37;
+            settings.shortcuts[static_cast<size_t>(llcv::shortcuts::Action::Vsr)]=llcv::shortcuts::Ctrl|'U';
+            CheckSaved(path,settings,"save disabled upscaling preference");
+            const auto disabled=LoadFromIni(path).settings;
+            Check(!disabled.cmaaNisEnabled && !disabled.vsrEnabled &&
+                SelectedUpscaler(disabled)==method && disabled.nisSharpnessPercent==37 &&
+                disabled.shortcuts==settings.shortcuts,"OFF preserves method sharpness and existing key binding");
+        }
+        WritePrivateProfileStringW(L"Video",L"PreferredUpscaler",L"bad",path.c_str());
+        Check(LoadFromIni(path).settings.preferredUpscaler==UpscalingMethod::CmaaNis,"invalid method uses CMAA/NIS default");
+        WritePrivateProfileStringW(L"Video",L"PreferredUpscaler",nullptr,path.c_str());
+        WritePrivateProfileStringW(L"Video",L"VsrEnabled",L"0",path.c_str());
+        WritePrivateProfileStringW(L"Video",L"CmaaNisEnabled",L"0",path.c_str());
+        Check(LoadFromIni(path).settings.preferredUpscaler==UpscalingMethod::CmaaNis,"legacy OFF without selection defaults to CMAA/NIS");
+        WritePrivateProfileStringW(L"Video",L"CmaaNisEnabled",L"1",path.c_str());
+        Check(LoadFromIni(path).settings.preferredUpscaler==UpscalingMethod::CmaaNis,"legacy active CMAA selection migrates");
         WritePrivateProfileStringW(L"Video",L"CmaaNisEnabled",nullptr,path.c_str());
         WritePrivateProfileStringW(L"Video",L"NisSharpness",nullptr,path.c_str());
         WritePrivateProfileStringW(L"Video",L"VsrEnabled",L"1",path.c_str());
         const auto old=LoadFromIni(path).settings;
-        Check(old.vsrEnabled&&!old.cmaaNisEnabled&&old.nisSharpnessPercent==15,"legacy VSR enabled preference preserved");
+        Check(old.vsrEnabled&&!old.cmaaNisEnabled&&old.nisSharpnessPercent==15 &&
+            old.preferredUpscaler==UpscalingMethod::NvidiaVsr,"legacy VSR enabled preference preserved");
+        auto oldVsrOff=old;
+        oldVsrOff.vsrEnabled=false;
+        CheckSaved(path,oldVsrOff,"save migrated VSR after toggling OFF");
+        const auto migratedOff=LoadFromIni(path).settings;
+        Check(!migratedOff.vsrEnabled && !migratedOff.cmaaNisEnabled &&
+            SelectedUpscaler(migratedOff)==UpscalingMethod::NvidiaVsr,
+            "legacy VSR selection survives OFF and restart");
+    }
+    {
+        using namespace llcv::settings;
+        AppSettings immediate;
+        immediate.skipStartupSettings=true;
+        immediate.vsrEnabled=true;
+        immediate.nisSharpnessPercent=37;
+        CheckSaved(path,immediate,"startup review fixture");
+        WritePrivateProfileStringW(L"General",L"StartupSettingsVersion",nullptr,path.c_str());
+        WritePrivateProfileStringW(L"Future",L"Unknown",L"preserve",path.c_str());
+        Check(StartupReviewRequired(path,L"v2.1.6"),"legacy immediate-start profile requires one review");
+        unsigned long error=0;
+        Check(MarkStartupSettingsShown(path,L"v2.1.6",&error) && !error,"acknowledge displayed settings");
+        Check(!StartupReviewRequired(path,L"v2.1.6"),"same-version next launch resumes immediate start");
+        Check(StartupReviewRequired(path,L"v2.1.7"),"next update requests a new review");
+        const auto afterReview=LoadFromIni(path).settings;
+        Check(afterReview.skipStartupSettings && afterReview.vsrEnabled &&
+            afterReview.nisSharpnessPercent==37,"review marker never changes startup or upscaler preferences");
+        wchar_t unknown[32]{};
+        GetPrivateProfileStringW(L"Future",L"Unknown",L"",unknown,32,path.c_str());
+        Check(wcscmp(unknown,L"preserve")==0,"review preserves unknown settings on cancel");
+        CheckSaved(path,afterReview,"normal save after review");
+        Check(!StartupReviewRequired(path,L"v2.1.6"),"normal saves retain review marker");
+        CheckWin32(SetFileAttributesW(path.c_str(),FILE_ATTRIBUTE_READONLY),"read-only review fixture");
+        Check(!MarkStartupSettingsShown(path,L"v2.1.7",&error) && error==ERROR_ACCESS_DENIED,
+            "failed marker save preserves old profile");
+        Check(StartupReviewRequired(path,L"v2.1.7") && !StartupReviewRequired(path,L"v2.1.6"),
+            "failed acknowledgement retries without consuming first launch");
+        CheckWin32(SetFileAttributesW(path.c_str(),FILE_ATTRIBUTE_NORMAL),"restore review fixture attributes");
+        Check(!MarkStartupSettingsShown(path,L"",&error) && error==ERROR_INVALID_PARAMETER,
+            "empty version cannot erase review marker");
+        WritePrivateProfileStringW(L"General",L"StartupSettingsVersion",nullptr,path.c_str());
     }
     TestPresentationModes(path);
     {

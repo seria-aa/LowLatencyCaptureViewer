@@ -24,7 +24,7 @@ inline constexpr std::array<Shortcut,shortcuts::Count> kShortcuts{{
     {L"F2",L"설정 열기",L"Open settings",false},
     {L"F3",L"오디오 OSD",L"Audio OSD",true},
     {L"F5",L"Pixel-perfect 크기 복원",L"Restore Pixel-perfect size",true},
-    {L"F6",L"NVIDIA VSR 켜기/끄기",L"Toggle NVIDIA VSR",true},
+    {L"F6",L"업스케일링 켜기/끄기",L"Toggle selected upscaling",true},
     {L"F11",L"전체화면",L"Fullscreen",false},
     {L"F12",L"스크린샷 저장",L"Save screenshot",true},
     {L"Tab",L"실시간 진단",L"Live diagnostics",false},

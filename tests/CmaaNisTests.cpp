@@ -232,6 +232,18 @@ static int Difference(const std::vector<BYTE>& a,const std::vector<BYTE>& b,bool
     return result;
 }
 static void Regression() {
+    {
+        const auto settings=g_settings;const int request=g_cmaaNisRequest.load();
+        const auto mode=g_vsrMode.load();const auto vendor=g_vsrGpuVendor.load();
+        g_settings={};g_vsrMode=llcv::vsr::Mode::Disabled;g_vsrGpuVendor=0;
+        g_cmaaNisRequest=llcv::upscaling::Request(false,15);
+        Require(HandleVsrTestKey(VK_F6,0,0) && g_settings.cmaaNisEnabled &&
+            !g_settings.vsrEnabled && g_cmaaNisRequest==15,"first F6 without method history enables CMAA/NIS 0.15");
+        Require(HandleVsrTestKey(VK_F6,0,0) && !g_settings.cmaaNisEnabled &&
+            g_cmaaNisRequest==llcv::upscaling::Request(false,15),"second F6 retains default CMAA method while OFF");
+        g_settings=settings;g_cmaaNisRequest=request;g_vsrMode=mode;g_vsrGpuVendor=vendor;
+        g_transientHudContent=TransientHudContent::Volume;g_volumeHudUntilMs=0;
+    }
     using llcv::upscaling::Eligible;
     Require(!Eligible(false,640,360,{0,0,960,540}),"off bypass");
     Require(!Eligible(true,640,360,{0,0,640,360}),"native bypass");
@@ -289,14 +301,46 @@ static void Regression() {
     Check(r.configureVideoOutput(w,h),"SDR resumes after resource bypass");Render(r,pattern,w);
     Require(Difference(Read(r),enabled)<=1,"SDR output is preserved after HDR bypass");
     g_vsrGpuVendor=r.adapterVendor;
-    if(llcv::vsr::NvidiaAdapter(r.adapterVendor)) {
-        g_settings.cmaaNisEnabled=true;g_settings.vsrEnabled=false;g_vsrMode=llcv::vsr::Mode::Disabled;
-        Require(HandleVsrTestKey(VK_F6,0,0),"existing VSR shortcut");
-        Require(!g_settings.cmaaNisEnabled && g_cmaaNisRequest==-1 && g_settings.vsrEnabled,"VSR shortcut excludes CMAA/NIS");
-        Check(r.presentUploaded(),"VSR transition");
-        Require(!r.cmaaNisPipeline.Enabled(),"F6 removes CMAA resources on render owner");
-        HandleVsrTestKey(VK_F6,0,0);g_vsrMode=llcv::vsr::Mode::Disabled;
+    const auto toggleDevice=r.device;const auto toggleChain=r.swapChain;
+    const auto toggleUpload=r.nv12Textures[0];
+    const auto toggleBindings=g_settings.shortcuts;
+    g_settings.cmaaNisEnabled=true;g_settings.vsrEnabled=false;
+    g_settings.nisSharpnessPercent=37;g_vsrMode=llcv::vsr::Mode::Disabled;
+    // Vendor gating belongs only to VSR, not this selected vendor-neutral method.
+    for(const UINT vendor:{0x10deu,0x1002u,0x8086u,0u}) {
+        g_vsrGpuVendor=vendor;
+        Require(HandleVsrTestKey(VK_F6,0,0),"selected upscaling shortcut");
+        Require(!g_settings.cmaaNisEnabled && !g_settings.vsrEnabled &&
+            g_cmaaNisRequest==llcv::upscaling::Request(false,37),"OFF retains method and sharpness");
+        Check(r.presentUploaded(),"CMAA OFF transition");
+        Require(!r.cmaaNisPipeline.Enabled() &&
+            g_transientHudContent==TransientHudContent::CmaaNisOff &&
+            r.vsrOsdLine().find(L"CMAA2 → NIS   OFF")!=std::wstring::npos &&
+            r.vsrOsdLine().find(L"0.37")!=std::wstring::npos,"OFF HUD and Tab retain selected filter");
+        Require(HandleVsrTestKey(VK_F6,LPARAM{1}<<30,0) && !g_settings.cmaaNisEnabled,"repeat ignored");
+        g_settings.audioOnly=true;
+        Require(HandleVsrTestKey(VK_F6,0,0) && !g_settings.cmaaNisEnabled,"audio-only ignores toggle");
+        g_settings.audioOnly=false;
+        g_settings.shortcuts[static_cast<size_t>(keys::Action::Vsr)]=keys::Ctrl|keys::Alt|keys::Shift|'U';
+        Require(!HandleVsrTestKey(VK_F6,0,0) && !HandleVsrTestKey('U',0,0),"custom shortcut replaces F6");
+        Require(HandleVsrTestKey('U',0,keys::Ctrl|keys::Alt|keys::Shift) &&
+            g_settings.cmaaNisEnabled && !g_settings.vsrEnabled && g_cmaaNisRequest==37,
+            "custom key restores CMAA and original sharpness without VSR");
+        Check(r.presentUploaded(),"CMAA ON transition");
+        Require(r.cmaaNisPipeline.Enabled() && g_transientHudContent==TransientHudContent::CmaaNisOn,
+            "render owner acknowledges CMAA ON");
+        Check(r.refreshOverlayLayouts(),"long customized upscaling HUD");
+        DWRITE_TEXT_METRICS metrics{};Check(r.volumeTextLayout->GetMetrics(&metrics),"CMAA HUD metrics");
+        Require(metrics.height<=62 && metrics.width<=228 && metrics.lineCount<=2,"custom CMAA HUD fits");
+        g_settings.shortcuts=toggleBindings;
+        HandleVsrTestKey(VK_F6,0,0);HandleVsrTestKey(VK_F6,0,0);
+        Check(r.presentUploaded(),"rapid toggles coalesce");
+        Require(g_transientHudContent==TransientHudContent::CmaaNisOn,"rapid toggle does not leave pending HUD");
+        Require(r.device==toggleDevice && r.swapChain==toggleChain && r.nv12Textures[0]==toggleUpload,
+            "toggle preserves capture upload, device and swapchain");
     }
+    g_vsrGpuVendor=r.adapterVendor;
+    g_settings.nisSharpnessPercent=15;
     g_cmaaNisRequest=15;g_vsrMode=llcv::vsr::Mode::Off;
     Microsoft::WRL::ComPtr<ID3D11Device> sameDevice=r.device;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> sameUpload=r.nv12Textures[0];
@@ -414,6 +458,15 @@ static void HdrBypassRegression() {
             for(int repeat=0;repeat<4;repeat++){Render(r,text,w*2);Require(Difference(Read(r),result,true)<=2,"HDR text is deterministic");}
         }
     }
+    g_settings.cmaaNisEnabled=true;g_settings.vsrEnabled=false;g_settings.nisSharpnessPercent=15;
+    g_settings.preferredUpscaler=llcv::settings::UpscalingMethod::CmaaNis;
+    HandleVsrTestKey(VK_F6,0,0);Check(r.presentUploaded(),"HDR selected filter OFF");
+    Require(!r.cmaaNisPipeline.Enabled() && g_transientHudContent==TransientHudContent::CmaaNisOff,
+        "HDR OFF does not switch to VSR");
+    HandleVsrTestKey(VK_F6,0,0);Check(r.presentUploaded(),"HDR selected filter request");
+    Require(!r.cmaaNisPipeline.Enabled() && !g_settings.vsrEnabled &&
+        g_transientHudContent==TransientHudContent::CmaaNisHdrBypass,
+        "HDR toggle reports SDR-only bypass rather than ON");
     r.reset();
     g_settings.cmaaNisEnabled=true;g_settings.nisSharpnessPercent=15;g_cmaaNisRequest=15;
     for(int pass=0;pass<3;++pass) {
