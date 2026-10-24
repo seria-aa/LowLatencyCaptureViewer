@@ -232,10 +232,11 @@ void CheckPaintContracts(TestWindow& state) {
     };
     const COLORREF page = backgroundFor(state.controls.pageTitle);
     const COLORREF group = backgroundFor(state.controls.vsrStatus);
-    Check(backgroundFor(state.controls.vsrCheck) == group, "group checkbox blends into its card");
+    Check(backgroundFor(state.controls.screenshotClipboardCheck) == page,
+        "screenshot checkbox blends into the uncluttered video page");
     if (!state.theme.HighContrast()) {
-        Check(page != group, "functional group has a distinct restrained surface");
-        backgroundFor(state.controls.vsrCheck);
+        Check(page == group, "upscaler details share the existing field background without an extra card");
+        backgroundFor(state.controls.screenshotClipboardCheck);
         const COLORREF enabledText = GetTextColor(dc);
         backgroundFor(state.controls.pixelCheck);
         Check(GetTextColor(dc) != enabledText, "disabled text is visually distinct");
@@ -251,7 +252,7 @@ void CheckPaintContracts(TestWindow& state) {
         EnableWindow(state.controls.videoCapabilityStatus, detectedEnabled);
         EnableWindow(state.controls.unlistedFpsStatus, requestEnabled);
     }
-    Check((SendMessageW(state.controls.vsrCheck, WM_GETDLGCODE, VK_SPACE, 0) & DLGC_BUTTON) != 0,
+    Check((SendMessageW(state.controls.screenshotClipboardCheck, WM_GETDLGCODE, VK_SPACE, 0) & DLGC_BUTTON) != 0,
         "checkbox keeps native dialog keyboard semantics");
     Check((SendMessageW(state.controls.videoCombo, WM_GETDLGCODE, VK_DOWN, 0) & DLGC_WANTARROWS) != 0,
         "combo keeps native arrow-key navigation");
@@ -287,7 +288,7 @@ void OneCycle(const wchar_t* snapshot = nullptr) {
     c.videoCombo = Child(hwnd, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 184, 146, 342, 180, 15);
     for (auto label : { L"1920 x 1080", L"2560 x 1440", L"3840 x 2160" })
         SendMessageW(c.videoCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
-    c.vsrCheck = Child(hwnd, L"BUTTON", L"NVIDIA RTX Video Super Resolution", BS_AUTOCHECKBOX | WS_TABSTOP,
+    c.screenshotClipboardCheck = Child(hwnd, L"BUTTON", L"NVIDIA RTX Video Super Resolution", BS_AUTOCHECKBOX | WS_TABSTOP,
         184, 207, 500, 30, 16);
     c.pixelCheck = Child(hwnd, L"BUTTON", L"Disabled option", BS_AUTOCHECKBOX | WS_TABSTOP,
         184, 252, 400, 30, 17);
@@ -312,16 +313,16 @@ void OneCycle(const wchar_t* snapshot = nullptr) {
     Check(SendMessageW(c.videoCombo, CB_GETCURSEL, 0, 0) == 1, "combo retains native selection");
     wchar_t selected[64]{}; GetWindowTextW(c.videoCombo, selected, 64);
     Check(std::wcscmp(selected, L"2560 x 1440") == 0, "combo retains native accessibility text");
-    Check(SendMessageW(c.vsrCheck, BM_GETCHECK, 0, 0) == BST_UNCHECKED, "native checkbox starts unchecked");
+    Check(SendMessageW(c.screenshotClipboardCheck, BM_GETCHECK, 0, 0) == BST_UNCHECKED, "native checkbox starts unchecked");
     trace("combo select/read + check");
-    SendMessageW(c.vsrCheck, BM_CLICK, 0, 0);
-    Check(SendMessageW(c.vsrCheck, BM_GETCHECK, 0, 0) == BST_CHECKED, "click toggles native checkbox");
+    SendMessageW(c.screenshotClipboardCheck, BM_CLICK, 0, 0);
+    Check(SendMessageW(c.screenshotClipboardCheck, BM_GETCHECK, 0, 0) == BST_CHECKED, "click toggles native checkbox");
     Check(state.clicks == 1, "native click notification delivered once");
     trace("selection + first click");
-    SendMessageW(c.vsrCheck, WM_KEYDOWN, VK_SPACE, 0);
-    SendMessageW(c.vsrCheck, WM_KEYUP, VK_SPACE, 0);
-    Check(SendMessageW(c.vsrCheck, BM_GETCHECK, 0, 0) == BST_UNCHECKED, "space toggles native checkbox");
-    SendMessageW(c.vsrCheck, BM_SETCHECK, BST_CHECKED, 0);
+    SendMessageW(c.screenshotClipboardCheck, WM_KEYDOWN, VK_SPACE, 0);
+    SendMessageW(c.screenshotClipboardCheck, WM_KEYUP, VK_SPACE, 0);
+    Check(SendMessageW(c.screenshotClipboardCheck, BM_GETCHECK, 0, 0) == BST_UNCHECKED, "space toggles native checkbox");
+    SendMessageW(c.screenshotClipboardCheck, BM_SETCHECK, BST_CHECKED, 0);
     EnableWindow(c.pixelCheck, FALSE);
     Check(!IsWindowEnabled(c.pixelCheck), "disabled behavior retained");
     CheckPaintContracts(state);
@@ -347,8 +348,8 @@ void OneCycle(const wchar_t* snapshot = nullptr) {
     SendMessageW(c.startButton, BM_CLICK, 0, 0);
     Check(state.clicks == 3, "push button notification delivered");
     trace("space + push click");
-    SendMessageW(c.vsrCheck, WM_MOUSEMOVE, 0, MAKELPARAM(4, 4));
-    SendMessageW(c.vsrCheck, WM_MOUSELEAVE, 0, 0);
+    SendMessageW(c.screenshotClipboardCheck, WM_MOUSEMOVE, 0, MAKELPARAM(4, 4));
+    SendMessageW(c.screenshotClipboardCheck, WM_MOUSELEAVE, 0, 0);
     SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
     SendMessageW(hwnd, WM_SYSCOLORCHANGE, 0, 0);
     trace("hover + theme updates");
@@ -466,7 +467,7 @@ void CheckActualTabOrder() {
                 expected.insert(expected.end(), {c.presentationCombo, c.presentationHelp,
                     c.displayMonitorCombo, c.pixelCheck});
                 if (!pixelPerfect) expected.push_back(c.scalingCombo); // fixture uses equal capture/display sizes
-                expected.insert(expected.end(), {c.displayResolutionCombo, c.vsrCheck, c.vsrGuideButton,
+                expected.insert(expected.end(), {c.displayResolutionCombo, c.upscalerCombo, c.vsrGuideButton,
                     c.screenshotClipboardCheck, c.screenshotFolderButton});
                 break;
             case SettingsTab::Audio:
@@ -568,12 +569,12 @@ void CheckDeferredTransitions() {
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
     unsigned childPaints = 0;
-    Check(SetWindowSubclass(c.vsrCheck, CountPaints, 72,
+    Check(SetWindowSubclass(c.screenshotClipboardCheck, CountPaints, 72,
           reinterpret_cast<DWORD_PTR>(&childPaints)) != FALSE, "track button painting");
     for (int i = 0; i < 50; ++i)
-        SendMessageW(c.vsrCheck, BM_SETCHECK, i % 2 ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(c.screenshotClipboardCheck, BM_SETCHECK, i % 2 ? BST_CHECKED : BST_UNCHECKED, 0);
     Check(childPaints == 0, "nested state notifications never force intermediate paints");
-    UpdateWindow(c.vsrCheck);
+    UpdateWindow(c.screenshotClipboardCheck);
     Check(childPaints == 1, "repeated state changes coalesce into one buffered paint");
     for (int i = 0; i < 50; ++i) {
         {
@@ -598,14 +599,14 @@ void CheckDeferredTransitions() {
         }
         Check(IsWindowVisible(hwnd), "completed page update restores the visible owner");
         Check(GetUpdateRect(hwnd, nullptr, FALSE), "completed page update queues its final paint");
-        Check(SendMessageW(c.vsrCheck, BM_GETCHECK, 0, 0) == BST_CHECKED,
+        Check(SendMessageW(c.screenshotClipboardCheck, BM_GETCHECK, 0, 0) == BST_CHECKED,
               "page transitions preserve selection");
         UpdateWindow(hwnd);
     }
     ShowWindow(hwnd, SW_HIDE);
     { SettingsVisualUpdate hidden(hwnd); RefreshPreview(state); }
     Check(!IsWindowVisible(hwnd), "updating a hidden dialog never reveals it");
-    RemoveWindowSubclass(c.vsrCheck, CountPaints, 72);
+    RemoveWindowSubclass(c.screenshotClipboardCheck, CountPaints, 72);
     DestroyWindow(hwnd);
     for (HFONT font : c.uiFonts) DeleteObject(font);
     DrainNativeMessages();
@@ -663,7 +664,7 @@ void CheckDisabledLabelPixels() {
         SendMessageW(c.themeCombo, CB_SETCURSEL, light ? 1 : 0, 0);
         SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(2053, CBN_SELCHANGE), reinterpret_cast<LPARAM>(c.themeCombo));
         SendMessageW(c.pixelCheck, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(c.vsrCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+        SendMessageW(c.upscalerCombo, CB_SETCURSEL, 0, 0);
         c.activeTab = SettingsTab::VideoWindow;
         RefreshPreview(state);
         Check(!IsWindowEnabled(c.scalingLabel) && !IsWindowEnabled(c.scalingCombo),
@@ -785,7 +786,7 @@ void CheckDisabledLabelPixels() {
         }
         c.activeTab = SettingsTab::VideoWindow;
         SendMessageW(c.pixelCheck, BM_SETCHECK, BST_UNCHECKED, 0);
-        SendMessageW(c.vsrCheck, BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageW(c.upscalerCombo, CB_SETCURSEL, 2, 0);
         RefreshPreview(state);
         Check(IsWindowEnabled(c.scalingLabel) && IsWindowEnabled(c.displayResolutionLabel),
             "labels restore native enabled state");
@@ -989,13 +990,17 @@ void ActualSnapshots(const wchar_t* directory, bool videoOnly = false, bool wind
             SaveSnapshot(hwnd, (std::wstring(directory) + L"/" + name).c_str());
             if (windowOnly) continue;
             if (videoOnly) {
-                SendMessageW(c.vsrCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+                SendMessageW(c.upscalerCombo, CB_SETCURSEL, 0, 0);
                 SendMessageW(c.videoCombo, CB_SETCURSEL, 1, 0);
                 SendMessageW(c.displayResolutionCombo, CB_SETCURSEL, 2, 0);
                 UpdateAdvancedControlVisibility(&c, false, VideoPixelFormat::Nv12);
                 swprintf_s(name, L"settings-%s-%s-vsr-off-%udpi.bmp", light ? L"light" : L"dark",
                     english ? L"en" : L"ko", dpi);
                 SaveSnapshot(hwnd, (std::wstring(directory) + L"/" + name).c_str());
+                SendMessageW(c.upscalerCombo,CB_SETCURSEL,1,0);
+                UpdateAdvancedControlVisibility(&c,false,VideoPixelFormat::Nv12);
+                swprintf_s(name,L"settings-%s-%s-cmaa-nis-%udpi.bmp",light?L"light":L"dark",english?L"en":L"ko",dpi);
+                SaveSnapshot(hwnd,(std::wstring(directory)+L"/"+name).c_str());
                 continue;
             }
             if (c.activeTab==SettingsTab::GuideDiagnostics) {
@@ -1032,15 +1037,15 @@ void ActualSnapshots(const wchar_t* directory, bool videoOnly = false, bool wind
             }
             if (index == 0) {
                 const LRESULT pixel = SendMessageW(c.pixelCheck, BM_GETCHECK, 0, 0);
-                const LRESULT vsr = SendMessageW(c.vsrCheck, BM_GETCHECK, 0, 0);
+                const LRESULT vsr = SendMessageW(c.upscalerCombo, CB_GETCURSEL, 0, 0);
                 SendMessageW(c.pixelCheck, BM_SETCHECK, BST_CHECKED, 0);
-                SendMessageW(c.vsrCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+                SendMessageW(c.upscalerCombo, CB_SETCURSEL, 0, 0);
                 UpdateAdvancedControlVisibility(&c, false, VideoPixelFormat::Nv12);
                 swprintf_s(name, L"settings-%s-%s-pixel-perfect-%udpi.bmp", light ? L"light" : L"dark",
                     english ? L"en" : L"ko", dpi);
                 SaveSnapshot(hwnd, (std::wstring(directory) + L"/" + name).c_str());
                 SendMessageW(c.pixelCheck, BM_SETCHECK, pixel, 0);
-                SendMessageW(c.vsrCheck, BM_SETCHECK, vsr, 0);
+                SendMessageW(c.upscalerCombo, CB_SETCURSEL, vsr, 0);
                 UpdateAdvancedControlVisibility(&c, false, VideoPixelFormat::Nv12);
             }
         }

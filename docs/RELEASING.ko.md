@@ -7,10 +7,10 @@
 [1. 버전 표기](#1-버전-표기) · [2. 빌드와 검사](#2-빌드와-검사) · [3. 패키지](#3-패키지) · [4. GitHub 공개](#4-github-공개)
 
 버전 표기, 빌드, 패키지와 GitHub 릴리스를 일관되게 유지하기 위한 체크리스트입니다.
-아래의 `agent/release-v2.1.5`는 브랜치명 예시이며, 해당 브랜치가 이미 생성되어
+아래의 `agent/release-v2.1.6`는 브랜치명 예시이며, 해당 브랜치가 이미 생성되어
 있다는 뜻은 아닙니다. 게시 전에 실제 릴리스 브랜치를 확인하고 명령의 브랜치명도 맞춥니다.
-아래 실행 명령은 모두 **v2.1.5** 기준이며 빌드 폴더는 현재 관례인
-`build-v2150-release`를 사용합니다. 다른 버전은 버전·빌드 폴더·출력 경로를
+아래 실행 명령은 모두 **v2.1.6** 기준이며 빌드 폴더는 현재 관례인
+`build-v2160-release`를 사용합니다. 다른 버전은 버전·빌드 폴더·출력 경로를
 함께 변경합니다. 빌드 폴더에 점이 있는 버전을 넣고 패키지 기본 경로는 그대로
 두지 않습니다.
 
@@ -18,7 +18,7 @@
 
 ## 1. 버전 표기
 
-Git 태그와 앱 버전 표시에는 `v2.1.5`를 사용합니다. 실행 파일 리소스와 설치
+Git 태그와 앱 버전 표시에는 `v2.1.6`를 사용합니다. 실행 파일 리소스와 설치
 프로그램의 버전 필드는 `v` 없는 숫자를 사용합니다. 다음 위치의 버전을 맞춥니다.
 
 - `CMakeLists.txt`의 `project(... VERSION ...)`
@@ -28,14 +28,14 @@ Git 태그와 앱 버전 표시에는 `v2.1.5`를 사용합니다. 실행 파일
   `VersionInfoVersion`
 - `tools/package-v1.ps1`의 기본 빌드·출력 경로
 - `BUILD_INFO.txt`, `DEPENDENCIES.txt`, `실행안내.txt`의 현재 버전 머리말
-- `docs/release-notes-v2.1.5.md`
+- `docs/release-notes-v2.1.6.md`
 - 한영 README·가이드의 현재 버전과 변경 내용, 설정 예시 이미지·캡션
 
 변경 후 현재 버전 표기에 이전 문자열이 남지 않았는지 확인합니다.
 과거 릴리스 노트와 변경 기록의 버전 번호는 그대로 보존합니다.
 
 ```powershell
-rg -n "2\.1\.4|build-v2140-release" CMakeLists.txt src installer tools DEPENDENCIES.txt 실행안내.txt
+rg -n "2\.1\.5|build-v2150-release" CMakeLists.txt src installer tools DEPENDENCIES.txt 실행안내.txt
 ```
 
 <br>
@@ -47,15 +47,20 @@ rg -n "2\.1\.4|build-v2140-release" CMakeLists.txt src installer tools DEPENDENC
 설치 파일·포터블·CMake 설치 경로는 진단 빌드를 거부합니다. 진단 빌드 폴더에 남은 이전 정식 EXE도
 재사용하지 마세요. 검증 기록은 `tests/RELEASE_V2_1_4_AUDIT.md`에서 확인합니다.
 
+테스트·비공개 미리보기는 새로 빌드한 격리 프로필 버전을 사용하세요.
+일반 앱을 옵션 없이 실행하면 실제 사용자 설정을 사용합니다.
+현재 검증 범위는 `tests/RELEASE_V2_1_6_AUDIT.md`, 설정 분리 정책은
+`tests/PROFILE_ISOLATION.md`에 기록합니다.
+
 저장소 루트의 x64 Visual Studio 개발자 PowerShell에서 콘솔을 UTF-8로 설정합니다.
 Release x64 빌드를 만들고 등록된 모든 테스트와 공백 검사를 통과해야 합니다.
 
 ```powershell
 chcp.com 65001 > $null
 .\tools\Build-RecordingFFmpeg.ps1
-cmake -S . -B build-v2150-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC=OFF -DLLCV_RECORDING_FFMPEG_ROOT="$PWD/outputs/dependencies/recording-ffmpeg/install"
-cmake --build build-v2150-release
-ctest --test-dir build-v2150-release --output-on-failure
+cmake -S . -B build-v2160-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC=OFF -DLLCV_RECORDING_FFMPEG_ROOT="$PWD/outputs/dependencies/recording-ffmpeg/install"
+cmake --build build-v2160-release
+ctest --test-dir build-v2160-release --output-on-failure
 git diff --check
 ```
 
@@ -71,21 +76,24 @@ git diff --check
 공개할 릴리스 자산은 아래 설치 파일과 포터블 ZIP 두 개입니다.
 
 ```text
-LowLatencyCaptureViewer_v2.1.5_Setup.exe
-LowLatencyCaptureViewer_v2.1.5_x64.zip
+LowLatencyCaptureViewer_v2.1.6_Setup.exe
+LowLatencyCaptureViewer_v2.1.6_x64.zip
 ```
 
 ```powershell
 chcp.com 65001 > $null
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
-  -Version 2.1.5 -BuildDir ..\build-v2150-release -OutputDir outputs\v2.1.5
+  -Version 2.1.6 -BuildDir ..\build-v2160-release -OutputDir outputs\v2.1.6
 & "C:\Program Files\Inno Setup 7\ISCC.exe" `
-  "--define=BuildDir=..\build-v2150-release" ".\installer\LowLatencyCaptureViewer.iss"
+  "--define=BuildDir=..\build-v2160-release" ".\installer\LowLatencyCaptureViewer.iss"
 ```
 
 `settings.ini`, `%LOCALAPPDATA%` 로그, `build-*` 폴더, PDB, ILK와 테스트 실행
-파일은 패키지에 넣지 않습니다. ZIP 안의 EXE와 설치 파일 버전이 `2.1.5` 또는
-`2.1.5.0`인지 확인합니다. 파일명만 새 버전이고 내부 EXE는 구버전이면 안 됩니다.
+파일은 패키지에 넣지 않습니다. ZIP 안의 EXE와 설치 파일 버전이 `2.1.6` 또는
+`2.1.6.0`인지 확인합니다. 파일명만 새 버전이고 내부 EXE는 구버전이면 안 됩니다.
+
+업스케일링 실험 보고서·비교 이미지와 셰이더 소스·수동 테스트 도구는 사용자 패키지에서 제외합니다.
+정식 NIS·CMAA2 셰이더는 실행 파일에 포함하고 아래 라이선스 고지는 함께 배포합니다.
 
 두 패키지의 최상위에는 아래 외부 구성요소 고지가 모두 있어야 합니다.
 
@@ -94,6 +102,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
 - `ffmpeg-licenses/`: COPYING.LGPLv2.1, LICENSE.md, recording-ffmpeg-NOTICE.txt, config.mak
 - `avformat-62.dll`, `avcodec-62.dll`, `avutil-60.dll`: pinned mux runtime
 - `PRETENDARD-LICENSE.txt`: 원본 `third_party/pretendard/LICENSE.txt`
+- `NIS-LICENSE.txt`, `CMAA2-LICENSE.txt`, `UPSCALING-NOTICE.txt`: `third_party/upscaling`의 사용 구성요소 고지
 
 앱의 `LICENSE`도 필요합니다. 준비 폴더뿐 아니라 실제 ZIP을 검사합니다.
 다음 읽기 전용 검사는 필수 고지 누락과 흔한 빌드·설정 파일 혼입을 확인합니다.
@@ -101,10 +110,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
 ```powershell
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $releaseArchive = [IO.Compression.ZipFile]::OpenRead(
-  (Resolve-Path 'outputs\v2.1.5\LowLatencyCaptureViewer_v2.1.5_x64.zip').Path)
+  (Resolve-Path 'outputs\v2.1.6\LowLatencyCaptureViewer_v2.1.6_x64.zip').Path)
 try {
   foreach ($required in @('LowLatencyCaptureViewer.exe', 'LICENSE',
       'ASIO-SDK-LICENSE.txt', 'ASIO-HOST-LICENSE.txt', 'PRETENDARD-LICENSE.txt',
+      'NIS-LICENSE.txt', 'CMAA2-LICENSE.txt', 'UPSCALING-NOTICE.txt',
       'README.md', 'README.ko.md', 'DEPENDENCIES.txt', '실행안내.txt')) {
     if ($null -eq $releaseArchive.GetEntry($required)) {
       throw "Missing package file: $required"
@@ -135,21 +145,21 @@ Inno Setup의 구성까지 확인된 것은 아닙니다.
 ```powershell
 git status --short
 git diff --cached --check
-git commit -m "Prepare v2.1.5 release"
-git push origin agent/release-v2.1.5
+git commit -m "Prepare v2.1.6 release"
+git push origin agent/release-v2.1.6
 ```
 
 릴리스 노트를 사용해 브랜치 HEAD를 태그 대상으로 공개합니다. 베타가 명시된 경우에만
-`--prerelease`를 추가합니다. **v2.1.5는 정식 릴리스**이므로 해당 옵션을 쓰지 않습니다.
+`--prerelease`를 추가합니다. **v2.1.6는 정식 릴리스**이므로 해당 옵션을 쓰지 않습니다.
 
 ```powershell
-gh release create v2.1.5 `
-  "outputs\v2.1.5\LowLatencyCaptureViewer_v2.1.5_Setup.exe" `
-  "outputs\v2.1.5\LowLatencyCaptureViewer_v2.1.5_x64.zip" `
+gh release create v2.1.6 `
+  "outputs\v2.1.6\LowLatencyCaptureViewer_v2.1.6_Setup.exe" `
+  "outputs\v2.1.6\LowLatencyCaptureViewer_v2.1.6_x64.zip" `
   --repo seria-aa/LowLatencyCaptureViewer `
-  --target agent/release-v2.1.5 `
-  --title "LLCV v2.1.5" `
-  --notes-file ".\docs\release-notes-v2.1.5.md"
+  --target agent/release-v2.1.6 `
+  --title "LLCV v2.1.6" `
+  --notes-file ".\docs\release-notes-v2.1.6.md"
 ```
 
 공개된 태그·자산은 덮어쓰지 않습니다. 문제가 생기면 다음 패치 버전으로 수정합니다.

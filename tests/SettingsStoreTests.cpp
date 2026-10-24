@@ -875,6 +875,27 @@ int main(int argc, char** argv) {
             Check(migrated[i]==llcv::shortcuts::Defaults[i],"mute migration preserves every other action");
         CheckSaved(path,settings,"restore defaults after mute migration");
     }
+    {
+        using namespace llcv::settings;
+        AppSettings settings;
+        Check(!settings.cmaaNisEnabled && settings.nisSharpnessPercent==15,"CMAA/NIS opt-in with 0.15 default");
+        for(bool cmaa:{false,true}) for(bool vsr:{false,true}) for(int sharp:{0,15,100}) {
+            settings.cmaaNisEnabled=cmaa;settings.vsrEnabled=vsr;settings.nisSharpnessPercent=sharp;
+            CheckSaved(path,settings,"save upscaler");
+            const auto loaded=LoadFromIni(path).settings;
+            Check(loaded.cmaaNisEnabled==cmaa && loaded.vsrEnabled==(vsr&&!cmaa) &&
+                loaded.nisSharpnessPercent==sharp,"upscaling modes exclusive and sharpness round trips");
+        }
+        for(const wchar_t* value:{L"-1",L"101",L"bad",L"15oops",L"999999999999"}) {
+            WritePrivateProfileStringW(L"Video",L"NisSharpness",value,path.c_str());
+            Check(LoadFromIni(path).settings.nisSharpnessPercent==15,"damaged sharpness defaults to 0.15");
+        }
+        WritePrivateProfileStringW(L"Video",L"CmaaNisEnabled",nullptr,path.c_str());
+        WritePrivateProfileStringW(L"Video",L"NisSharpness",nullptr,path.c_str());
+        WritePrivateProfileStringW(L"Video",L"VsrEnabled",L"1",path.c_str());
+        const auto old=LoadFromIni(path).settings;
+        Check(old.vsrEnabled&&!old.cmaaNisEnabled&&old.nisSharpnessPercent==15,"legacy VSR enabled preference preserved");
+    }
     TestPresentationModes(path);
     {
         using namespace llcv::settings;

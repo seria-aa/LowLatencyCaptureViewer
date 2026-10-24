@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 2.1.5 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 2.1.6 LANGUAGES CXX)
 
 include(cmake/MsvcDependencies.cmake)
 
@@ -47,6 +47,9 @@ add_executable(LowLatencyCaptureViewer
     src/video/VsrExperiment.cpp
 )
 
+include(cmake/Upscaling.cmake)
+target_link_libraries(LowLatencyCaptureViewer PRIVATE llcv_upscaling)
+
 target_include_directories(LowLatencyCaptureViewer PRIVATE
     src
     third_party/asio/common
@@ -60,6 +63,7 @@ set_property(SOURCE tests/VsrExperimentTests.cpp APPEND PROPERTY OBJECT_DEPENDS
 option(LLCV_HDR_FRAME_AUDIT "Build a private F8 single-frame HDR diagnostic (not for release)" OFF)
 option(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC "Private audio-input watchdog/retry prototype (not for release)" OFF)
 option(LLCV_RECORDING "Enable SDR video and stereo audio recording" ON)
+option(LLCV_SPATIAL_PROTOTYPE "Build separate private SDR spatial upscaling comparison targets" OFF)
 if(LLCV_RECORDING)
     target_compile_definitions(LowLatencyCaptureViewer PRIVATE LLCV_RECORDING)
     target_sources(LowLatencyCaptureViewer PRIVATE src/recording/Recorder.cpp src/recording/RecordingControls.cpp
@@ -160,7 +164,9 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(RecordingQualityBenchmark tests/RecordingQualityBenchmark.cpp src/recording/Recorder.cpp
+    # Manual tools remain available explicitly, without compiling redundant
+    # preview/benchmark executables during a normal build of the test suite.
+    add_executable(RecordingQualityBenchmark EXCLUDE_FROM_ALL tests/RecordingQualityBenchmark.cpp src/recording/Recorder.cpp
         src/recording/RecordingOptions.cpp src/recording/EncoderSupport.cpp)
     target_include_directories(RecordingQualityBenchmark PRIVATE src)
     target_compile_definitions(RecordingQualityBenchmark PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -322,7 +328,7 @@ if(BUILD_TESTING)
     add_test(NAME RecordingGpuIndicatorGpuTests COMMAND RecordingGpuIndicatorTests --gpu)
     set_tests_properties(RecordingGpuIndicatorTests RecordingGpuIndicatorGpuTests
         PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
-    add_executable(RecordingIndicatorPreview WIN32 tests/RecordingControlsTests.cpp)
+    add_executable(RecordingIndicatorPreview WIN32 EXCLUDE_FROM_ALL tests/RecordingControlsTests.cpp)
     target_include_directories(RecordingIndicatorPreview PRIVATE src)
     target_compile_definitions(RecordingIndicatorPreview PRIVATE LLCV_RECORDING_INDICATOR_PREVIEW UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_compile_options(RecordingIndicatorPreview PRIVATE /W4 /EHsc /utf-8)
@@ -551,7 +557,7 @@ if (BUILD_TESTING)
     # Local visual/keyboard QA with synthetic devices; never installed and
     # never reads or saves a user's settings or opens capture/audio hardware.
     get_target_property(settings_preview_sources SettingsThemeTests SOURCES)
-    add_executable(SettingsPreview WIN32 ${settings_preview_sources})
+    add_executable(SettingsPreview WIN32 EXCLUDE_FROM_ALL ${settings_preview_sources})
     target_include_directories(SettingsPreview PRIVATE src)
     target_compile_definitions(SettingsPreview PRIVATE LLCV_SETTINGS_PREVIEW
         $<TARGET_PROPERTY:SettingsThemeTests,COMPILE_DEFINITIONS>)
@@ -611,6 +617,42 @@ if (BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/ViewerShortcuts.h")
     get_target_property(audio_callback_sources LowLatencyCaptureViewer SOURCES)
     list(FILTER audio_callback_sources EXCLUDE REGEX "src/(main.cpp|app.rc|audio/AsioOutput.cpp)$")
+    add_executable(CmaaNisTests tests/CmaaNisTests.cpp ${audio_callback_sources})
+    target_include_directories(CmaaNisTests PRIVATE $<TARGET_PROPERTY:LowLatencyCaptureViewer,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(CmaaNisTests PRIVATE LLCV_SETTINGS_MODE_TEST
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,COMPILE_DEFINITIONS>)
+    target_link_libraries(CmaaNisTests PRIVATE $<TARGET_PROPERTY:LowLatencyCaptureViewer,LINK_LIBRARIES>)
+    target_compile_options(CmaaNisTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    set_target_properties(CmaaNisTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    set_property(SOURCE tests/CmaaNisTests.cpp APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
+    add_test(NAME CmaaNisRegression COMMAND CmaaNisTests)
+    add_test(NAME CmaaNisHdr COMMAND CmaaNisTests --hdr)
+    set_tests_properties(CmaaNisRegression CmaaNisHdr PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
+    if(LLCV_RECORDING)
+        add_test(NAME CmaaNisRecording COMMAND CmaaNisTests --recording "${CMAKE_CURRENT_BINARY_DIR}/cmaa-nis-recordings")
+        set_tests_properties(CmaaNisRecording PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
+    endif()
+    if(LLCV_SPATIAL_PROTOTYPE)
+        get_target_property(spatial_app_sources LowLatencyCaptureViewer SOURCES)
+        add_executable(LowLatencyCaptureViewer_Spatial WIN32 ${spatial_app_sources} src/video/SpatialUpscaler.cpp)
+        add_executable(SpatialUpscalingTests tests/SpatialUpscalingTests.cpp ${audio_callback_sources} src/video/SpatialUpscaler.cpp)
+        foreach(spatial_target LowLatencyCaptureViewer_Spatial SpatialUpscalingTests)
+            target_include_directories(${spatial_target} PRIVATE $<TARGET_PROPERTY:LowLatencyCaptureViewer,INCLUDE_DIRECTORIES>)
+            target_compile_definitions(${spatial_target} PRIVATE
+                $<TARGET_PROPERTY:LowLatencyCaptureViewer,COMPILE_DEFINITIONS>
+                LLCV_SPATIAL_PROTOTYPE LLCV_SPATIAL_SOURCE_ROOT=L"${CMAKE_CURRENT_SOURCE_DIR}")
+            target_link_libraries(${spatial_target} PRIVATE $<TARGET_PROPERTY:LowLatencyCaptureViewer,LINK_LIBRARIES>)
+            target_compile_options(${spatial_target} PRIVATE /W4 /EHsc /permissive- /utf-8)
+        endforeach()
+        target_compile_definitions(SpatialUpscalingTests PRIVATE LLCV_SETTINGS_MODE_TEST)
+        set_target_properties(SpatialUpscalingTests PROPERTIES WIN32_EXECUTABLE FALSE)
+        add_test(NAME SpatialUpscalingRegression COMMAND SpatialUpscalingTests --regression)
+        set_tests_properties(SpatialUpscalingRegression PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
+        if(LLCV_RECORDING)
+            add_test(NAME SpatialUpscalingRecording COMMAND SpatialUpscalingTests --recording "${CMAKE_CURRENT_BINARY_DIR}/spatial-recordings")
+            set_tests_properties(SpatialUpscalingRecording PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
+        endif()
+    endif()
     if (WIN32)
         add_executable(VsrExperimentTests tests/VsrExperimentTests.cpp ${audio_callback_sources})
         target_compile_definitions(VsrExperimentTests PRIVATE LLCV_SETTINGS_MODE_TEST)
@@ -1235,17 +1277,27 @@ if(BUILD_TESTING)
         add_test(NAME PackageDocsTests COMMAND "${LLCV_POWERSHELL}"
             -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/PackageDocsTests.ps1")
         set_tests_properties(PackageDocsTests PROPERTIES TIMEOUT 60)
+        add_test(NAME TestSnapshotArchiveTests COMMAND "${LLCV_POWERSHELL}"
+            -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/TestSnapshotArchiveTests.ps1")
+        set_tests_properties(TestSnapshotArchiveTests PROPERTIES TIMEOUT 60)
         if(LLCV_RECORDING AND NOT LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
             add_test(NAME ReleasePackageTests COMMAND "${LLCV_POWERSHELL}"
                 -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/ReleasePackageTests.ps1"
                 -BuildRoot "${CMAKE_CURRENT_BINARY_DIR}" -SourceRoot "${CMAKE_CURRENT_SOURCE_DIR}"
-                -Version "${PROJECT_VERSION}" -Configuration "$<CONFIG>")
+                -Version "${PROJECT_VERSION}" -Configuration "$<CONFIG>" -CMake "${CMAKE_COMMAND}")
             set_tests_properties(ReleasePackageTests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         endif()
     endif()
 endif()
 
 if(BUILD_TESTING AND MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
+    if(LLCV_RECORDING)
+        add_test(NAME ManualToolBuildTests COMMAND ${CMAKE_COMMAND}
+            "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            "-DMAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ManualToolBuildTests.cmake")
+        set_tests_properties(ManualToolBuildTests PROPERTIES TIMEOUT 15)
+    endif()
     add_test(NAME BuildDependencyTests COMMAND ${CMAKE_COMMAND}
         "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
         "-DTEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/dependency-test"
@@ -1287,6 +1339,10 @@ if(BUILD_TESTING AND MSVC)
         add_library(${llcv_optional_target} OBJECT EXCLUDE_FROM_ALL src/main.cpp)
         target_include_directories(${llcv_optional_target} PRIVATE
             $<TARGET_PROPERTY:LowLatencyCaptureViewer,INCLUDE_DIRECTORIES>)
+        # These object-only checks may be launched by CTest outside the
+        # developer shell. Reuse the SDK paths verified at configuration time.
+        target_include_directories(${llcv_optional_target} SYSTEM PRIVATE
+            ${llcv_recovery_system_includes})
         target_compile_options(${llcv_optional_target} PRIVATE
             $<TARGET_PROPERTY:LowLatencyCaptureViewer,COMPILE_OPTIONS>)
         target_compile_features(${llcv_optional_target} PRIVATE
@@ -1327,6 +1383,9 @@ install(FILES LICENSE README.md README.ko.md DEPENDENCIES.txt
 install(FILES third_party/asio/LICENSE.txt DESTINATION . RENAME ASIO-SDK-LICENSE.txt)
 install(FILES third_party/asio/HOST-LICENSE.txt DESTINATION . RENAME ASIO-HOST-LICENSE.txt)
 install(FILES third_party/pretendard/LICENSE.txt DESTINATION . RENAME PRETENDARD-LICENSE.txt)
+install(FILES third_party/upscaling/nis/licence.txt DESTINATION . RENAME NIS-LICENSE.txt)
+install(FILES third_party/upscaling/cmaa2/license.txt DESTINATION . RENAME CMAA2-LICENSE.txt)
+install(FILES third_party/upscaling/NOTICE.txt DESTINATION . RENAME UPSCALING-NOTICE.txt)
 # Keep exclusions in sync with Copy-PackageDocs.ps1 and the installer.
 install(DIRECTORY docs DESTINATION .
         PATTERN "viewer.png" EXCLUDE
@@ -1334,4 +1393,29 @@ install(DIRECTORY docs DESTINATION .
         PATTERN "TEST-BLT.ko.md" EXCLUDE
         PATTERN "vsr-all-formats-validation.md" EXCLUDE
         PATTERN "vsr-experiment.md" EXCLUDE
-        PATTERN "vsr-hdr-validation.md" EXCLUDE)
+        PATTERN "vsr-hdr-validation.md" EXCLUDE
+        PATTERN "SPATIAL_UPSCALING_EXPERIMENT.md" EXCLUDE
+        PATTERN "SPATIAL_UPSCALING_EXTENDED_COMPARISON.md" EXCLUDE
+        PATTERN "SPATIAL_UPSCALING_FHD_RECOMPARISON.md" EXCLUDE)
+
+if(BUILD_TESTING AND LLCV_RECORDING)
+    add_executable(TestProfileTests tests/TestProfileTests.cpp src/settings/SettingsStore.cpp src/recording/RecordingOptions.cpp)
+    target_include_directories(TestProfileTests PRIVATE src)
+    target_compile_definitions(TestProfileTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(TestProfileTests PRIVATE /W4 /EHsc /utf-8)
+    set_target_properties(TestProfileTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_test(NAME TestProfileTests COMMAND TestProfileTests)
+endif()
+# Fail-safe profile separation applies to direct .exe launches too, not only
+# CTest wrappers. Never propagate this definition into the normal application.
+get_property(llcv_profile_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(llcv_target IN LISTS llcv_profile_targets)
+    get_target_property(llcv_type ${llcv_target} TYPE)
+    if(llcv_type STREQUAL "EXECUTABLE")
+        target_sources(${llcv_target} PRIVATE src/settings/TestProfile.cpp)
+    endif()
+    if(llcv_type STREQUAL "EXECUTABLE" AND NOT llcv_target STREQUAL "LowLatencyCaptureViewer")
+        target_compile_definitions(${llcv_target} PRIVATE LLCV_TEST_PROFILE)
+        target_link_libraries(${llcv_target} PRIVATE shell32 ole32)
+    endif()
+endforeach()

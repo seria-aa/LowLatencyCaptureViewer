@@ -4,7 +4,7 @@
 
 [README](../README.md) · [한국어](INDEX.ko.md)
 
-The current user guides cover **LLCV 2.1.5**. Historical development records are listed separately below.
+The current user guides cover **LLCV 2.1.6**. Historical development records are listed separately below.
 Features, defaults, and test results in historical records apply to the version and environment tested.
 User guides and their images are included in binary packages. Development and validation records are linked on GitHub and require an internet connection.
 
@@ -12,7 +12,7 @@ User guides and their images are included in binary packages. Development and va
 
 ## User and developer guides
 
-- [User guide](USAGE.md) — Installation, settings, sleep prevention, shortcuts, VSR, screenshots
+- [User guide](USAGE.md) — Installation, settings, sleep prevention, shortcuts, upscaling/VSR, screenshots
 - [Video and HDR](VIDEO.md) — Formats, frame rates, 40 fps capture, HDR10, scaling, window size
 - [Recording](RECORDING.md) — codecs, quality, storage, splitting and file protection
 - [Audio and 5.1](AUDIO.md) — Output modes, LPCM 5.1, buffers, clock correction
@@ -27,6 +27,7 @@ Each guide links to its Korean and English versions.
 
 ## Release notes
 
+- [v2.1.6](release-notes-v2.1.6.md)
 - [v2.1.5](release-notes-v2.1.5.md)
 - [v2.1.4](release-notes-v2.1.4.md)
 - [v2.1.3](release-notes-v2.1.3.md)
@@ -104,6 +105,7 @@ These records preserve implementation history and measurement conditions, not cu
 - [v2.0.0 release-readiness audit](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/tests/RELEASE_V2_0_0_AUDIT.md)
 - [v2.0.1 release-readiness audit](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/tests/RELEASE_V2_0_1_AUDIT.md)
 - [v2.0.2 release-readiness audit](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/tests/RELEASE_V2_0_2_AUDIT.md)
+- [v2.1.6 release preparation and validation scope](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/tests/RELEASE_V2_1_6_AUDIT.md)
 - [v2.1.5 release preparation and validation scope](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/tests/RELEASE_V2_1_5_AUDIT.md)
 - [v1.2.7 release verification — 2026-09-11](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/tests/RELEASE-v1.2.7.md)
 - [v1.2.8 release verification — 2026-09-16](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/tests/RELEASE-v1.2.8.md)

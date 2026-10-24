@@ -1,4 +1,16 @@
-LLCV v2.1.5 x64 (continued from the v0.14.2 rework)
+LLCV v2.1.6 x64 (continued from the v0.14.2 rework)
+
+v2.1.6 SDR upscaling and settings layout
+---------------------------------------
+- Adds opt-in CMAA2 before NIS for SDR enlargement, with default sharpness 0.15.
+- Adds an Off/CMAA2 -> NIS/NVIDIA VSR selector and sharpness controls.
+- Bypasses the new filter for HDR, native size, downscaling and enlargement beyond 2x per axis.
+- Keeps recordings/screenshots on the capture-source path and draws OSD after display filtering.
+- Aligns settings tabs, inline controls and footer margins without adding scrolling.
+- Reduces temporary UI allocations and redundant control-class queries during layout.
+- Excludes manual preview/benchmark targets from the default build.
+- Separates test/private-preview profiles from real settings.
+- See tests/RELEASE_V2_1_6_AUDIT.md for preparation status and validation evidence.
 
 v2.1.5 Capture settings and recording reliability
 -------------------------------------------------

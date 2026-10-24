@@ -1,4 +1,5 @@
 #include "settings/SettingsStore.h"
+#include "settings/TestProfile.h"
 
 #include <windows.h>
 
@@ -149,6 +150,7 @@ void VideoDimensions(VideoPreset preset, int& width, int& height) {
 }  // namespace
 
 bool MigrateLegacyPcmQueueTarget(const std::wstring& path) {
+    if(test_profile::Protected(path)){SetLastError(ERROR_ACCESS_DENIED);return false;}
     if (ReadInt(path, L"Audio", L"PcmQueueDefaultsVersion") >= kPcmQueueDefaultsVersion ||
         ReadInt(path, L"Audio", L"PcmQueueTargetMs", 25) != 20) return true;
     // Write the value first: if the marker fails, retrying is harmless.
@@ -160,6 +162,7 @@ bool MigrateLegacyPcmQueueTarget(const std::wstring& path) {
 
 LoadResult LoadFromIni(const std::wstring& path) {
     LoadResult result{};
+    if(test_profile::Protected(path))return result;
     AppSettings& settings = result.settings;
     for (size_t i=0;i<shortcuts::Count;++i)
         settings.shortcuts[i]=static_cast<unsigned>(ReadInt(path,L"Shortcuts",shortcuts::Names[i],shortcuts::Defaults[i]));
@@ -404,6 +407,10 @@ LoadResult LoadFromIni(const std::wstring& path) {
     settings.saveLog = ReadBool(path, L"Diagnostics", L"SaveLog");
     settings.screenshotClipboard = ReadBool(path, L"Screenshot", L"CopyToClipboard");
     settings.vsrEnabled = ReadBool(path, L"Video", L"VsrEnabled");
+    settings.cmaaNisEnabled = ReadBool(path, L"Video", L"CmaaNisEnabled");
+    const int nisSharpness = ReadInt(path, L"Video", L"NisSharpness", 15);
+    settings.nisSharpnessPercent = nisSharpness >= 0 && nisSharpness <= 100 ? nisSharpness : 15;
+    if (settings.cmaaNisEnabled) settings.vsrEnabled = false;
     // Legacy profiles used Resolution for capture while VSR was off. Do not
     // activate a dormant VsrCaptureResolution when migrating those profiles.
     const std::wstring legacyCapture = settings.vsrEnabled
@@ -574,7 +581,9 @@ static DWORD WriteSettings(const std::wstring& file, const AppSettings& settings
     WriteInt(path, L"Window", L"RoundedCorners", settings.roundedCorners ? 1 : 0);
     WriteInt(path, L"Diagnostics", L"SaveLog", settings.saveLog ? 1 : 0);
     WriteInt(path, L"Screenshot", L"CopyToClipboard", settings.screenshotClipboard ? 1 : 0);
-    WriteInt(path, L"Video", L"VsrEnabled", settings.vsrEnabled ? 1 : 0);
+    WriteInt(path, L"Video", L"VsrEnabled", settings.vsrEnabled && !settings.cmaaNisEnabled ? 1 : 0);
+    WriteInt(path, L"Video", L"CmaaNisEnabled", settings.cmaaNisEnabled ? 1 : 0);
+    WriteInt(path, L"Video", L"NisSharpness", std::clamp(settings.nisSharpnessPercent, 0, 100));
     WriteInt(path, L"Diagnostics", L"ShowConsole",
              settings.showDiagnosticConsole ? 1 : 0);
     return path.error;
@@ -588,6 +597,7 @@ bool SaveToIni(const std::wstring& path, const AppSettings& settings,
     };
     if (error) *error = ERROR_SUCCESS;
     if (path.empty()) return fail(ERROR_INVALID_NAME);
+    if (test_profile::Protected(path)) return fail(ERROR_ACCESS_DENIED);
     const DWORD attributes = GetFileAttributesW(path.c_str());
     const bool existing = attributes != INVALID_FILE_ATTRIBUTES;
     if (existing && (attributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY)))

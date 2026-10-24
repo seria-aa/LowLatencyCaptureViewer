@@ -186,32 +186,11 @@ bool SettingsTheme::IsCardControl(HWND hwnd) const {
     return hwnd && ((c.frameOptionsOpen &&
         (hwnd == c.frameOptionsTitle || hwnd == c.frameOptionsClose || hwnd == c.frameOptionsHint ||
          hwnd == c.unlistedFpsCheck || hwnd == c.capture40Check || hwnd == c.capture40Help)) ||
-        hwnd == c.vsrCheck || hwnd == c.vsrGuideButton || hwnd == c.vsrStatus ||
-        hwnd == c.displayResolutionLabel || hwnd == c.displayResolutionCombo ||
-        hwnd == c.screenshotTitle || hwnd == c.screenshotClipboardCheck ||
-        hwnd == c.screenshotFolderButton || hwnd == c.screenshotHelp ||
         hwnd == c.guideShortcutsTitle || hwnd == c.shortcutResetButton || hwnd == c.guideVideoHint ||
         std::find(c.guideKeys.begin(), c.guideKeys.end(), hwnd) != c.guideKeys.end() ||
         std::find(c.guideDescriptions.begin(), c.guideDescriptions.end(), hwnd) != c.guideDescriptions.end());
 }
 void SettingsTheme::PaintCards(HDC dc) {
-    const auto paintGroup = [&](const std::vector<HWND>& children, int padding = 8) {
-        RECT bounds{};
-        bool found = false;
-        for (HWND child : children) {
-            // WS_VISIBLE works for offscreen QA too (IsWindowVisible also checks
-            // the hidden owner). Union actual layout rather than duplicate it.
-            if (!child || !(GetWindowLongPtrW(child, GWL_STYLE) & WS_VISIBLE)) continue;
-            RECT rect{}; GetWindowRect(child, &rect);
-            MapWindowPoints(HWND_DESKTOP, owner_, reinterpret_cast<POINT*>(&rect), 2);
-            if (found) UnionRect(&bounds, &bounds, &rect);
-            else { bounds = rect; found = true; }
-        }
-        if (found) {
-            InflateRect(&bounds, Pixels(padding), Pixels(padding));
-            Rounded(dc, bounds, palette_.kCard, palette_.kCardEdge, Pixels(kCornerDiameterDip));
-        }
-    };
     const auto& c = *controls_;
     if (c.frameOptionsOpen) {
         // Share the actual padded control bounds with outside-click handling.
@@ -219,14 +198,34 @@ void SettingsTheme::PaintCards(HDC dc) {
         if (!IsRectEmpty(&bounds))
             Rounded(dc, bounds, palette_.kCard, palette_.kCardEdge, Pixels(kCornerDiameterDip));
     }
-    paintGroup({c.vsrCheck, c.vsrGuideButton, c.displayResolutionLabel, c.displayResolutionCombo, c.vsrStatus});
-    paintGroup({c.screenshotTitle, c.screenshotClipboardCheck, c.screenshotFolderButton, c.screenshotHelp});
-    if (SettingsCompactLayout(&c)) {
-        std::vector<HWND> shortcuts{c.guideVideoHint,c.shortcutResetButton};
-        shortcuts.insert(shortcuts.end(),c.guideKeys.begin(),c.guideKeys.end());
-        shortcuts.insert(shortcuts.end(),c.guideDescriptions.begin(),c.guideDescriptions.end());
-        paintGroup(shortcuts);
-    } else paintGroup({c.guideShortcutsTitle, c.guideVideoHint}, 20);
+    // Video options share the page background, like capture/monitor fields.
+    // Avoid nested cards around ordinary fields and screenshot actions.
+    RECT bounds{};
+    bool found = false;
+    const auto includeShortcut = [&](HWND child) {
+        // WS_VISIBLE works for offscreen QA too (IsWindowVisible also checks
+        // the hidden owner). Union actual layout without a temporary container.
+        if (!child || !(GetWindowLongPtrW(child, GWL_STYLE) & WS_VISIBLE)) return;
+        RECT rect{}; GetWindowRect(child, &rect);
+        MapWindowPoints(HWND_DESKTOP, owner_, reinterpret_cast<POINT*>(&rect), 2);
+        if (found) UnionRect(&bounds, &bounds, &rect);
+        else { bounds = rect; found = true; }
+    };
+    const bool compact = SettingsCompactLayout(&c);
+    if (compact) {
+        includeShortcut(c.guideVideoHint);
+        includeShortcut(c.shortcutResetButton);
+        for (HWND child : c.guideKeys) includeShortcut(child);
+        for (HWND child : c.guideDescriptions) includeShortcut(child);
+    } else {
+        includeShortcut(c.guideShortcutsTitle);
+        includeShortcut(c.guideVideoHint);
+    }
+    if (found) {
+        const int padding = Pixels(compact ? 8 : 20);
+        InflateRect(&bounds, padding, padding);
+        Rounded(dc, bounds, palette_.kCard, palette_.kCardEdge, Pixels(kCornerDiameterDip));
+    }
 }
 void SettingsTheme::PaintBackground(HDC dc) {
     RECT client{}; GetClientRect(owner_, &client);
@@ -433,7 +432,8 @@ void SettingsTheme::PaintComboItem(const DRAWITEMSTRUCT& item) {
     const int saved = SaveDC(item.hDC);
     IntersectClipRect(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom);
     const bool field = (item.itemState & ODS_COMBOBOXEDIT) != 0;
-    const bool disabled = !IsWindowEnabled(item.hwndItem) || (item.itemState & ODS_DISABLED);
+    const bool disabled = !IsWindowEnabled(item.hwndItem) || (item.itemState & ODS_DISABLED) ||
+        (item.hwndItem==controls_->upscalerCombo && item.itemID==2 && controls_->vsrGpuUnavailable);
     const bool selected = (item.itemState & ODS_SELECTED) && !disabled && (!field || highContrast_);
     const COLORREF background = selected ? GetSysColor(COLOR_HIGHLIGHT) : highContrast_
         ? GetSysColor(COLOR_WINDOW) : disabled ? palette_.kControlDisabled : palette_.kControl;

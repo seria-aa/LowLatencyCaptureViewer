@@ -13,7 +13,7 @@ HDR, multichannel and audio-only recording are not supported; playback supports 
 
 ![Recording settings example](images/settings-recording-en.png)
 
-<sub>Example rendered from the 2.1.3 UI code. Encoder support varies by system.</sub>
+<sub>Example rendered from the 2.1.6 UI code. Encoder support varies by system.</sub>
 
 <br>
 
@@ -52,7 +52,7 @@ Defaults: **H.264 · automatic hardware · quality (CQP) · balanced (QP 23)**, 
 | Automatic splitting | Off, duration (15/30/60/120 minutes), or size (1/2/4/8/16 GiB). A segment waits for an independently decodable boundary and may exceed the threshold. |
 
 Set **Recording volume**, next to **Audio (AAC)** in the **Recording** tab, to 0–100% before recording. The default is 100%; 0% mutes the recording. This setting is saved separately from playback volume.
-VSR, display scaling/placement, OSD, screenshot processing, playback volume changes and playback mute do not affect recordings.
+CMAA2 → NIS, VSR, display scaling/placement, OSD, screenshot processing, playback volume changes and playback mute do not affect recordings.
 Unsupported combinations report an error instead of silently changing codec or switching to CPU encoding.
 If encoding affects playback or cannot keep up, lower the recording resolution/frame-rate limit first.
 

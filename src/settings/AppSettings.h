@@ -137,6 +137,8 @@ struct AppSettings {
     bool saveLog = false;
     bool screenshotClipboard = false;
     bool vsrEnabled = false;
+    bool cmaaNisEnabled = false;
+    int nisSharpnessPercent = 15; // 0..100; default 0.15. Display processing only.
     bool showDiagnosticConsole = false;
     bool skipStartupSettings = false;
     bool checkForUpdates = true;

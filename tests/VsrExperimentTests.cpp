@@ -4,6 +4,7 @@
 #undef fwprintf
 #include "../src/audio/AsioOutput.cpp"
 #include <limits>
+#include <fstream>
 
 #ifndef LLCV_VSR_EXPERIMENT
 template<class Renderer>
@@ -796,6 +797,8 @@ static std::vector<BYTE> OutputPixels(DirectD3D11Renderer& renderer) {
 static std::atomic<int> modeQueryCalls{0};
 static void TestSettingsModeFlow() {
     const auto saved = g_settings;
+    const bool savedSuppress = g_suppressSettingsSave;
+    g_suppressSettingsSave = true;
     g_testVideoCapabilityProbe = [](const std::wstring&, int width, int, HRESULT* status) {
         ++modeQueryCalls;
         std::this_thread::sleep_for(std::chrono::milliseconds(80)); // slow-driver simulation
@@ -824,8 +827,9 @@ static void TestSettingsModeFlow() {
         0,0,376,76,window,nullptr,wc.hInstance,nullptr);
     state.unlistedFpsStatus = CreateWindowW(L"STATIC",L"",WS_CHILD,
         0,0,376,16,window,nullptr,wc.hInstance,nullptr);
-    state.vsrCheck = CreateWindowW(L"BUTTON",L"",WS_CHILD | BS_AUTOCHECKBOX,
-        0,0,200,30,window,nullptr,wc.hInstance,nullptr);
+    state.upscalerCombo = combo(IDC_SETTINGS_UPSCALER);
+    for(const auto* name:{L"Off",L"CMAA2 → NIS",L"NVIDIA VSR"})
+        SendMessageW(state.upscalerCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(name));
     state.startButton = CreateWindowW(L"BUTTON",L"Start",WS_CHILD,
         0,0,100,30,window,nullptr,wc.hInstance,nullptr);
     // Manual Refresh also discovers device inventory. Keep this regression
@@ -841,7 +845,7 @@ static void TestSettingsModeFlow() {
         SendMessageW(state.videoCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(preset.label));
         SendMessageW(state.displayResolutionCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(preset.label));
     }
-    SendMessageW(state.vsrCheck,BM_SETCHECK,BST_CHECKED,0);
+    SendMessageW(state.upscalerCombo,CB_SETCURSEL,2,0);
     SendMessageW(state.displayResolutionCombo,CB_SETCURSEL,2,0);
     SendMessageW(state.videoCombo,CB_SETCURSEL,0,0);
     auto complete = [&] {
@@ -911,11 +915,11 @@ static void TestSettingsModeFlow() {
         SendMessageW(window,WM_COMMAND,MAKEWPARAM(IDC_SETTINGS_DISPLAY_RESOLUTION,CBN_SELCHANGE),0);
     }
     Require(modeQueryCalls == 1 && !state.videoModesPending, "display changes never rescan or clear FPS");
-    SendMessageW(state.vsrCheck,BM_SETCHECK,BST_UNCHECKED,0);
-    SendMessageW(window,WM_COMMAND,MAKEWPARAM(IDC_SETTINGS_VSR,BN_CLICKED),0);
+    SendMessageW(state.upscalerCombo,CB_SETCURSEL,0,0);
+    SendMessageW(window,WM_COMMAND,MAKEWPARAM(IDC_SETTINGS_UPSCALER,CBN_SELCHANGE),0);
     complete();
-    SendMessageW(state.vsrCheck,BM_SETCHECK,BST_CHECKED,0);
-    SendMessageW(window,WM_COMMAND,MAKEWPARAM(IDC_SETTINGS_VSR,BN_CLICKED),0);
+    SendMessageW(state.upscalerCombo,CB_SETCURSEL,2,0);
+    SendMessageW(window,WM_COMMAND,MAKEWPARAM(IDC_SETTINGS_UPSCALER,CBN_SELCHANGE),0);
     Require(modeQueryCalls == 1 && !state.videoModesPending &&
         state.pixelFormats.front().selectedFps == 144,
         "VSR on/off preserves capture selection and never rescans capabilities");
@@ -933,11 +937,11 @@ static void TestSettingsModeFlow() {
     Require(modeQueryCalls == 3 && inventoryQueries == 1, "only explicit refresh repeats the same query and enumerates inventory");
     state.vsrGpuUnavailable = true;
     // GPU capability gates only the effect, never capture or display sizing.
-    SendMessageW(state.vsrCheck, BM_SETCHECK, BST_CHECKED, 0);
-    SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_SETTINGS_VSR, BN_CLICKED), 0);
+    SendMessageW(state.upscalerCombo, CB_SETCURSEL, 2, 0);
+    SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_SETTINGS_UPSCALER, CBN_SELCHANGE), 0);
     Require(modeQueryCalls == 3 && !state.videoModesPending &&
-        SendMessageW(state.vsrCheck, BM_GETCHECK, 0, 0) == BST_UNCHECKED &&
-        !IsWindowEnabled(state.vsrCheck), "blocked VSR notification cannot rescan or enable");
+        SendMessageW(state.upscalerCombo, CB_GETCURSEL, 0, 0) == BST_UNCHECKED &&
+        IsWindowEnabled(state.upscalerCombo), "blocked VSR notification cannot rescan or enable");
     SendMessageW(state.displayResolutionCombo, CB_SETCURSEL, 2, 0);
     SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_SETTINGS_DISPLAY_RESOLUTION, CBN_SELCHANGE), 0);
     auto applied = g_settings;
@@ -959,7 +963,7 @@ static void TestSettingsModeFlow() {
                 SelectedCaptureFrameRate(&state) == oldFrameRate,
             "same-as-capture switching preserves fixed preference, FPS and cached device capabilities");
     }
-    SendMessageW(state.vsrCheck, BM_SETCHECK, BST_CHECKED, 0);
+    SendMessageW(state.upscalerCombo, CB_SETCURSEL, 2, 0);
     PopulatePixelFormatCombo(&state);
     complete();
     Require(modeQueryCalls == 3 && state.pixelFormats.front().selectedFps == 144,
@@ -971,6 +975,7 @@ static void TestSettingsModeFlow() {
     UnregisterClassW(wc.lpszClassName,wc.hInstance);
     g_testVideoCapabilityProbe = nullptr;
     g_settings = saved;
+    g_suppressSettingsSave = savedSuppress;
     std::puts("PASS: production settings flow, slow driver, 50 display changes without rescans, cached capture/FPS and refresh.");
 }
 
@@ -1353,6 +1358,9 @@ static void TestPlaybackPowerBroadcastRouting() {
 }
 
 int main(int argc, char** argv) {
+    // Every entry point is synthetic. Individual persistence tests explicitly
+    // opt in only after redirecting SettingsPath to their own temporary folder.
+    g_suppressSettingsSave = true;
     if (argc > 1 && std::string(argv[1]) == "--capture-fps-osd") {
         Check(CoInitializeEx(nullptr, COINIT_MULTITHREADED), "capture FPS OSD COM");
         TestCaptureFrameRateOsd();
@@ -1407,6 +1415,12 @@ int main(int argc, char** argv) {
     const bool hd720 = argc > 1 && std::string(argv[1]) == "--720p";
     Check(CoInitializeEx(nullptr, COINIT_MULTITHREADED), "COM");
     if (argc > 1 && std::string(argv[1]) == "--settings-controller") {
+        const auto profile = SettingsPath();
+        const auto profileBytes = [&] {
+            std::ifstream input(std::filesystem::path(profile),std::ios::binary);
+            return std::vector<char>(std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>());
+        };
+        const auto beforeProfile = profileBytes();
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_WIN95_CLASSES};
         Require(InitCommonControlsEx(&controls) != FALSE, "controller common controls");
@@ -1421,6 +1435,7 @@ int main(int argc, char** argv) {
         TestSettingsAudioIdentityAndRefresh();
         TestExclusiveScanLifecycle();
         TestSettingsModeFlow();
+        Require(profileBytes()==beforeProfile,"controller fixtures leave the isolated profile unchanged");
         CoUninitialize();
         return 0;
     }

@@ -1,7 +1,7 @@
 ﻿param(
-    [string]$Version = "2.1.5",
-    [string]$BuildDir = "..\build-v2150-release",
-    [string]$OutputDir = "outputs\v2.1.5"
+    [string]$Version = "2.1.6",
+    [string]$BuildDir = "..\build-v2160-release",
+    [string]$OutputDir = "outputs\v2.1.6"
 )
 
 $ErrorActionPreference = "Stop"

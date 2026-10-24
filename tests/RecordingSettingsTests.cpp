@@ -281,6 +281,18 @@ int main(){
         Check(audioLabel.top==volumeLabel.top && audioLabel.left==audio.left &&
             volumeLabel.left==volume.left,"audio captions align above their own fields");
         Check(mode.top==split.top,"left quality and right split rows align");
+        for(const auto pair : {std::pair{s.recEncoderLabel,s.recEncoder},std::pair{s.recModeLabel,s.recMode},
+            std::pair{s.recResolutionLabel,s.recResolution},std::pair{s.recFpsLabel,s.recFps},
+            std::pair{s.recAudioLabel,s.recAudio},std::pair{s.recVolumeLabel,s.recVolume},
+            std::pair{s.recSplitLabel,s.recSplit},std::pair{s.recSplitValueLabel,s.recSplitValue}}) {
+            RECT label{},field{};GetWindowRect(pair.first,&label);GetWindowRect(pair.second,&field);
+            Check(label.left==field.left && field.top-label.bottom==SettingsPixels(8,dpi),
+                "recording fields share the video tab label gap");
+        }
+        RECT pause{};GetWindowRect(s.recPause,&pause);
+        MapWindowPoints(HWND_DESKTOP,owner,reinterpret_cast<POINT*>(&pause),2);
+        Check(pause.bottom<=SettingsPixels(s.footerTopDip-16,dpi)+1,
+            "active recording pause keeps the shared footer margin");
         Check(IsWindowEnabled(s.recOpenFolder),"save folder is available before any recording");
         Check(!CanToggleRecordingSettings(&s),"startup settings cannot start capture");
         s.recordingLive=true;s.recordingClosing=true;

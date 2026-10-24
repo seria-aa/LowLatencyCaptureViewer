@@ -2,14 +2,15 @@ param(
     [Parameter(Mandatory = $true)][string]$BuildRoot,
     [Parameter(Mandatory = $true)][string]$SourceRoot,
     [Parameter(Mandatory = $true)][string]$Version,
-    [string]$Configuration = "Release"
+    [string]$Configuration = "Release",
+    [string]$CMake = "cmake"
 )
 $ErrorActionPreference = "Stop"
 $build = (Resolve-Path -LiteralPath $BuildRoot).Path
 $stage = Join-Path $build ("package-test-" + [Guid]::NewGuid().ToString("N"))
 $validator = Join-Path $SourceRoot "tools/Test-ReleasePackage.ps1"
 try {
-    & cmake --install $build --config $Configuration --prefix $stage
+    & $CMake --install $build --config $Configuration --prefix $stage
     if ($LASTEXITCODE -ne 0) { throw "Release staging failed." }
     & $validator -PackageRoot $stage -Version $Version
     # A missing mux DLL must fail validation, not produce a playback-only release.

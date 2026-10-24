@@ -110,7 +110,10 @@ struct SettingsControls {
     HWND screenshotTitle = nullptr;
     HWND screenshotHelp = nullptr;
     HWND screenshotFolderButton = nullptr;
-    HWND vsrCheck = nullptr;
+    HWND upscalerLabel = nullptr;
+    HWND upscalerCombo = nullptr;
+    HWND nisSharpnessLabel = nullptr;
+    HWND nisSharpnessCombo = nullptr;
     HWND vsrGuideButton = nullptr;
     HWND vsrStatus = nullptr;
     HWND displayResolutionLabel = nullptr;

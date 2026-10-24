@@ -136,8 +136,16 @@ static bool g_useScrgbPrototype = false;
 #endif
 #ifdef LLCV_VSR_FEATURE
 #include "video/VsrExperiment.h"
+#include "video/CmaaNisUpscaler.h"
+#ifdef LLCV_SPATIAL_PROTOTYPE
+#include "video/SpatialUpscaler.h"
+static llcv::spatial::LiveTrace g_spatialTrace;
+static bool g_spatialInteractivePreview = false;
+#endif
 // UI publishes intent only; the capture/render thread owns all D3D calls.
 static std::atomic<llcv::vsr::Mode> g_vsrMode{llcv::vsr::Mode::Disabled};
+// Single request value keeps enable/sharpness coherent across the UI/render owners.
+static std::atomic<int> g_cmaaNisRequest{-1}; // -1 = off, otherwise sharpness 0..100
 static std::atomic<UINT> g_vsrGpuVendor{0};
 #endif
 
@@ -153,11 +161,11 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
 #if defined(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.5-audio-recovery-diagnostic";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.6-audio-recovery-diagnostic";
 #elif defined(LLCV_VSR_EXPERIMENT)
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.5-vsr-test";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.6-vsr-test";
 #else
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.5";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.6";
 #endif
 
 constexpr int kRecommendedCaptureBufferMs = 20;
@@ -468,6 +476,8 @@ static bool HandleVsrTestKey(WPARAM key, LPARAM flags, unsigned modifiers=keys::
     }
     const auto current = g_vsrMode.load(std::memory_order_acquire);
     g_settings.vsrEnabled = current != llcv::vsr::Mode::On;
+    g_settings.cmaaNisEnabled = false;
+    g_cmaaNisRequest.store(-1,std::memory_order_release);
     // Publish pending before the request, so a fast render-thread acknowledgement
     // cannot be overwritten by a late UI "pending" status.
     ShowTransientHud(TransientHudContent::VsrPending);
@@ -713,6 +723,7 @@ static std::wstring AppDirectory() {
     return dir;
 }
 
+#include "settings/TestProfile.h"
 // User-writable data belongs in LocalAppData so an installation under
 // Program Files does not require elevation and portable copies do not mix
 // machine-specific settings into the application directory.
@@ -724,6 +735,7 @@ static std::wstring UserDataDirectory() {
 #ifdef LLCV_SETTINGS_MODE_TEST
     if (!g_testUserDataDirectory.empty()) return g_testUserDataDirectory;
 #endif
+    if (llcv::test_profile::Enabled()) return llcv::test_profile::Directory();
     static const std::wstring directory = [] {
         wchar_t buffer[32768]{};
         const DWORD length = GetEnvironmentVariableW(
@@ -746,6 +758,7 @@ static void EnsureUserDataDirectory() {
 }
 
 static void MigrateLegacySettings() {
+    if (llcv::test_profile::Enabled()) return; // Do not import a user's legacy profile.
     EnsureUserDataDirectory();
     const std::wstring destination = UserDataDirectory() + L"\\settings.ini";
     const std::wstring legacy = AppDirectory() + L"\\settings.ini";
@@ -2211,6 +2224,13 @@ struct DirectD3D11Renderer {
     double diagnosticPresentUs = 0;
 #endif
     llcv::video_color::Configuration sdrColor{};
+    llcv::upscaling::Pipeline cmaaNisPipeline;
+    int cmaaNisAppliedRequest = -1;
+    HRESULT cmaaNisStatus = S_FALSE;
+#ifdef LLCV_SPATIAL_PROTOTYPE
+    llcv::spatial::Pipeline spatialPipeline;
+    int64_t spatialPresentQpc=0;
+#endif
 #ifdef LLCV_VSR_FEATURE
     llcv::vsr::State vsrState = llcv::vsr::State::Untouched;
     llcv::vsr::Mode vsrAppliedMode = llcv::vsr::Mode::Disabled;
@@ -2218,6 +2238,16 @@ struct DirectD3D11Renderer {
     UINT vsrInputWidth = 0, vsrInputHeight = 0;
     UINT vsrDisplayWidth = 0, vsrDisplayHeight = 0;
     std::wstring vsrOsdLine() const {
+        if (cmaaNisAppliedRequest >= 0) {
+            wchar_t line[192]{};
+            swprintf_s(line,L"CMAA2 → NIS   %s · %.2f · %s\n",
+                cmaaNisPipeline.Enabled()?L"ON":FAILED(cmaaNisStatus)
+                    ? (IsEnglishUi()?L"Unavailable / OFF":L"사용 불가 / OFF")
+                    : hdrOutput ? (IsEnglishUi()?L"Bypass (SDR only)":L"적용 제외 (SDR 전용)")
+                    : (IsEnglishUi()?L"Bypass (scale limit)":L"적용 제외 (배율 범위)"),
+                double(cmaaNisAppliedRequest)/100.0,hdrOutput?L"HDR10":L"SDR");
+            return line;
+        }
         const bool english = IsEnglishUi();
         const wchar_t* status = L"OFF";
         switch (vsrState) {
@@ -2257,7 +2287,13 @@ struct DirectD3D11Renderer {
     }
 #endif
     HRESULT applyVsrMode(bool initializing = false) {
-        const auto requested = g_vsrMode.load(std::memory_order_acquire);
+        auto requested =
+#ifdef LLCV_SPATIAL_PROTOTYPE
+            spatialPipeline.Enabled() ? llcv::vsr::Mode::Off :
+#endif
+            g_vsrMode.load(std::memory_order_acquire);
+        if(cmaaNisAppliedRequest>=0 && requested==llcv::vsr::Mode::On)
+            requested=llcv::vsr::Mode::Off;
         if (!initializing && requested == vsrAppliedMode) return S_OK;
         cachedOverlayGeneration = 0; // invalidate once on the render owner, not every frame
 #ifdef LLCV_VSR_EXPERIMENT
@@ -2369,6 +2405,12 @@ struct DirectD3D11Renderer {
         vsrEligible = false;
         vsrInputWidth = vsrInputHeight = vsrDisplayWidth = vsrDisplayHeight = 0;
 #endif
+#ifdef LLCV_SPATIAL_PROTOTYPE
+        spatialPipeline.Reset();
+#endif
+        cmaaNisPipeline.Reset();
+        cmaaNisAppliedRequest=-1;
+        cmaaNisStatus=S_FALSE;
 #ifdef LLCV_HDR_SCRGB_PROTOTYPE
         scrgbPipeline.Reset();
         scrgbOutput = false;
@@ -3122,6 +3164,50 @@ struct DirectD3D11Renderer {
             fullscreenDisplaySize, sourceSize ? width : display.width,
             sourceSize ? height : display.height, g_settings.fullscreenVideoPosition);
         pixelPerfectBorders = !EqualRect(&videoRect, &outputRect);
+        cmaaNisAppliedRequest=g_cmaaNisRequest.load(std::memory_order_acquire);
+        bool cmaaNisRequested=cmaaNisAppliedRequest>=0;
+#ifdef LLCV_SPATIAL_PROTOTYPE
+        // A private comparison explicitly owns its selected filter.
+        if(llcv::spatial::EnvironmentMode()!=llcv::spatial::Mode::Disabled) cmaaNisRequested=false;
+#endif
+#ifdef LLCV_HDR_SCRGB_PROTOTYPE
+        if(scrgbOutput) cmaaNisRequested=false;
+#endif
+        cmaaNisStatus=cmaaNisPipeline.Configure(device,videoDevice,enumerator,cmaaNisRequested,
+            hdrOutput,static_cast<UINT>(width),static_cast<UINT>(height),videoRect,adapterVendor,
+            float(std::max(0,cmaaNisAppliedRequest))/100.0f);
+        if(FAILED(cmaaNisStatus)) {
+            cmaaNisPipeline.Reset();
+            fwprintf(stderr,L"[upscaling] CMAA2/NIS unavailable 0x%08X; using Video Processor\n",unsigned(cmaaNisStatus));
+        }
+        if(cmaaNisRequested)
+            fwprintf(stderr,L"[upscaling] CMAA2 -> NIS active=%d HDR=%d sharpness=%.2f\n",
+                cmaaNisPipeline.Enabled(),hdrOutput,double(cmaaNisAppliedRequest)/100.0);
+        cachedOverlayGeneration=0;
+        if(cmaaNisPipeline.Enabled() || sharpScalingActive) {
+            videoContext->VideoProcessorSetStreamFilter(processor,0,
+                D3D11_VIDEO_PROCESSOR_FILTER_EDGE_ENHANCEMENT,FALSE,0);
+            sharpScalingActive=false;
+        }
+#ifdef LLCV_SPATIAL_PROTOTYPE
+        const auto spatialMode = llcv::spatial::EnvironmentMode();
+        const HRESULT spatialHr = spatialPipeline.Configure(device, videoDevice, enumerator,
+            spatialMode, hdrOutput, static_cast<UINT>(width), static_cast<UINT>(height),
+            videoRect, adapterVendor,llcv::spatial::EnvironmentNisSharpness(),llcv::spatial::EnvironmentAaMode());
+        if (FAILED(spatialHr)) {
+            spatialPipeline.Reset();
+            fwprintf(stderr,L"[spatial] setup failed 0x%08X; using original Video Processor\n",unsigned(spatialHr));
+        }
+        if (spatialPipeline.Enabled()) {
+            videoContext->VideoProcessorSetStreamFilter(processor,0,
+                D3D11_VIDEO_PROCESSOR_FILTER_EDGE_ENHANCEMENT,FALSE,0);
+            sharpScalingActive=false;
+        }
+        fwprintf(stderr,L"[spatial] requested=%hs active=%hs (private SDR experiment)\n",
+            llcv::spatial::Name(spatialMode),llcv::spatial::Name(spatialPipeline.ActiveMode()));
+        fwprintf(stderr,L"[spatial] aa=%d sharpness=%.2f\n",
+            int(spatialPipeline.ActiveAaMode()),double(llcv::spatial::EnvironmentNisSharpness()));
+#endif
 #ifdef LLCV_HDR_SCRGB_PROTOTYPE
         if (scrgbOutput) {
             scrgbPipeline.Configure(context, static_cast<UINT>(width), static_cast<UINT>(height),
@@ -3148,7 +3234,10 @@ struct DirectD3D11Renderer {
         hr = applyVsrMode(true);
         if (FAILED(hr)) return hr;
 #endif
-        if (scaled && !SourcePixelPerfect() &&
+        if (scaled && !SourcePixelPerfect() && !cmaaNisPipeline.Enabled() &&
+#ifdef LLCV_SPATIAL_PROTOTYPE
+            !spatialPipeline.Enabled() &&
+#endif
             g_settings.scalingMode == ScalingMode::Sharp) {
             D3D11_VIDEO_PROCESSOR_FILTER_RANGE sharpness{};
             if (SUCCEEDED(enumerator->GetVideoProcessorFilterRange(
@@ -3186,6 +3275,11 @@ struct DirectD3D11Renderer {
         clear.backgroundR=background.RGBA.R;clear.backgroundG=background.RGBA.G;
         clear.backgroundB=background.RGBA.B;clear.backgroundA=background.RGBA.A;
         skipRedundantBorderClear=llcv::video_clear::CanSkipBorderClear(clear);
+        if(cmaaNisPipeline.Enabled()) skipRedundantBorderClear=false;
+#ifdef LLCV_SPATIAL_PROTOTYPE
+        // Shader draws only the video rectangle; black margins must be cleared.
+        if (spatialPipeline.Enabled()) skipRedundantBorderClear=false;
+#endif
         if (hdrOutput) {
             // Preserve PQ video values; use the validated range/chroma tuple
             // instead of the legacy SDR color-space bitfield.
@@ -3757,6 +3851,26 @@ struct DirectD3D11Renderer {
     }
 
     HRESULT processVideo(D3D11_VIDEO_PROCESSOR_STREAM& stream) {
+        if(cmaaNisPipeline.Enabled()) {
+            const HRESULT hr=cmaaNisPipeline.Draw(context,videoContext,processor,stream,
+                backBufferRenderTarget,outputWidth,outputHeight);
+            if(SUCCEEDED(hr))return hr;
+            cmaaNisStatus=hr;
+            cmaaNisPipeline.Reset();
+            cachedOverlayGeneration=0;
+            fwprintf(stderr,L"[upscaling] draw failed 0x%08X; using Video Processor\n",unsigned(hr));
+            const HRESULT removed=device->GetDeviceRemovedReason();
+            if(FAILED(removed))return removed;
+        }
+#ifdef LLCV_SPATIAL_PROTOTYPE
+        if (spatialPipeline.Enabled()) {
+            const HRESULT spatialHr = spatialPipeline.Draw(context, videoContext, processor,
+                stream, backBufferRenderTarget, outputWidth, outputHeight);
+            if (SUCCEEDED(spatialHr)) return spatialHr;
+            fwprintf(stderr,L"[spatial] draw failed 0x%08X; using original Video Processor\n",unsigned(spatialHr));
+            spatialPipeline.Reset();
+        }
+#endif
         auto blit = [&] {
             return videoContext->VideoProcessorBlt(processor, outputView, 0, 1, &stream);
         };
@@ -3779,6 +3893,10 @@ struct DirectD3D11Renderer {
     }
 
     HRESULT presentUploaded() {
+        if(cmaaNisAppliedRequest!=g_cmaaNisRequest.load(std::memory_order_acquire)) {
+            const HRESULT hr=configureVideoOutput(captureWidth,captureHeight);
+            if(FAILED(hr))return hr;
+        }
 #ifdef LLCV_VSR_FEATURE
         // Apply on the render owner immediately before processing the next
         // frame. Never call D3D from the UI thread or rebuild for an F6 press.
@@ -3836,6 +3954,9 @@ struct DirectD3D11Renderer {
 #ifdef LLCV_HDR_FRAME_AUDIT
         saveRequestedFrameAudit();
 #endif
+#ifdef LLCV_SPATIAL_PROTOTYPE
+        g_spatialTrace.SnapshotOutput(device,context,backBuffer);
+#endif
         hr = drawOverlayQuads();
 #ifdef LLCV_GPU_DIAGNOSTICS
         const auto diagnosticOverlayEnd = std::chrono::steady_clock::now();
@@ -3850,6 +3971,10 @@ struct DirectD3D11Renderer {
             g_settings.presentationMode, exclusiveActive, allowTearing);
 #ifdef LLCV_VSR_EXPERIMENT
         const auto presentStart = llcv::vsr::Timing::Clock::now();
+#endif
+#ifdef LLCV_SPATIAL_PROTOTYPE
+        LARGE_INTEGER spatialPresentTime{};QueryPerformanceCounter(&spatialPresentTime);
+        spatialPresentQpc=spatialPresentTime.QuadPart;
 #endif
         hr = swapChain->Present(syncInterval, flags);
 #ifdef LLCV_VSR_EXPERIMENT
@@ -4828,6 +4953,12 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             } else {
                 hr = videoSample->GetPointer(&sampleData);
                 if (SUCCEEDED(hr) && sampleData) {
+#ifdef LLCV_SPATIAL_PROTOTYPE
+                    if ((rendererInputFormat==VideoPixelFormat::Nv12 && stride==1920) ||
+                        (rendererInputFormat==VideoPixelFormat::P010 && stride==3840))
+                        g_spatialTrace.Snapshot(sampleData,static_cast<size_t>(std::max(0L,videoSample->GetActualDataLength())),
+                            rendererInputFormat==VideoPixelFormat::P010);
+#endif
                     renderer.upload(sampleData, stride);
                     g_screenshots.Submit({static_cast<unsigned>(preset.width),
                         static_cast<unsigned>(preset.height), screenshotFormat, sdrColor,
@@ -4867,6 +4998,9 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             const int64_t presentedUs =
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
+#ifdef LLCV_SPATIAL_PROTOTYPE
+            g_spatialTrace.Add(arrivalUs,renderer.spatialPresentQpc,presentedUs);
+#endif
 #ifdef LLCV_VSR_EXPERIMENT
             renderer.vsrTiming.AddCaptureToPresent(static_cast<double>(presentedUs - arrivalUs) / 1000.0);
 #endif
@@ -6365,8 +6499,11 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->capture40Check, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.allowUnlistedFps = SendMessageW(
             state->unlistedFpsCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        g_settings.vsrEnabled = !state->vsrGpuUnavailable && SendMessageW(
-            state->vsrCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        const LRESULT upscaler=SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0);
+        g_settings.vsrEnabled = !state->vsrGpuUnavailable && upscaler==2;
+        g_settings.cmaaNisEnabled = upscaler==1;
+        const LRESULT nisSharpness=SendMessageW(state->nisSharpnessCombo,CB_GETCURSEL,0,0);
+        g_settings.nisSharpnessPercent = nisSharpness>=0 && nisSharpness<=100 ? int(nisSharpness) : 15;
         g_settings.showDiagnosticConsole = SendMessageW(
             state->showConsoleCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.skipStartupSettings = SendMessageW(
@@ -6880,8 +7017,15 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         if (LOWORD(wParam) == IDC_SETTINGS_VSR_GUIDE && HIWORD(wParam) == BN_CLICKED && state) {
             // This is guidance, not a hardware capability/activation check.
             // Request acceptance alone cannot establish NVIDIA's active state.
-            MessageBoxW(hwnd, keys::Expand(llcv::ui_text::VsrSetupGuide(IsEnglishUi()),state->shortcutBindings).c_str(),
-                IsEnglishUi() ? L"NVIDIA VSR — Setup guide" : L"NVIDIA VSR — 설정 안내",
+            const std::wstring guide = IsEnglishUi()
+                ? L"CMAA2 → NIS reduces jagged edges before upscaling. Default sharpness: 0.15.\n"
+                  L"SDR only, up to 2× per axis. HDR, native size and downscaling use the normal path.\n"
+                  L"Display only: recordings/screenshots keep the capture source; OSD is drawn afterward.\n\n"
+                : L"CMAA2로 계단 현상을 보정한 뒤 NIS로 확대합니다. 기본 선명도는 0.15입니다.\n"
+                  L"SDR에서만 가로·세로 최대 2배 확대를 지원합니다. HDR·원본 크기·축소는 기존 경로를 사용합니다.\n"
+                  L"화면 표시에만 적용되며 녹화·스크린샷 원본은 유지합니다. OSD는 처리 후 표시합니다.\n\n";
+            MessageBoxW(hwnd, (guide+keys::Expand(llcv::ui_text::VsrSetupGuide(IsEnglishUi()),state->shortcutBindings)).c_str(),
+                IsEnglishUi() ? L"Upscaling — Setup guide" : L"업스케일링 — 설정 안내",
                 MB_OK | MB_ICONINFORMATION);
             return 0;
         }
@@ -6972,7 +7116,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         }
         if (((LOWORD(wParam) == IDC_SETTINGS_VIDEO || LOWORD(wParam) == IDC_SETTINGS_DISPLAY_RESOLUTION) &&
              HIWORD(wParam) == CBN_SELCHANGE) ||
-            (LOWORD(wParam) == IDC_SETTINGS_VSR && HIWORD(wParam) == BN_CLICKED)) {
+            (LOWORD(wParam) == IDC_SETTINGS_UPSCALER && HIWORD(wParam) == CBN_SELCHANGE)) {
             if (LOWORD(wParam) == IDC_SETTINGS_VIDEO) PopulatePixelFormatCombo(state);
             UpdateAdvancedControlVisibility(state);
             return 0;
@@ -9655,6 +9799,22 @@ static void RunViewerMessageLoop(HWND hwnd) {
                 continue;
             }
         }
+#ifdef LLCV_SPATIAL_PROTOTYPE
+        // Private, non-persisting visual comparison. No production shortcut changes.
+        if (g_spatialInteractivePreview && m.message == WM_KEYDOWN &&
+            m.wParam == VK_F9 && keys::Modifiers() == 0) {
+            if (!(m.lParam & (1LL << 30))) {
+                g_settings.cmaaNisEnabled = g_cmaaNisRequest.load() < 0;
+                g_settings.vsrEnabled = false;
+                g_vsrMode.store(llcv::vsr::Mode::Off);
+                g_cmaaNisRequest.store(g_settings.cmaaNisEnabled ? 15 : -1);
+                SetWindowTextW(hwnd, g_settings.cmaaNisEnabled
+                    ? L"LLCV · CMAA2 → NIS 0.15 · ON | F9: 비교 전환"
+                    : L"LLCV · 기본 출력 · OFF | F9: 비교 전환");
+            }
+            continue;
+        }
+#endif
         // Keyboard focus can belong to the video-host child. Key messages do
         // not bubble to its parent, so route viewer shortcuts at the thread
         // message-loop level.
@@ -9763,7 +9923,7 @@ static void ApplyVsrLiveTestSettings(AppSettings& settings) {
 #endif
 
 static bool SuppressSettingsWritesForRun(const wchar_t* commandLine) {
-#if defined(LLCV_HDR_FRAME_AUDIT) || defined(LLCV_VSR_EXPERIMENT)
+#if defined(LLCV_HDR_FRAME_AUDIT) || defined(LLCV_VSR_EXPERIMENT) || defined(LLCV_SPATIAL_PROTOTYPE)
     (void)commandLine;
     return true;
 #else
@@ -9797,6 +9957,25 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     }
 #endif
     LoadSettings();
+#ifdef LLCV_SPATIAL_PROTOTYPE
+    // Private fixed-condition live comparison. Overrides are never persisted.
+    g_spatialInteractivePreview = CommandLineOptionValue(L"--spatial-interactive") == L"yes";
+    if (CommandLineOptionValue(L"--spatial-live-test")==L"yes") {
+        g_settings.capturePreset=VideoPreset::R1920x1080;
+        g_settings.videoPreset=VideoPreset::R2560x1440;
+        g_settings.displayMatchesCapture=false;g_settings.videoFrameRate=60;
+        g_settings.capture40Fps=false;g_settings.pixelFormat=VideoPixelFormat::Nv12;
+        g_settings.presentationMode=PresentationMode::AllowTearing;
+        g_settings.scalingMode=ScalingMode::Smooth;g_settings.pixelPerfect=false;
+        g_settings.relativeWindowSize=false;g_settings.skipStartupSettings=true;
+        const auto reference=CommandLineOptionValue(L"--spatial-reference");
+        g_settings.vsrEnabled=reference==L"vsr";
+        g_settings.cmaaNisEnabled=reference==L"production-cmaa";
+        g_settings.nisSharpnessPercent=15;
+        if(CommandLineOptionValue(L"--spatial-hdr")==L"yes")g_settings.pixelFormat=VideoPixelFormat::P010;
+        g_settings.checkForUpdates=false;
+    }
+#endif
 #ifdef LLCV_RECORDING
     llcv::recording::sessionOptions=llcv::recording::LoadOptions();
     const auto requestedTab=CommandLineOptionValue(L"--settings-tab");
@@ -9905,7 +10084,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         fwprintf(stderr, L"[video] resolution plan: capture %d x %d -> display %d x %d; VSR toggles preserve both.\n",
             capture.width, capture.height, display.width, display.height);
     }
-    g_vsrMode.store(g_settings.vsrEnabled ? llcv::vsr::Mode::On
+    g_cmaaNisRequest.store(g_settings.cmaaNisEnabled?std::clamp(g_settings.nisSharpnessPercent,0,100):-1,
+        std::memory_order_release);
+    g_vsrMode.store(g_settings.vsrEnabled && !g_settings.cmaaNisEnabled ? llcv::vsr::Mode::On
                                          : llcv::vsr::Mode::Disabled,
                     std::memory_order_release);
 #ifdef LLCV_VSR_EXPERIMENT
@@ -10049,7 +10230,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         RestoredWindowOrigin(outerSize, restoredOrigin);
 
     HWND hwnd = CreateWindowExW(
-        windowExStyle, wc.lpszClassName, L"LLCV",
+        windowExStyle, wc.lpszClassName,
+#ifdef LLCV_SPATIAL_PROTOTYPE
+        g_spatialInteractivePreview ? L"LLCV · CMAA2 → NIS 0.15 · ON | F9: 비교 전환"
+                                   : L"LLCV · Spatial Upscaling Prototype",
+#else
+        L"LLCV",
+#endif
         windowStyle,
         restoreOrigin ? restoredOrigin.x : CW_USEDEFAULT,
         restoreOrigin ? restoredOrigin.y : CW_USEDEFAULT,

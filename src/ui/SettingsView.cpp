@@ -21,6 +21,27 @@ void SetSettingsText(HWND control, const wchar_t* text) {
     if (std::wcscmp(current, text) != 0) SetWindowTextW(control, text);
 }
 
+// Anchor the actual detected-mode text, not a fixed-height empty rectangle,
+// above the footer. The optional direct-request line shares the same block.
+static void LayoutVideoStatus(SettingsControls* state, UINT dpi) {
+    if (!state || SettingsCompactLayout(state) || !state->videoCapabilityStatus) return;
+    const int extra=GetWindowTextLengthW(state->unlistedFpsStatus)>0 ? 20 : 0;
+    int height=76;
+    HDC dc=GetDC(state->videoCapabilityStatus);
+    if(dc) {
+        const auto previous=SelectObject(dc,reinterpret_cast<HFONT>(SendMessageW(state->videoCapabilityStatus,WM_GETFONT,0,0)));
+        wchar_t text[4096]{}; GetWindowTextW(state->videoCapabilityStatus,text,ARRAYSIZE(text));
+        RECT bounds{0,0,SettingsPixels(376,dpi),0};
+        DrawTextW(dc,text,-1,&bounds,DT_CALCRECT|DT_WORDBREAK|DT_NOPREFIX);
+        height=static_cast<int>((bounds.bottom*96+dpi-1)/dpi);
+        SelectObject(dc,previous); ReleaseDC(state->videoCapabilityStatus,dc);
+    }
+    height=std::clamp(height,16,94-extra);
+    const int bottom=state->footerTopDip-24;
+    PlaceSettingsControl(state->videoCapabilityStatus,184,bottom-extra-height,376,height,dpi);
+    PlaceSettingsControl(state->unlistedFpsStatus,184,bottom-16,376,16,dpi);
+}
+
 void RefreshShortcutCaptions(SettingsControls* state) {
     for (size_t i=0;i<state->guideKeys.size();++i)
         SetSettingsText(state->guideKeys[i],viewer_help::KeyLabel(i,state->shortcutBindings).c_str());
@@ -29,9 +50,9 @@ void RefreshShortcutCaptions(SettingsControls* state) {
         : L"키 버튼을 눌러 변경\n* 영상 모드 전용");
     for (const auto& [control,source]:state->shortcutCaptionTemplates)
         SetSettingsText(control,shortcuts::Expand(source.c_str(),state->shortcutBindings).c_str());
-    if (!state->vsrGpuUnavailable)
-        SetSettingsText(state->vsrStatus,shortcuts::Expand(state->english
-            ? L"SDR / HDR10 · Toggle with F6" : L"SDR / HDR10 · F6으로 전환",state->shortcutBindings).c_str());
+    SetSettingsText(state->vsrStatus, SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)==1
+        ? (state->english ? L"SDR only" : L"SDR 전용")
+        : shortcuts::Expand(L"SDR / HDR10 · VSR: F6",state->shortcutBindings).c_str());
     if (!state->uiFonts.empty()) LayoutSettingsControls(state,state->layoutDpi);
 }
 ShortcutLayout MeasureShortcutLayout(const SettingsControls* state,UINT dpi,int rowWidth) {
@@ -220,11 +241,11 @@ void PlaceSettingsControl(HWND control, int x, int y, int width,
     MapWindowPoints(HWND_DESKTOP, GetParent(control), reinterpret_cast<POINT*>(&current), 2);
     if (current.left == SettingsPixels(x, dpi) && current.top == SettingsPixels(y, dpi) &&
         current.right - current.left == SettingsPixels(width, dpi)) {
+        const int actualHeight = current.bottom - current.top;
+        if (actualHeight == SettingsPixels(height, dpi)) return;
         wchar_t name[32]{};
         GetClassNameW(control, name, ARRAYSIZE(name));
-        const int actualHeight = current.bottom - current.top;
-        if (actualHeight == SettingsPixels(height, dpi) ||
-            (_wcsicmp(name, L"COMBOBOX") == 0 && actualHeight == SettingsPixels(kSettingsComboHeightDip, dpi)))
+        if (_wcsicmp(name, L"COMBOBOX") == 0 && actualHeight == SettingsPixels(kSettingsComboHeightDip, dpi))
             return;
     }
     SetWindowPos(control, nullptr, SettingsPixels(x, dpi),
@@ -376,22 +397,22 @@ static void LayoutWindowBehaviorControls(SettingsControls* state) {
     };
     // A dedicated note row prevents controls from jumping under the pointer
     // when Pixel-perfect/relative sizing changes.
-    place(state->videoWindowSection, 184, 112, 792, 20);
-    place(state->relativeSizeCheck, 184, 140, 760, 32);
-    place(state->relativeSizeWarning, 184, 428, 792, 56);
-    place(state->borderlessCheck, 184, 180, 760, 32);
-    place(state->roundedCornersCheck, 184, 220, 760, 32);
-    place(state->windowSnapCheck, 184, 260, 760, 32);
-    place(state->fullscreenCursorLabel, 184, 316, 376, 20);
-    place(state->fullscreenCursorCombo, 184, 340, 376, 120);
-    place(state->fullscreenCursorHint, 184, 380, 376, 24);
+    place(state->videoWindowSection, 184, 108, 792, 20);
+    place(state->relativeSizeCheck, 184, 140, 376, 32);
+    place(state->relativeSizeWarning, 184, 364, 792, 56);
+    place(state->borderlessCheck, 184, 180, 376, 32);
+    place(state->roundedCornersCheck, 600, 140, 376, 32);
+    place(state->windowSnapCheck, 600, 180, 376, 32);
+    place(state->fullscreenCursorLabel, 184, 232, 376, 20);
+    place(state->fullscreenCursorCombo, 184, 260, 376, 120);
+    place(state->fullscreenCursorHint, 184, 300, 376, 24);
     if (state->fullscreenCursorHint)
         SetWindowPos(state->fullscreenCursorHint, HWND_TOP, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     ApplySettingsComboMetrics(state->fullscreenCursorCombo, dpi);
-    place(state->fullscreenPositionLabel, 600, 316, 376, 20);
-    place(state->fullscreenPositionCombo, 600, 340, 376, 300);
-    place(state->fullscreenPositionHint, 600, 380, 376, 40);
+    place(state->fullscreenPositionLabel, 600, 232, 376, 20);
+    place(state->fullscreenPositionCombo, 600, 260, 376, 300);
+    place(state->fullscreenPositionHint, 600, 300, 376, 40);
     ApplySettingsComboMetrics(state->fullscreenPositionCombo, dpi);
 }
 
@@ -415,59 +436,59 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     place(state->startButton, 762, 602, 102, 34);
     place(state->cancelButton, 876, 602, 100, 34);
 
-    // Labels share a 64-DIP cadence, with a four-DIP label/field gap. Related
+    // Labels share the video page's 64-DIP cadence and eight-DIP field gap. Related
     // checkboxes stay grouped; the lower timing section gets a 24-DIP break.
-    place(state->audioOutputSection, 184, 112, 376, 20);
-    place(state->audioLabel, 184, 140, 376, 20);
+    place(state->audioOutputSection, 184, 108, 376, 20);
+    place(state->audioLabel, 184, 136, 376, 20);
     place(state->audioCombo, 184, 164, 376, 160);
-    place(state->audioOutputLabel, 184, 204, 376, 20);
+    place(state->audioOutputLabel, 184, 200, 376, 20);
     place(state->audioOutputCombo, 184, 228, 376, 220);
-    place(state->bufferLabel, 184, 268, 376, 20);
+    place(state->bufferLabel, 184, 264, 376, 20);
     place(state->bufferCombo, 184, 292, 376, 180);
     place(state->audioStatus, 184, 332, 376, 48);
     place(state->exclusiveTestButton, 184, 388, 185, 32);
-    place(state->audioPlaybackSection, 600, 112, 376, 20);
-    place(state->volumeHudLabel, 600, 140, 376, 20);
+    place(state->audioPlaybackSection, 600, 108, 376, 20);
+    place(state->volumeHudLabel, 600, 136, 376, 20);
     place(state->volumeHudCombo, 600, 164, 376, 160);
-    const int boostWidth = std::min(SettingsCheckboxWidthDip(state->volumeBoostCheck, dpi), 344);
+    const int boostWidth = std::min(SettingsCheckboxWidthDip(state->volumeBoostCheck, dpi), 340);
     place(state->volumeBoostCheck, 600, 204, boostWidth, 32);
-    place(state->volumeBoostHelp, 600 + boostWidth + 8, 208, 24, 24);
+    place(state->volumeBoostHelp, 600 + boostWidth + 12, 208, 24, 24);
     place(state->muteBackgroundCheck, 600, 244, 376, 32);
     place(state->audioOnlyCheck, 600, 284, 376, 32);
     place(state->surround51Check, 600, 336, 376, 32);
     place(state->surround51Hint, 600, 376, 376, 88);
     place(state->audioStabilitySection, 184, 488, 792, 20);
-    place(state->driftLabel, 184, 520, 300, 20);
-    place(state->driftHelp, 536, 518, 24, 24);
+    place(state->driftLabel, 184, 516, 340, 20);
+    place(state->driftHelp, 536, 514, 24, 24);
     place(state->driftCombo, 184, 544, 376, 120);
-    place(state->pcmQueueLabel, 600, 520, 300, 20);
-    place(state->pcmQueueHelp, 952, 518, 24, 24);
+    place(state->pcmQueueLabel, 600, 516, 340, 20);
+    place(state->pcmQueueHelp, 952, 514, 24, 24);
     place(state->pcmQueueCombo, 600, 544, 376, 140);
 
     // Video: preserve the detected-format summary instead of hiding capability
     // information behind another interaction.
-    place(state->videoCaptureSection, 184, 112, 268, 20);
-    place(state->videoRefreshButton, 476, 108, 84, 28);
-    place(state->captureDeviceLabel, 184, 140, 376, 20);
+    place(state->videoCaptureSection, 184, 108, 376, 20);
+    // All inline actions share a 24-DIP target centered on the label,
+    // leaving six DIPs before the field and twelve beside its caption.
+    place(state->videoRefreshButton, 476, 134, 84, 24);
+    place(state->captureDeviceLabel, 184, 136, 280, 20);
     place(state->captureDeviceCombo, 184, 164, 376, 220);
-    place(state->captureAudioDeviceLabel, 184, 204, 376, 20);
+    place(state->captureAudioDeviceLabel, 184, 200, 376, 20);
     place(state->captureAudioDeviceCombo, 184, 228, 376, 220);
     place(state->captureAudioStatus, 184, 228, 376, 30);
-    place(state->videoLabel, 184, 268, 180, 20);
+    place(state->videoLabel, 184, 264, 180, 20);
     place(state->videoCombo, 184, 292, 180, 120);
-    place(state->frameRateLabel, 380, 268, 76, 20);
-    place(state->frameOptionsButton, 464, 260, 96, 28);
+    place(state->frameRateLabel, 380, 264, 72, 20);
+    place(state->frameOptionsButton, 464, 262, 96, 24);
     place(state->frameRateCombo, 380, 292, 180, 200);
     SendMessageW(state->frameRateCombo, CB_SETDROPPEDWIDTH, SettingsPixels(342, dpi), 0);
     SendMessageW(state->captureDeviceCombo, CB_SETDROPPEDWIDTH, SettingsPixels(560, dpi), 0);
     SendMessageW(state->captureAudioDeviceCombo, CB_SETDROPPEDWIDTH, SettingsPixels(560, dpi), 0);
     SendMessageW(state->audioOutputCombo, CB_SETDROPPEDWIDTH, SettingsPixels(560, dpi), 0);
-    // Follow the same 64-DIP row rhythm as the device/resolution fields and
-    // the SDR controls below, keeping ten DIPs between each field and label.
-    place(state->pixelFormatLabel, 184, 332, 376, 20);
+    // Restore the original 64-DIP row rhythm and unchanged field sizes.
+    place(state->pixelFormatLabel, 184, 328, 376, 20);
     place(state->pixelFormatCombo, 184, 356, 376, 160);
-    place(state->videoCapabilityStatus, 184, 492, 376, 76);
-    place(state->unlistedFpsStatus, 184, 568, 376, 16);
+    LayoutVideoStatus(state,dpi);
     place(state->forceHdr10Check, 184, 392, 344, 40);
     place(state->forceHdr10Help, 536, 400, 24, 24);
     // Keep the full compatibility captions readable in the closed field,
@@ -475,10 +496,10 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     place(state->hdrChromaLabel, 184, 444, 112, 20);
     place(state->hdrChromaCombo, 304, 440, 224, 150);
     place(state->hdrChromaHelp, 536, 443, 24, 24);
-    place(state->sdrRangeLabel, 184, 396, 180, 20);
+    place(state->sdrRangeLabel, 184, 392, 180, 20);
     place(state->sdrRangeCombo, 184, 420, 146, 150);
     place(state->sdrRangeHelp, 340, 423, 24, 24);
-    place(state->mjpegColorLabel, 380, 396, 180, 20);
+    place(state->mjpegColorLabel, 380, 392, 180, 20);
     place(state->mjpegColorCombo, 380, 420, 146, 150);
     place(state->mjpegColorHelp, 536, 423, 24, 24);
     // A local flyout, painted with the existing settings card style. Obscured
@@ -492,37 +513,45 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     place(state->capture40Help, 520, 424, 24, 24);
     place(state->frameOptionsHint, 200, 462, 344, 48);
 
-    place(state->videoDisplaySection, 600, 112, 376, 20);
-    place(state->presentationLabel, 600, 140, 300, 20);
-    place(state->presentationHelp, 952, 138, 24, 24);
+    place(state->videoDisplaySection, 600, 108, 376, 20);
+    place(state->presentationLabel, 600, 136, 340, 20);
+    place(state->presentationHelp, 952, 134, 24, 24);
     place(state->presentationCombo, 600, 164, 376, 120);
-    place(state->displayMonitorLabel, 600, 204, 376, 20);
+    place(state->displayMonitorLabel, 600, 200, 376, 20);
     place(state->displayMonitorCombo, 600, 228, 376, 180);
     SendMessageW(state->displayMonitorCombo, CB_SETDROPPEDWIDTH, SettingsPixels(560, dpi), 0);
-    place(state->pixelCheck, 600, 332, 376, 32);
-    place(state->scalingLabel, 600, 268, 376, 20);
+    place(state->pixelCheck, 800, 262, 176, 24);
+    place(state->scalingLabel, 600, 264, 188, 20);
     place(state->scalingCombo, 600, 292, 376, 120);
-    // Keep equal eight-DIP gaps between cards and above the footer, without
-    // changing the dialog size or shrinking interactive targets.
-    place(state->displayResolutionLabel, 600, 376, 172, 30);
-    place(state->displayResolutionCombo, 786, 376, 190, 150);
-    place(state->vsrCheck, 600, 412, 264, 32);
-    place(state->vsrGuideButton, 876, 412, 100, 32);
-    place(state->vsrStatus, 600, 448, 376, 20);
-    place(state->screenshotTitle, 600, 492, 376, 20);
-    place(state->screenshotClipboardCheck, 600, 516, 182, 24);
-    place(state->screenshotFolderButton, 600, 544, 182, 28);
-    place(state->screenshotHelp, 794, 542, 182, 32);
+    // Continue the same 64-DIP label/field rhythm as capture and monitor.
+    // Keep conditional details in a reserved row so switching filters never
+    // moves the screenshot actions or changes the dialog's height.
+    place(state->displayResolutionLabel, 600, 328, 376, 20);
+    place(state->displayResolutionCombo, 600, 356, 376, 150);
+    place(state->upscalerLabel, 600, 392, 340, 20);
+    place(state->upscalerCombo, 600, 420, 376, 150);
+    place(state->nisSharpnessLabel, 600, 460, 132, 30);
+    place(state->nisSharpnessCombo, 740, 460, 88, 180);
+    place(state->vsrGuideButton, 952, 390, 24, 24);
+    const bool cmaaDetail=SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)==1;
+    place(state->vsrStatus, cmaaDetail ? 844 : 600, 460, cmaaDetail ? 132 : 376, 30);
+    // Raise the intact screenshot group, retaining clearance from the optional
+    // sharpness row and a 16-DIP footer margin without shrinking controls.
+    place(state->screenshotTitle, 600, 496, 376, 20);
+    place(state->screenshotClipboardCheck, 600, 522, 182, 26);
+    place(state->screenshotFolderButton, 794, 520, 182, 30);
+    place(state->screenshotHelp, 600, 556, 376, 18);
 
     // Window behavior has its own page, avoiding a packed video/options wall.
     LayoutWindowBehaviorControls(state);
 
-    place(state->guideShortcutsTitle, 204, 132, 206, 20);
-    place(state->shortcutResetButton, 432, 128, 108, 28);
+    place(state->guideShortcutsTitle, 204, 120, 216, 20);
+    place(state->shortcutResetButton, 432, 118, 108, 24);
     const auto shortcutLayout=MeasureShortcutLayout(state,dpi);
     const int shortcutStep=state->guideKeys.size()>10 ? 32 : state->guideKeys.size()>9 ? 35 : 36;
     constexpr int shortcutKeyHeight=29;
-    int shortcutY=168;
+    constexpr int shortcutTop=156;
+    int shortcutY=shortcutTop;
     for (size_t i = 0; i < state->guideKeys.size(); ++i) {
         const int height=std::max(shortcutStep-1,shortcutLayout.descriptionHeights[i]);
         place(state->guideKeys[i], 204, shortcutY, shortcutLayout.keyWidth, shortcutKeyHeight);
@@ -531,36 +560,37 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     }
     // Use the existing gap before the hint for small wrapped-row growth,
     // keeping the card's bottom padding clear of the fixed dialog footer.
-    const int normalHintY=168+static_cast<int>(state->guideKeys.size()-1)*shortcutStep+shortcutKeyHeight+16;
+    const int normalHintY=shortcutTop+static_cast<int>(state->guideKeys.size()-1)*shortcutStep+shortcutKeyHeight+16;
     const int hintY=std::max(normalHintY,shortcutY-shortcutStep+shortcutKeyHeight+8);
     place(state->guideVideoHint, 204, hintY, 336, shortcutLayout.hintHeight);
-    place(state->guideDiagnosticsTitle, 600, 132, 376, 20);
-    place(state->guideDiagnosticsText, 600, 160, 376, 32);
-    place(state->saveLogCheck, 600, 208, 376, 32);
-    place(state->showConsoleCheck, 600, 248, 376, 32);
-    place(state->guideLogFolderButton, 600, 296, 185, 32);
-    place(state->guideLsButton, 600, 360, 376, 32);
+    place(state->guideDiagnosticsTitle, 600, 120, 376, 20);
+    place(state->guideDiagnosticsText, 600, 148, 376, 32);
+    place(state->saveLogCheck, 600, 196, 376, 32);
+    place(state->showConsoleCheck, 600, 236, 376, 32);
+    place(state->guideLogFolderButton, 600, 284, 185, 32);
+    place(state->guideLsButton, 600, 348, 376, 32);
 
     // App-wide preferences no longer dominate every page.
-    place(state->appPreferencesSection, 184, 112, 792, 20);
-    place(state->languageLabel, 184, 140, 376, 20);
+    place(state->appPreferencesSection, 184, 108, 792, 20);
+    place(state->languageLabel, 184, 136, 376, 20);
     place(state->languageCombo, 184, 164, 376, 120);
-    place(state->themeLabel, 600, 140, 376, 20);
+    place(state->themeLabel, 600, 136, 376, 20);
     place(state->themeCombo, 600, 164, 376, 120);
-    place(state->skipStartupCheck, 184, 212, 376, 32);
-    place(state->skipStartupHint, 212, 252, 348, 56);
-    place(state->preventSleepCheck, 600, 212, 376, 32);
-    place(state->preventSleepHint, 628, 252, 348, 56);
-    place(state->updateTitle, 184, 344, 792, 24);
-    place(state->updateText, 184, 376, 730, 44);
-    place(state->checkForUpdatesCheck, 184, 432, 760, 32);
-    place(state->updateNowButton, 184, 476, 185, 32);
-    place(state->updateStatus, 184, 520, 792, 48);
+    place(state->skipStartupCheck, 184, 204, 376, 32);
+    place(state->skipStartupHint, 212, 244, 348, 56);
+    place(state->preventSleepCheck, 600, 204, 376, 32);
+    place(state->preventSleepHint, 628, 244, 348, 56);
+    place(state->updateTitle, 184, 328, 792, 24);
+    place(state->updateText, 184, 360, 730, 44);
+    place(state->checkForUpdatesCheck, 184, 416, 760, 32);
+    place(state->updateNowButton, 184, 460, 185, 32);
+    place(state->updateStatus, 184, 504, 792, 48);
     for (HWND combo : {state->audioCombo, state->audioOutputCombo,
                         state->bufferCombo, state->volumeHudCombo,
                         state->driftCombo, state->pcmQueueCombo,
                         state->captureDeviceCombo, state->captureAudioDeviceCombo,
                         state->videoCombo, state->displayResolutionCombo, state->frameRateCombo,
+                        state->upscalerCombo, state->nisSharpnessCombo,
                         state->pixelFormatCombo, state->presentationCombo,
                         state->displayMonitorCombo, state->scalingCombo,
                         state->hdrChromaCombo, state->sdrRangeCombo, state->mjpegColorCombo,
@@ -596,7 +626,8 @@ void UpdateScalingControlVisibility(SettingsControls* state) {
     if (!state) return;
     const bool pixelPerfect = state->pixelCheck &&
         SendMessageW(state->pixelCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    const bool scaling = !pixelPerfect || HasSplitResolution(*state);
+    const bool scaling = (!pixelPerfect || HasSplitResolution(*state)) &&
+        SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)!=1;
     const bool visible = state->activeTab == SettingsTab::VideoWindow;
     SetSettingsControlVisible(state->scalingLabel, visible, scaling);
     SetSettingsControlVisible(state->scalingCombo, visible, scaling);
@@ -646,6 +677,7 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     const bool guide = state->activeTab == SettingsTab::GuideDiagnostics;
     const bool updates = state->activeTab == SettingsTab::Updates;
     LayoutCompactSettingsControls(state, state->layoutDpi);
+    LayoutVideoStatus(state,state->layoutDpi);
     RefreshSettingsPageHeader(state);
 #ifdef LLCV_RECORDING
     ShowRecordingSettings(state);
@@ -752,12 +784,19 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     SetSettingsControlVisible(state->guideDiagnosticsText, guide);
     SetSettingsControlVisible(state->guideLogFolderButton, guide);
     SetSettingsControlVisible(state->screenshotTitle, video);
-    if (state->vsrGpuUnavailable &&
-        SendMessageW(state->vsrCheck, BM_GETCHECK, 0, 0) != BST_UNCHECKED)
-        SendMessageW(state->vsrCheck, BM_SETCHECK, BST_UNCHECKED, 0);
-    SetSettingsControlVisible(state->vsrCheck, video, !state->vsrGpuUnavailable);
+    if (state->vsrGpuUnavailable && SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)==2)
+        SendMessageW(state->upscalerCombo,CB_SETCURSEL,0,0);
+    const bool cmaaNis=SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)==1;
+    if (!SettingsCompactLayout(state))
+        PlaceSettingsControl(state->vsrStatus, cmaaNis ? 844 : 600, 460,
+            cmaaNis ? 132 : 376, 30, state->layoutDpi);
+    SetSettingsControlVisible(state->upscalerLabel, video);
+    SetSettingsControlVisible(state->upscalerCombo, video);
+    SetSettingsControlVisible(state->nisSharpnessLabel, video && cmaaNis);
+    SetSettingsControlVisible(state->nisSharpnessCombo, video && cmaaNis);
     SetSettingsControlVisible(state->vsrGuideButton, video);
-    SetSettingsControlVisible(state->vsrStatus, video);
+    SetSettingsControlVisible(state->vsrStatus, video &&
+        (cmaaNis || SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)==2 || state->vsrGpuUnavailable));
     SetSettingsControlVisible(state->displayResolutionLabel, video);
     SetSettingsControlVisible(state->displayResolutionCombo, video);
     SetSettingsText(state->videoLabel,
@@ -765,12 +804,9 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     SetSettingsText(state->pixelCheck, HasSplitResolution(*state)
         ? (state->english ? L"Lock display size" : L"표시 크기 고정")
         : L"Pixel-perfect (1:1)");
-    SetSettingsText(state->vsrStatus, shortcuts::Expand(state->vsrGpuUnavailable
-        ? (state->vsrGpuUnknown
-            ? (state->english ? L"GPU check failed · Restart to retry" : L"GPU 확인 실패 · 앱을 다시 실행하세요")
-            : (state->english ? L"Unavailable · Requires an NVIDIA rendering GPU" : L"사용 불가 · NVIDIA 렌더링 GPU가 필요합니다"))
-        : (state->english ? L"SDR / HDR10 · Toggle with F6"
-                          : L"SDR / HDR10 · F6으로 전환"), state->shortcutBindings).c_str());
+    SetSettingsText(state->vsrStatus, cmaaNis ? (state->english ? L"SDR only" : L"SDR 전용") : shortcuts::Expand(state->vsrGpuUnavailable
+        ? (state->english ? L"VSR requires an NVIDIA GPU" : L"VSR은 NVIDIA GPU가 필요합니다")
+        : L"SDR / HDR10 · VSR: F6", state->shortcutBindings).c_str());
     SetSettingsControlVisible(state->screenshotClipboardCheck, video);
     SetSettingsControlVisible(state->screenshotHelp, video);
     SetSettingsControlVisible(state->screenshotFolderButton, video);
