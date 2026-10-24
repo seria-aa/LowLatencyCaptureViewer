@@ -5,7 +5,7 @@
 HDMI 캡처보드로 들어오는 영상과 소리를 재생하는 Windows용 저지연 뷰어입니다.
 OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리만 들을 수 있습니다.
 
-**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.1.5.md) · [English](README.md)
+**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.1.6.md) · [English](README.md)
 
 <br>
 
@@ -13,17 +13,17 @@ OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리�
 | --- | --- |
 | [![영상 설정](docs/images/settings-video.png)](docs/images/settings-video.png) | [![오디오 설정](docs/images/settings-audio.png)](docs/images/settings-audio.png) |
 
-<sub>2.1.3 UI 예시이며, 2.1.5의 추가 설정·SDR 색 범위·표시 해상도 연동은 아래 가이드를 참고하세요. 이미지를 누르면 원본 크기로 볼 수 있습니다.</sub>
+<sub>2.1.6 UI 예시입니다. 장치 목록과 지원 형식은 환경에 따라 다릅니다. 이미지를 누르면 원본 크기로 볼 수 있습니다.</sub>
 
 <br>
 
-## 2.1.5 업데이트
+## 2.1.6 업데이트
 
-직접 선택한 **캡처 FPS 검증**을 강화하고, **SDR 색 범위(자동/Limited/Full)**와
-**캡처 해상도와 동일** 표시 옵션을 추가했습니다. 프레임의 추가 옵션은 **추가 설정**에 모았고,
-저장 공간 조회로 녹화가 중단될 수 있는 경로를 보완했습니다.
-새 설정과 이전 캡처·표시 크기가 같은 설정은 캡처 해상도를 따라가며, 서로 다른 기존 크기는 유지합니다.
-[녹화 사용 방법](docs/RECORDING.ko.md) · [전체 변경 내역](docs/release-notes-v2.1.5.md)
+**CMAA2 → NIS** 업스케일링을 추가했습니다. SDR 영상의 계단현상을 보정한 뒤 확대하며,
+**끄기 / CMAA2 → NIS / NVIDIA VSR** 중 선택할 수 있습니다. NIS 선명도 기본값은 **0.15**입니다.
+새 필터는 기본 꺼짐입니다. 설정 탭 전체의 간격·정렬·하단 여백을 다듬고,
+설정 화면의 불필요한 처리와 개발·검증 환경도 정리했습니다.
+[업스케일링 사용 방법](docs/USAGE.ko.md#cmaa2--nis-업스케일링) · [전체 변경 내역](docs/release-notes-v2.1.6.md)
 
 <br>
 
@@ -53,6 +53,7 @@ Windows 10/11 x64와 캡처보드 드라이버가 필요합니다.
 - 선택적 40fps 캡처 및 목록에 없는 30fps 직접 요청 — 드라이버 수락 필요
 - SDR 색 범위 자동/Limited/Full — 재생·스크린샷·녹화에 공통 적용
 - NVIDIA VSR (실험적), 캡처·표시 해상도 개별 설정 또는 연동
+- CMAA2 → NIS 업스케일링: SDR 전용 확대, HDR은 기존 출력 유지, 끄기/VSR 선택, 선명도 기본 0.15
 - WASAPI Shared·Exclusive, ASIO, 콘솔 LPCM 5.1, 오디오 전용 모드
 - NV12/YUY2/MJPEG SDR·스테레오 MP4 녹화 — 코덱·품질·음량, 일시정지, 자동 분할
 - 입력 해상도 PNG 스크린샷과 클립보드 복사
@@ -71,7 +72,7 @@ VSR 동작은 GPU·드라이버에 따라 다르며 지연이 늘 수 있습니�
 
 [전체 문서 목록](docs/INDEX.ko.md)에서 릴리스 노트와 개발·검증 기록도 확인할 수 있습니다.
 
-- [사용 가이드](docs/USAGE.ko.md) — 설정, 절전 방지, 단축키, VSR, 스크린샷
+- [사용 가이드](docs/USAGE.ko.md) — 설정, 단축키, 업스케일링·VSR, 스크린샷, 절전 방지
 - [녹화](docs/RECORDING.ko.md) — 지원 조건, 품질·용량, 분할·파일 보호
 - [영상·HDR](docs/VIDEO.ko.md) / [오디오·5.1](docs/AUDIO.ko.md)
 - [문제 해결](docs/TROUBLESHOOTING.ko.md) / [진단·로그](docs/DIAGNOSTICS.ko.md) / [소스 빌드](docs/BUILDING.ko.md)

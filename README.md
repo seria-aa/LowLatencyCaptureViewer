@@ -5,7 +5,7 @@
 A low-latency Windows viewer for video and audio from HDMI capture devices.
 Use it to play console games without OBS, or listen in audio-only mode.
 
-**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.1.5.md) · [한국어](README.ko.md)
+**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.1.6.md) · [한국어](README.ko.md)
 
 <br>
 
@@ -13,17 +13,17 @@ Use it to play console games without OBS, or listen in audio-only mode.
 | --- | --- |
 | [![Video settings](docs/images/settings-video-en.png)](docs/images/settings-video-en.png) | [![Audio settings](docs/images/settings-audio-en.png)](docs/images/settings-audio-en.png) |
 
-<sub>2.1.3 UI examples; see the guides below for the 2.1.5 More controls, SDR range and capture-matched display size. Click an image to view it at full resolution.</sub>
+<sub>2.1.6 UI examples. Device lists and supported formats vary by system. Click an image to view it at full resolution.</sub>
 
 <br>
 
-## What's new in 2.1.5
+## What's new in 2.1.6
 
-Stricter **explicit capture FPS checks**, **SDR range (Auto/Limited/Full)** and a
-**Same as capture** display-size option. Optional frame controls are grouped under **More**,
-and free-space queries no longer block the recording encoder worker.
-New profiles and equal legacy capture/display sizes follow capture; different legacy sizes remain fixed.
-[Recording guide](docs/RECORDING.md) · [Full release notes](docs/release-notes-v2.1.5.md)
+**CMAA2 → NIS** smooths edges before enlarging SDR video.
+Choose **Off / CMAA2 → NIS / NVIDIA VSR**, with NIS sharpness defaulting to **0.15**.
+The new filter is off by default. Settings tabs have more consistent spacing, alignment and
+footer margins, with reduced redundant settings processing and cleaner build/test separation.
+[Upscaling guide](docs/USAGE.md#cmaa2--nis-upscaling) · [Full release notes](docs/release-notes-v2.1.6.md)
 
 <br>
 
@@ -53,6 +53,7 @@ These are the default keys; change them under **Guide & logs**.
 - Optional 40 fps capture and unlisted 30 fps requests, subject to driver acceptance
 - SDR range Auto/Limited/Full, shared by playback, screenshots and recording
 - NVIDIA VSR (experimental), with separate or capture-matched display resolutions
+- CMAA2 → NIS upscaling for SDR enlargement; HDR retains the original output. Select Off/VSR, default sharpness 0.15
 - WASAPI Shared/Exclusive, ASIO, console LPCM 5.1, and audio-only mode
 - NV12/YUY2/MJPEG SDR/stereo MP4 recording — codec, quality, volume, pause and splitting
 - Source-resolution PNG screenshots with optional clipboard copy
@@ -71,7 +72,7 @@ See the [feature requirements](docs/USAGE.md#compatibility-and-feature-requireme
 
 The [documentation index](docs/INDEX.md) also lists release notes and development/validation records.
 
-- [User guide](docs/USAGE.md) — settings, sleep prevention, shortcuts, VSR, and screenshots
+- [User guide](docs/USAGE.md) — settings, shortcuts, upscaling/VSR, screenshots and sleep prevention
 - [Recording](docs/RECORDING.md) — requirements, quality, splitting and file protection
 - [Video and HDR](docs/VIDEO.md) / [Audio and 5.1](docs/AUDIO.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md) / [Diagnostics and logs](docs/DIAGNOSTICS.md) / [Build from source](docs/BUILDING.md)

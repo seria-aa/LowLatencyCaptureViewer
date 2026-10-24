@@ -33,11 +33,19 @@ if (-not (Test-Path -LiteralPath $docs -PathType Container)) {
 # Keep exclusions in sync with the installer and CMake install rules.
 $excludedDocs = @("rounded-corners-validation.md", "TEST-BLT.ko.md",
     "vsr-all-formats-validation.md", "vsr-experiment.md", "vsr-hdr-validation.md",
+    "SPATIAL_UPSCALING_EXPERIMENT.md", "SPATIAL_UPSCALING_EXTENDED_COMPARISON.md",
+    "SPATIAL_UPSCALING_FHD_RECOMPARISON.md",
     "images/viewer.png")
 
 New-Item -ItemType Directory -Force -Path $destination | Out-Null
 foreach ($relative in $rootFiles) {
     Copy-Item -LiteralPath (Join-Path $source $relative) -Destination $destination
+}
+foreach ($notice in @(
+    @("third_party/upscaling/nis/licence.txt", "NIS-LICENSE.txt"),
+    @("third_party/upscaling/cmaa2/license.txt", "CMAA2-LICENSE.txt"),
+    @("third_party/upscaling/NOTICE.txt", "UPSCALING-NOTICE.txt"))) {
+    Copy-Item -LiteralPath (Join-Path $source $notice[0]) -Destination (Join-Path $destination $notice[1])
 }
 foreach ($document in Get-ChildItem -LiteralPath $docs -Recurse -File) {
     $relative = $document.FullName.Substring($docs.Length + 1).Replace('\', '/')

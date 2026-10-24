@@ -118,6 +118,13 @@ static void TestExplicitCaptureRateSelection() {
     state.sectionNavigation = child(L"COMBOBOX", CBS_DROPDOWNLIST, IDC_SETTINGS_SECTION);
     state.pixelFormatCombo = child(L"COMBOBOX", CBS_DROPDOWNLIST, IDC_SETTINGS_PIXEL_FORMAT);
     state.frameRateCombo = child(L"COMBOBOX", CBS_DROPDOWNLIST, IDC_SETTINGS_FRAME_RATE);
+    state.upscalerCombo = child(L"COMBOBOX",CBS_DROPDOWNLIST,IDC_SETTINGS_UPSCALER);
+    state.nisSharpnessCombo = child(L"COMBOBOX",CBS_DROPDOWNLIST,IDC_SETTINGS_NIS_SHARPNESS);
+    for(const auto* label:{L"Off",L"CMAA2 -> NIS",L"NVIDIA VSR"})
+        SendMessageW(state.upscalerCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+    for(int i=0;i<=100;++i)SendMessageW(state.nisSharpnessCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"strength"));
+    SendMessageW(state.upscalerCombo,CB_SETCURSEL,1,0);
+    SendMessageW(state.nisSharpnessCombo,CB_SETCURSEL,25,0);
     state.startButton = child(L"BUTTON", BS_PUSHBUTTON, IDC_SETTINGS_START);
     state.audioOnlyCheck = child(L"BUTTON", BS_AUTOCHECKBOX, IDC_SETTINGS_AUDIO_ONLY);
     state.capture40Check = child(L"BUTTON", BS_AUTOCHECKBOX, IDC_SETTINGS_CAPTURE_40);
@@ -172,6 +179,8 @@ static void TestExplicitCaptureRateSelection() {
         "incompatible format preserves explicit FPS and explains disabled Start");
     EnableWindow(state.startButton, TRUE);
     FinishSettingsDialog(hwnd, &state, true);
+    Require(!g_settings.cmaaNisEnabled && g_settings.nisSharpnessPercent==15,
+        "rejected settings never commit pending upscaler preferences");
     Require(IsWindow(hwnd) && !state.accepted && g_settings.videoFrameRate == 60,
         "stale enabled Start cannot save unavailable FPS as Auto");
     chooseRate(120);
@@ -602,8 +611,19 @@ static void TestSettingsBufferModeTransitions() {
     mode(2);
     Require(!state.exclusiveScanRunning && !state.sharedProbeCache && !state.captureAudioProbeCache,
         "buffer-only mode changes never start hardware probes");
+    state.upscalerCombo=CreateWindowW(L"COMBOBOX",L"",WS_CHILD|CBS_DROPDOWNLIST,
+        0,0,200,150,hwnd,nullptr,wc.hInstance,nullptr);
+    state.nisSharpnessCombo=CreateWindowW(L"COMBOBOX",L"",WS_CHILD|CBS_DROPDOWNLIST,
+        0,0,200,150,hwnd,nullptr,wc.hInstance,nullptr);
+    for(const auto* label:{L"Off",L"CMAA2 -> NIS",L"NVIDIA VSR"})
+        SendMessageW(state.upscalerCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+    for(int i=0;i<=100;++i)SendMessageW(state.nisSharpnessCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"strength"));
+    SendMessageW(state.upscalerCombo,CB_SETCURSEL,1,0);
+    SendMessageW(state.nisSharpnessCombo,CB_SETCURSEL,25,0);
     SendMessageW(state.preventSleepCheck, BM_SETCHECK, BST_UNCHECKED, 0);
     FinishSettingsDialog(hwnd, &state, true);
+    Require(g_settings.cmaaNisEnabled && !g_settings.vsrEnabled && g_settings.nisSharpnessPercent==25,
+        "accepted settings save exclusive upscaler mode and exact sharpness");
     Require(state.accepted && !IsWindow(hwnd) && g_settings.audioMode == AudioMode::Asio &&
             g_settings.wasapiBufferMs == 30 && g_settings.wasapiSharedPeriodFrames == 960,
         "accepting ASIO preserves both WASAPI preferences without saving a zero buffer");
@@ -733,6 +753,8 @@ static void TestSettingsSharedRefreshAcrossModes() {
 
 static void TestSettingsAudioIdentityAndRefresh() {
     const auto saved = g_settings;
+    const bool savedSuppress = g_suppressSettingsSave;
+    g_suppressSettingsSave = true;
     g_settings = {};
     g_settings.audioOutputDeviceId = L"B";
     g_settings.asioDriverName = L"Driver one";
@@ -830,5 +852,6 @@ static void TestSettingsAudioIdentityAndRefresh() {
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName,wc.hInstance);
     g_settings=saved;
+    g_suppressSettingsSave=savedSuppress;
     std::puts("Settings identity: 3 endpoints, 2 ASIO drivers, slow/stale probe, cache reuse and inventory reorder passed.");
 }

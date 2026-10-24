@@ -202,27 +202,27 @@ void ShowRecordingSettings(SettingsControls* s){
 }
 void LayoutRecordingSettings(SettingsControls* s,UINT dpi){
     const auto p=[&](HWND h,int x,int y,int w,int height){PlaceSettingsControl(h,x,y,w,height,dpi);};
-    p(s->recVideoTitle,184,112,376,20);p(s->recSaveTitle,600,112,376,20);p(s->recCodecLabel,184,144,376,20);
-    for(int i=0;i<3;++i)p(s->recordingCodecs[i],184+i*128,168,120,32);
+    p(s->recVideoTitle,184,108,376,20);p(s->recSaveTitle,600,108,376,20);p(s->recCodecLabel,184,136,376,20);
+    for(int i=0;i<3;++i)p(s->recordingCodecs[i],184+i*128,164,120,32);
     const auto field=[&](HWND label,HWND control,int x,int y,int width){
-        p(label,x,y,width,20);p(control,x,y+24,width,200);ApplySettingsComboMetrics(control,dpi);
+        p(label,x,y,width,20);p(control,x,y+28,width,200);ApplySettingsComboMetrics(control,dpi);
     };
-    field(s->recEncoderLabel,s->recEncoder,184,216,376);
+    field(s->recEncoderLabel,s->recEncoder,184,212,376);
     p(s->recStatus,184,280,376,48);
-    field(s->recModeLabel,s->recMode,184,332,180);
-    field(s->recBitrateLabel,s->recBitrate,380,332,180);
-    field(s->recResolutionLabel,s->recResolution,184,396,180);
-    field(s->recFpsLabel,s->recFps,380,396,180);
-    field(s->recAudioLabel,s->recAudio,184,460,180);
-    field(s->recVolumeLabel,s->recVolume,380,460,180);
-    p(s->recFolderLabel,600,144,376,20);p(s->recFolder,600,168,376,24);p(s->recBrowse,600,200,180,32);
+    field(s->recModeLabel,s->recMode,184,328,180);
+    field(s->recBitrateLabel,s->recBitrate,380,328,180);
+    field(s->recResolutionLabel,s->recResolution,184,392,180);
+    field(s->recFpsLabel,s->recFps,380,392,180);
+    field(s->recAudioLabel,s->recAudio,184,456,180);
+    field(s->recVolumeLabel,s->recVolume,380,456,180);
+    p(s->recFolderLabel,600,136,376,20);p(s->recFolder,600,164,376,24);p(s->recBrowse,600,200,180,32);
     p(s->recSpace,600,240,376,40);
     p(s->recOpenFolder,796,200,180,32);
-    field(s->recSplitLabel,s->recSplit,600,332,180);
-    field(s->recSplitValueLabel,s->recSplitValue,796,332,180);
-    p(s->recSplitHint,600,396,376,32);
-    p(s->recNote,600,436,376,104);
-    p(s->recPause,600,548,180,32);
+    field(s->recSplitLabel,s->recSplit,600,328,180);
+    field(s->recSplitValueLabel,s->recSplitValue,796,328,180);
+    p(s->recSplitHint,600,392,376,32);
+    p(s->recNote,600,432,376,104);
+    p(s->recPause,600,544,180,30);
 }
 bool RecordingSettingsCommand(SettingsControls* s,HWND owner,int id,int notification){
     if(id==kRecordingOpenFolder){

@@ -452,15 +452,27 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         468, 104, 84, 28, hwnd,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_VIDEO_REFRESH)), instance, nullptr);
-    state->vsrCheck = CreateWindowExW(0, L"BUTTON",
-        L"NVIDIA VSR (F6)",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-        34, 444, 295, 26, hwnd,
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_VSR)), instance, nullptr);
-    SendMessageW(state->vsrCheck, BM_SETCHECK,
-        initial.settings.vsrEnabled && !state->vsrGpuUnavailable ? BST_CHECKED : BST_UNCHECKED, 0);
+    state->upscalerLabel = makeLabel(initial.english ? L"Upscaling" : L"업스케일링", 600, 412);
+    state->upscalerCombo = CreateWindowExW(0, L"COMBOBOX", nullptr, kSettingsDropdownStyle,
+        724, 412, 252, 150, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_UPSCALER)), instance, nullptr);
+    for (const auto* label : {initial.english ? L"Off" : L"끄기", L"CMAA2 → NIS", L"NVIDIA VSR"}) {
+        SendMessageW(state->upscalerCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+    }
+    SendMessageW(state->upscalerCombo, CB_SETCURSEL,
+        initial.settings.cmaaNisEnabled ? 1 : initial.settings.vsrEnabled && !state->vsrGpuUnavailable ? 2 : 0, 0);
+    state->nisSharpnessLabel = makeLabel(initial.english ? L"NIS sharpness" : L"NIS 선명도", 600, 448);
+    state->nisSharpnessCombo = CreateWindowExW(0, L"COMBOBOX", nullptr, kSettingsDropdownStyle,
+        724, 448, 136, 180, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_NIS_SHARPNESS)), instance, nullptr);
+    // Exact hundredths allow saved values to round-trip without quantization.
+    for (int sharpness=0; sharpness<=100; ++sharpness) {
+        wchar_t label[16]{};
+        swprintf_s(label,L"%.2f",double(sharpness)/100.0);
+        SendMessageW(state->nisSharpnessCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+    }
+    SendMessageW(state->nisSharpnessCombo,CB_SETCURSEL,
+        std::clamp(initial.settings.nisSharpnessPercent,0,100),0);
     state->vsrGuideButton = CreateWindowExW(0, L"BUTTON",
-        initial.english ? L"Setup guide" : L"설정 안내",
+        L"?",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         340, 444, 120, 26, hwnd,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_VSR_GUIDE)), instance, nullptr);
@@ -494,7 +506,7 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
     SendMessageW(state->screenshotClipboardCheck, BM_SETCHECK,
         initial.settings.screenshotClipboard ? BST_CHECKED : BST_UNCHECKED, 0);
     state->screenshotHelp = CreateWindowExW(
-        0, L"STATIC", initial.english ? L"Source-size PNG\r\nHDR to SDR" : L"입력 해상도 PNG\r\nHDR은 SDR로 저장",
+        0, L"STATIC", initial.english ? L"Source-size PNG · HDR saved as SDR" : L"입력 해상도 PNG · HDR은 SDR로 저장",
         WS_CHILD | WS_VISIBLE | SS_LEFT, 705, 530, 200, 36,
         hwnd, nullptr, instance, nullptr);
     state->screenshotFolderButton = CreateWindowExW(
@@ -990,7 +1002,8 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
         state->presentationLabel, state->presentationCombo, state->presentationHelp,
         state->displayMonitorLabel, state->displayMonitorCombo, state->pixelCheck,
         state->scalingLabel, state->scalingCombo,
-        state->displayResolutionLabel, state->displayResolutionCombo, state->vsrCheck, state->vsrGuideButton, state->vsrStatus,
+        state->displayResolutionLabel, state->displayResolutionCombo, state->upscalerLabel, state->upscalerCombo,
+        state->nisSharpnessLabel, state->nisSharpnessCombo, state->vsrGuideButton, state->vsrStatus,
         state->screenshotTitle, state->screenshotClipboardCheck,
         state->screenshotFolderButton, state->screenshotHelp,
 
@@ -1038,7 +1051,7 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
             }
         }
     }
-    for (HWND control : {state->screenshotTitle,state->vsrCheck,state->skipStartupHint,state->fullscreenCursorHint}) {
+    for (HWND control : {state->screenshotTitle,state->skipStartupHint,state->fullscreenCursorHint}) {
         wchar_t caption[512]{}; GetWindowTextW(control,caption,512);
         state->shortcutCaptionTemplates.emplace_back(control,caption);
     }

@@ -1,11 +1,12 @@
 param(
     [Parameter(Mandatory = $true)][string]$PackageRoot,
-    [string]$Version = "2.1.5"
+    [string]$Version = "2.1.6"
 )
 $ErrorActionPreference = "Stop"
 $package = (Resolve-Path -LiteralPath $PackageRoot).Path
 $required = @("LowLatencyCaptureViewer.exe", "avformat-62.dll", "avcodec-62.dll", "avutil-60.dll",
     "LICENSE", "ASIO-SDK-LICENSE.txt", "ASIO-HOST-LICENSE.txt", "PRETENDARD-LICENSE.txt",
+    "NIS-LICENSE.txt", "CMAA2-LICENSE.txt", "UPSCALING-NOTICE.txt",
     "ffmpeg-licenses/COPYING.LGPLv2.1", "ffmpeg-licenses/LICENSE.md",
     "ffmpeg-licenses/recording-ffmpeg-NOTICE.txt", "ffmpeg-licenses/config.mak",
     "README.md", "README.ko.md", "docs/RECORDING.md", "docs/RECORDING.ko.md")

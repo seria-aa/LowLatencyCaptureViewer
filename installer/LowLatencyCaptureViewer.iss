@@ -1,13 +1,13 @@
-; LLCV v2.1.5
+; LLCV v2.1.6
 ; Build this script with Inno Setup 7 from the installer directory.
 
 #define MyAppName "LLCV"
-#define MyAppVersion "2.1.5"
+#define MyAppVersion "2.1.6"
 #define MyAppPublisher "seria-aa"
 #define MyAppURL "https://github.com/seria-aa/LowLatencyCaptureViewer"
 #define MyAppExeName "LowLatencyCaptureViewer.exe"
 #ifndef BuildDir
-#define BuildDir "..\build-v2150-release"
+#define BuildDir "..\build-v2160-release"
 #endif
 #if FileExists(BuildDir + "\llcv-audio-recovery-diagnostic.txt")
   #error Audio-input recovery diagnostic builds cannot be packaged as a regular release.
@@ -28,9 +28,9 @@ DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
-OutputDir=..\outputs\v2.1.5
-OutputBaseFilename=LowLatencyCaptureViewer_v2.1.5_Setup
-OutputManifestFile=LowLatencyCaptureViewer_v2.1.5_Setup-manifest.txt
+OutputDir=..\outputs\v2.1.6
+OutputBaseFilename=LowLatencyCaptureViewer_v2.1.6_Setup
+OutputManifestFile=LowLatencyCaptureViewer_v2.1.6_Setup-manifest.txt
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -38,7 +38,7 @@ CloseApplications=yes
 SetupIconFile=..\assets\LowLatencyCaptureViewer.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Uninstallable=yes
-VersionInfoVersion=2.1.5.0
+VersionInfoVersion=2.1.6.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName}
 VersionInfoCopyright=Copyright (C) 2026 seria-aa
@@ -76,10 +76,13 @@ Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\third_party\asio\LICENSE.txt"; DestDir: "{app}"; DestName: "ASIO-SDK-LICENSE.txt"; Flags: ignoreversion
 Source: "..\third_party\asio\HOST-LICENSE.txt"; DestDir: "{app}"; DestName: "ASIO-HOST-LICENSE.txt"; Flags: ignoreversion
 Source: "..\third_party\pretendard\LICENSE.txt"; DestDir: "{app}"; DestName: "PRETENDARD-LICENSE.txt"; Flags: ignoreversion
+Source: "..\third_party\upscaling\nis\licence.txt"; DestDir: "{app}"; DestName: "NIS-LICENSE.txt"; Flags: ignoreversion
+Source: "..\third_party\upscaling\cmaa2\license.txt"; DestDir: "{app}"; DestName: "CMAA2-LICENSE.txt"; Flags: ignoreversion
+Source: "..\third_party\upscaling\NOTICE.txt"; DestDir: "{app}"; DestName: "UPSCALING-NOTICE.txt"; Flags: ignoreversion
 Source: "..\실행안내.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\DEPENDENCIES.txt"; DestDir: "{app}"; Flags: ignoreversion
 ; Keep exclusions in sync with Copy-PackageDocs.ps1 and CMake install rules.
-Source: "..\docs\*"; DestDir: "{app}\docs"; Excludes: "rounded-corners-validation.md,TEST-BLT.ko.md,vsr-all-formats-validation.md,vsr-experiment.md,vsr-hdr-validation.md,images\viewer.png"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\docs\*"; DestDir: "{app}\docs"; Excludes: "rounded-corners-validation.md,TEST-BLT.ko.md,vsr-all-formats-validation.md,vsr-experiment.md,vsr-hdr-validation.md,SPATIAL_UPSCALING_EXPERIMENT.md,SPATIAL_UPSCALING_EXTENDED_COMPARISON.md,SPATIAL_UPSCALING_FHD_RECOMPARISON.md,images\viewer.png"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 ; Always create the Start Menu shortcut, including upgrades from an opt-out.

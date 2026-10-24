@@ -87,14 +87,16 @@ int main() {
                 LayoutSettingsControls(&s,dpi);
                 UpdateAdvancedControlVisibility(&s,false,llcv::settings::VideoPixelFormat::Nv12);
                 if(!SettingsCompactLayout(&s) && binding=='M') {
+                    // The guide rows moved up 12 DIPs to preserve the footer
+                    // margin. Keep the exact row spacing and reset checks.
                     for(size_t i=0;i<keys::Count;++i) {
                         RECT key{};GetWindowRect(s.guideKeys[i],&key);
                         MapWindowPoints(nullptr,owner,reinterpret_cast<POINT*>(&key),2);
                         Check(key.left==SettingsPixels(204,dpi) &&
-                              key.top==SettingsPixels(168+static_cast<int>(i)*32,dpi) &&
+                              key.top==SettingsPixels(156+static_cast<int>(i)*32,dpi) &&
                               key.right-key.left==SettingsPixels(80,dpi) &&
                               key.bottom-key.top==SettingsPixels(29,dpi),
-                              "default geometry stays unchanged and returns after long bindings");
+                              "current guide geometry returns after long bindings");
                     }
                 }
                 const int pages=SettingsCompactLayout(&s)?static_cast<int>(s.compactPageNames.size()):1;

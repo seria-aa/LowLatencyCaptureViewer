@@ -23,6 +23,9 @@ logs/
 *.log
 smoke-test.log
 
+# Local recovery archives for generated historical UI screenshots
+outputs/snapshot-archives/
+
 # Per-user IDE files
 .vs/
 .vscode/

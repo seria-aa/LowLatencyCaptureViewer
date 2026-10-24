@@ -33,6 +33,7 @@ try {
     Assert-True ($result.Documents -gt 40) 'User guides/release history were not fully staged.'
     Assert-True ($result.LocalLinks -gt 100) 'Expected local documentation links were not checked.'
     foreach ($relative in @('LICENSE', 'DEPENDENCIES.txt', '실행안내.txt',
+            'NIS-LICENSE.txt', 'CMAA2-LICENSE.txt', 'UPSCALING-NOTICE.txt',
             'docs/USAGE.md', 'docs/USAGE.ko.md', 'docs/VIDEO.md', 'docs/VIDEO.ko.md',
             'docs/AUDIO.md', 'docs/AUDIO.ko.md', 'docs/TROUBLESHOOTING.md',
             'docs/TROUBLESHOOTING.ko.md', 'docs/DIAGNOSTICS.md', 'docs/DIAGNOSTICS.ko.md')) {
@@ -40,13 +41,21 @@ try {
     }
     foreach ($relative in @('DESIGN.txt', 'BUILD_INFO.txt', 'GITHUB_PREP.md', 'tests',
             'docs/images/viewer.png', 'docs/rounded-corners-validation.md', 'docs/TEST-BLT.ko.md',
-            'docs/vsr-all-formats-validation.md', 'docs/vsr-experiment.md', 'docs/vsr-hdr-validation.md')) {
+            'docs/vsr-all-formats-validation.md', 'docs/vsr-experiment.md', 'docs/vsr-hdr-validation.md',
+            'docs/SPATIAL_UPSCALING_EXPERIMENT.md', 'docs/SPATIAL_UPSCALING_EXTENDED_COMPARISON.md',
+            'docs/SPATIAL_UPSCALING_FHD_RECOMPARISON.md')) {
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $package $relative))) "Unnecessary package file: $relative"
+    }
+    $renamedSources = @{
+        'NIS-LICENSE.txt' = 'third_party/upscaling/nis/licence.txt'
+        'CMAA2-LICENSE.txt' = 'third_party/upscaling/cmaa2/license.txt'
+        'UPSCALING-NOTICE.txt' = 'third_party/upscaling/NOTICE.txt'
     }
     foreach ($file in Get-ChildItem -LiteralPath $package -Recurse -File) {
         $relative = $file.FullName.Substring($package.Length + 1)
+        $original = if ($renamedSources.ContainsKey($relative)) { $renamedSources[$relative] } else { $relative }
         Assert-True ((Get-FileHash -LiteralPath $file.FullName).Hash -eq
-            (Get-FileHash -LiteralPath (Join-Path $repository $relative)).Hash) "Document changed: $relative"
+            (Get-FileHash -LiteralPath (Join-Path $repository $original)).Hash) "Document changed: $relative"
     }
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $package 'outputs'))) 'Local outputs must not be packaged.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $package 'src'))) 'Source code must not be packaged.'

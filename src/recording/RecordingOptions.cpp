@@ -1,4 +1,5 @@
 #include "recording/RecordingOptions.h"
+#include "settings/TestProfile.h"
 #include <windows.h>
 #include <shlobj.h>
 #include <filesystem>
@@ -13,10 +14,10 @@ std::wstring Known(REFKNOWNFOLDERID id) {
     return std::wstring(path);
 }
 }
-std::wstring DefaultFolder(){auto folder=Known(FOLDERID_Videos);return folder.empty()?folder:folder+L"\\LLCV";}
-std::wstring ProfilePath(){auto folder=Known(FOLDERID_LocalAppData);return folder.empty()?folder:folder+L"\\LowLatencyCaptureViewer\\recording-prototype.ini";}
+std::wstring DefaultFolder(){if(test_profile::Enabled())return test_profile::Directory()+L"\\recordings";auto folder=Known(FOLDERID_Videos);return folder.empty()?folder:folder+L"\\LLCV";}
+std::wstring ProfilePath(){if(test_profile::Enabled())return test_profile::Directory()+L"\\recording-prototype.ini";auto folder=Known(FOLDERID_LocalAppData);return folder.empty()?folder:folder+L"\\LowLatencyCaptureViewer\\recording-prototype.ini";}
 Options LoadOptions(const std::wstring& path){
-    Options o;if(path.empty())return o;
+    Options o;if(path.empty() || test_profile::Protected(path))return o;
     const bool existing=GetFileAttributesW(path.c_str())!=INVALID_FILE_ATTRIBUTES;
     auto number=[&](const wchar_t* key,int fallback){return static_cast<int>(GetPrivateProfileIntW(L"Recording",key,fallback,path.c_str()));};
     // Missing caps in older profiles meant native capture size/rate.
@@ -36,7 +37,7 @@ Options LoadOptions(const std::wstring& path){
 }
 bool SaveOptions(const Options& o,const std::wstring& path){
     if(!Valid(o))return false;
-    if(path.empty())return false;
+    if(path.empty() || test_profile::Protected(path))return false;
     std::error_code error;std::filesystem::create_directories(std::filesystem::path(path).parent_path(),error);
     if(error)return false;
     // Keep the established recording profile path for existing users.

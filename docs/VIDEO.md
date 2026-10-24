@@ -368,6 +368,14 @@ on another monitor does not unexpectedly reopen fullscreen.
 
 ## Scaling and multi-monitor behavior
 
+Select **Off / CMAA2 → NIS / NVIDIA VSR** under **Video → Upscaling**.
+CMAA2 → NIS smooths SDR source edges before enlargement up to 2× per axis,
+with default sharpness **0.15**. It is opt-in and mutually exclusive with VSR.
+HDR, native-size output, downscaling and enlargement beyond 2× use the original path.
+Increase display size if it currently matches capture.
+Recordings and screenshots are not filtered; OSD is drawn afterward.
+See [selection and requirements](USAGE.md#cmaa2--nis-upscaling).
+
 **Scaling mode** affects only non-1:1 video. Smooth uses standard filtered
 scaling. Sharp uses the GPU Video Processor's edge-enhancement filter when the
 driver supports it and does not add a frame queue. If unsupported, it falls back

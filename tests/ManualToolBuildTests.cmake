@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.24)
+# Check the generated build graph rather than a CMake source-text convention.
+execute_process(COMMAND "${MAKE_PROGRAM}" -C "${BINARY_DIR}" -t query all
+    OUTPUT_VARIABLE default_graph COMMAND_ERROR_IS_FATAL ANY)
+foreach(tool RecordingQualityBenchmark RecordingIndicatorPreview SettingsPreview)
+    if(default_graph MATCHES "[\r\n] +${tool}([.][Ee][Xx][Ee])?[\r\n]")
+        message(FATAL_ERROR "Manual tool is part of the default build: ${tool}")
+    endif()
+    execute_process(COMMAND "${MAKE_PROGRAM}" -C "${BINARY_DIR}" -t query "${tool}"
+        RESULT_VARIABLE result OUTPUT_VARIABLE explicit_graph ERROR_VARIABLE error)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "Explicit manual target is unavailable: ${tool}\n${error}")
+    endif()
+endforeach()
+foreach(test SettingsThemeTests RecordingThemeTests RecordingShortcutTests)
+    if(NOT default_graph MATCHES "[\r\n] +${test}[.][Ee][Xx][Ee][\r\n]")
+        message(FATAL_ERROR "Required regression test disappeared from default build: ${test}")
+    endif()
+endforeach()
+message(STATUS "Manual tools are opt-in; required regression tests remain in the default build")
