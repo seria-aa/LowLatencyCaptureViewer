@@ -5,7 +5,7 @@
 HDMI 캡처보드로 들어오는 영상과 소리를 재생하는 Windows용 저지연 뷰어입니다.
 OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리만 들을 수 있습니다.
 
-**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.1.6.md) · [English](README.md)
+**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.1.7.md) · [English](README.md)
 
 <br>
 
@@ -17,13 +17,12 @@ OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리�
 
 <br>
 
-## 2.1.6 업데이트
+## 2.1.7 업데이트
 
-**CMAA2 → NIS** 업스케일링을 추가했습니다. SDR 영상의 계단현상을 보정한 뒤 확대하며,
-**끄기 / CMAA2 → NIS / NVIDIA VSR** 중 선택할 수 있습니다. NIS 선명도 기본값은 **0.15**입니다.
-새 필터는 기본 꺼짐입니다. 설정 탭 전체의 간격·정렬·하단 여백을 다듬고,
-설정 화면의 불필요한 처리와 개발·검증 환경도 정리했습니다.
-[업스케일링 사용 방법](docs/USAGE.ko.md#cmaa2--nis-업스케일링) · [전체 변경 내역](docs/release-notes-v2.1.6.md)
+**F6**은 선택한 업스케일링 방식과 선명도를 유지하면서 켜고 끕니다.
+기존에 VSR이 켜져 있던 설정은 유지하며, 선택 이력이 없으면 F6으로 **CMAA2 → NIS(0.15)**를 켭니다.
+업데이트 후 첫 실행에는 설정 창을 한 번 보여주고, 이후에는 기존 **바로 시작** 선택을 따릅니다.
+[업스케일링 사용 방법](docs/USAGE.ko.md#cmaa2--nis-업스케일링) · [전체 변경 내역](docs/release-notes-v2.1.7.md)
 
 <br>
 
@@ -40,7 +39,7 @@ Windows 10/11 x64와 캡처보드 드라이버가 필요합니다.
 2. LLCV에서 **캡처 장치**를 확인하고 **시작**을 누릅니다.
 3. 소리가 나오지 않으면 **캡처 오디오 장치**를 확인하세요.
 
-<kbd>F1</kbd> 도움말 · <kbd>F2</kbd> 설정 · <kbd>F6</kbd> VSR · <kbd>F9</kbd> 녹화 · <kbd>F11</kbd> 전체화면 · <kbd>F12</kbd> 스크린샷 · <kbd>Tab</kbd> 진단
+<kbd>F1</kbd> 도움말 · <kbd>F2</kbd> 설정 · <kbd>F6</kbd> 업스케일링 · <kbd>F9</kbd> 녹화 · <kbd>F11</kbd> 전체화면 · <kbd>F12</kbd> 스크린샷 · <kbd>Tab</kbd> 진단
 
 위 키는 기본값이며, **도움말·진단**에서 변경할 수 있습니다.
 

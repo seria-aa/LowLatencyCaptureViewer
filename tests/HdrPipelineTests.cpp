@@ -842,6 +842,9 @@ static int TestOverlayUi(const char* directory) {
 // Native HDR VSR uses the production processor, not an SDR intermediate.
 static int TestHdrVsr(bool paced = false) {
     using namespace llcv::vsr;
+    // This fixture exercises VSR explicitly; a fresh profile now selects CMAA/NIS for F6.
+    g_settings.preferredUpscaler=llcv::settings::UpscalingMethod::NvidiaVsr;
+    g_settings.cmaaNisEnabled=false;
     Check(CoInitializeEx(nullptr, COINIT_MULTITHREADED), "VSR HDR COM");
     HWND hwnd = CreateWindowExW(0, L"STATIC", L"Hidden HDR VSR test", WS_POPUP,
         0, 0, 1280, 720, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);

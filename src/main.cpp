@@ -145,7 +145,7 @@ static bool g_spatialInteractivePreview = false;
 // UI publishes intent only; the capture/render thread owns all D3D calls.
 static std::atomic<llcv::vsr::Mode> g_vsrMode{llcv::vsr::Mode::Disabled};
 // Single request value keeps enable/sharpness coherent across the UI/render owners.
-static std::atomic<int> g_cmaaNisRequest{-1}; // -1 = off, otherwise sharpness 0..100
+static std::atomic<int> g_cmaaNisRequest{-1}; // See upscaling::Request; -1 selects VSR.
 static std::atomic<UINT> g_vsrGpuVendor{0};
 #endif
 
@@ -161,11 +161,11 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
 #if defined(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.6-audio-recovery-diagnostic";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.7-audio-recovery-diagnostic";
 #elif defined(LLCV_VSR_EXPERIMENT)
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.6-vsr-test";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.7-vsr-test";
 #else
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.6";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.7";
 #endif
 
 constexpr int kRecommendedCaptureBufferMs = 20;
@@ -423,6 +423,7 @@ enum class TransientHudContent { Volume, OneToOne, OneToOneUnavailable,
     ScreenshotClipboardFailed, ScreenshotFailed, ScreenshotTimeout
 #ifdef LLCV_VSR_FEATURE
     , VsrPending, VsrOn, VsrOff, VsrUnavailable, VsrRejected, VsrFailed
+    , CmaaNisPending, CmaaNisOn, CmaaNisOff, CmaaNisHdrBypass, CmaaNisScaleBypass, CmaaNisFailed
 #endif
 };
 static void ShowTransientHud(TransientHudContent content);
@@ -470,6 +471,15 @@ static bool HandleGpuRecordingMouse(HWND hwnd, UINT message, LPARAM parameter) {
 static bool HandleVsrTestKey(WPARAM key, LPARAM flags, unsigned modifiers=keys::Modifiers()) {
     if (!keys::Match(g_settings.shortcuts,keys::Action::Vsr,static_cast<UINT>(key),modifiers)) return false;
     if ((flags & (LPARAM{1} << 30)) != 0 || g_settings.audioOnly) return true;
+    g_settings.preferredUpscaler = llcv::settings::SelectedUpscaler(g_settings);
+    if (g_settings.preferredUpscaler == llcv::settings::UpscalingMethod::CmaaNis) {
+        g_settings.cmaaNisEnabled = !g_settings.cmaaNisEnabled;
+        g_settings.vsrEnabled = false;
+        ShowTransientHud(TransientHudContent::CmaaNisPending);
+        g_cmaaNisRequest.store(llcv::upscaling::Request(g_settings.cmaaNisEnabled,
+            g_settings.nisSharpnessPercent), std::memory_order_release);
+        return true;
+    }
     if (!llcv::vsr::NvidiaAdapter(g_vsrGpuVendor.load(std::memory_order_acquire))) {
         ShowTransientHud(TransientHudContent::VsrUnavailable);
         return true;
@@ -2238,14 +2248,14 @@ struct DirectD3D11Renderer {
     UINT vsrInputWidth = 0, vsrInputHeight = 0;
     UINT vsrDisplayWidth = 0, vsrDisplayHeight = 0;
     std::wstring vsrOsdLine() const {
-        if (cmaaNisAppliedRequest >= 0) {
+        if (cmaaNisAppliedRequest != -1) {
             wchar_t line[192]{};
             swprintf_s(line,L"CMAA2 → NIS   %s · %.2f · %s\n",
-                cmaaNisPipeline.Enabled()?L"ON":FAILED(cmaaNisStatus)
+                cmaaNisAppliedRequest < 0 ? L"OFF" : cmaaNisPipeline.Enabled()?L"ON":FAILED(cmaaNisStatus)
                     ? (IsEnglishUi()?L"Unavailable / OFF":L"사용 불가 / OFF")
                     : hdrOutput ? (IsEnglishUi()?L"Bypass (SDR only)":L"적용 제외 (SDR 전용)")
                     : (IsEnglishUi()?L"Bypass (scale limit)":L"적용 제외 (배율 범위)"),
-                double(cmaaNisAppliedRequest)/100.0,hdrOutput?L"HDR10":L"SDR");
+                double(llcv::upscaling::RequestSharpness(cmaaNisAppliedRequest))/100.0,hdrOutput?L"HDR10":L"SDR");
             return line;
         }
         const bool english = IsEnglishUi();
@@ -3410,6 +3420,12 @@ struct DirectD3D11Renderer {
                 case TransientHudContent::VsrUnavailable: ko=L"VSR 적용 불가\n입력·표시 조건 확인"; en=L"VSR unavailable\nCheck format / size"; break;
                 case TransientHudContent::VsrRejected: ko=L"VSR 요청 거부\nOFF로 복귀"; en=L"VSR rejected\nBack to OFF"; break;
                 case TransientHudContent::VsrFailed: ko=L"VSR 전환 실패\n진단 로그 확인"; en=L"VSR switch failed\nSee diagnostic log"; break;
+                case TransientHudContent::CmaaNisPending: ko=L"CMAA2 → NIS\n전환 대기"; en=L"CMAA2 → NIS\nSwitch pending"; break;
+                case TransientHudContent::CmaaNisOn: ko=L"CMAA2 → NIS ON\nF6: 끄기"; en=L"CMAA2 → NIS ON\nF6: OFF"; break;
+                case TransientHudContent::CmaaNisOff: ko=L"CMAA2 → NIS OFF\nF6: 켜기"; en=L"CMAA2 → NIS OFF\nF6: ON"; break;
+                case TransientHudContent::CmaaNisHdrBypass: ko=L"CMAA2 → NIS 적용 제외\nSDR 전용"; en=L"CMAA2 → NIS bypass\nSDR only"; break;
+                case TransientHudContent::CmaaNisScaleBypass: ko=L"CMAA2 → NIS 적용 제외\n확대 배율 확인"; en=L"CMAA2 → NIS bypass\nCheck scale"; break;
+                case TransientHudContent::CmaaNisFailed: ko=L"CMAA2 → NIS 사용 불가\n기본 출력 유지"; en=L"CMAA2 → NIS unavailable\nUsing original output"; break;
                 default: break;
                 }
                 wcscpy_s(volumeText, keys::Expand(IsEnglishUi() ? en : ko,g_settings.shortcuts).c_str());
@@ -3452,7 +3468,11 @@ struct DirectD3D11Renderer {
                 volumeTextLayout->SetFontSize(20.0f,
                     DWRITE_TEXT_RANGE{0, static_cast<UINT32>(wcslen(volumeText))});
 #ifdef LLCV_VSR_FEATURE
-            if ((hudContent==TransientHudContent::VsrOn || hudContent==TransientHudContent::VsrOff) &&
+            if (hudContent >= TransientHudContent::CmaaNisPending)
+                volumeTextLayout->SetFontSize(18.0f,
+                    DWRITE_TEXT_RANGE{0,static_cast<UINT32>(wcslen(volumeText))});
+            if ((hudContent==TransientHudContent::VsrOn || hudContent==TransientHudContent::VsrOff ||
+                 hudContent==TransientHudContent::CmaaNisOn || hudContent==TransientHudContent::CmaaNisOff) &&
                 keys::Label(g_settings.shortcuts[static_cast<size_t>(keys::Action::Vsr)]).size()>12)
                 volumeTextLayout->SetFontSize(16.0f,
                     DWRITE_TEXT_RANGE{0,static_cast<UINT32>(wcslen(volumeText))});
@@ -3858,6 +3878,7 @@ struct DirectD3D11Renderer {
             cmaaNisStatus=hr;
             cmaaNisPipeline.Reset();
             cachedOverlayGeneration=0;
+            ShowTransientHud(TransientHudContent::CmaaNisFailed);
             fwprintf(stderr,L"[upscaling] draw failed 0x%08X; using Video Processor\n",unsigned(hr));
             const HRESULT removed=device->GetDeviceRemovedReason();
             if(FAILED(removed))return removed;
@@ -3893,7 +3914,8 @@ struct DirectD3D11Renderer {
     }
 
     HRESULT presentUploaded() {
-        if(cmaaNisAppliedRequest!=g_cmaaNisRequest.load(std::memory_order_acquire)) {
+        const bool cmaaRequestChanged=cmaaNisAppliedRequest!=g_cmaaNisRequest.load(std::memory_order_acquire);
+        if(cmaaRequestChanged) {
             const HRESULT hr=configureVideoOutput(captureWidth,captureHeight);
             if(FAILED(hr))return hr;
         }
@@ -3902,6 +3924,16 @@ struct DirectD3D11Renderer {
         // frame. Never call D3D from the UI thread or rebuild for an F6 press.
         const HRESULT vsrHr = applyVsrMode();
         if (FAILED(vsrHr)) return vsrHr;
+        // Acknowledge on the render owner, including rapid toggles back to the
+        // already-applied state. Do not claim ON for HDR/native/downscale bypass.
+        if (cmaaNisAppliedRequest != -1 && (cmaaRequestChanged ||
+            g_transientHudContent.load(std::memory_order_acquire)==TransientHudContent::CmaaNisPending)) {
+            ShowTransientHud(cmaaNisAppliedRequest < 0 ? TransientHudContent::CmaaNisOff
+                : FAILED(cmaaNisStatus) ? TransientHudContent::CmaaNisFailed
+                : cmaaNisPipeline.Enabled() ? TransientHudContent::CmaaNisOn
+                : hdrOutput ? TransientHudContent::CmaaNisHdrBypass
+                : TransientHudContent::CmaaNisScaleBypass);
+        }
 #endif
         if (occluded) {
             const uint64_t nowMs = GetTickCount64();
@@ -6502,6 +6534,9 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
         const LRESULT upscaler=SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0);
         g_settings.vsrEnabled = !state->vsrGpuUnavailable && upscaler==2;
         g_settings.cmaaNisEnabled = upscaler==1;
+        if (upscaler==1 || upscaler==2)
+            g_settings.preferredUpscaler = upscaler==1 ? llcv::settings::UpscalingMethod::CmaaNis
+                : llcv::settings::UpscalingMethod::NvidiaVsr;
         const LRESULT nisSharpness=SendMessageW(state->nisSharpnessCombo,CB_GETCURSEL,0,0);
         g_settings.nisSharpnessPercent = nisSharpness>=0 && nisSharpness<=100 ? int(nisSharpness) : 15;
         g_settings.showDiagnosticConsole = SendMessageW(
@@ -7020,9 +7055,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             const std::wstring guide = IsEnglishUi()
                 ? L"CMAA2 → NIS reduces jagged edges before upscaling. Default sharpness: 0.15.\n"
                   L"SDR only, up to 2× per axis. HDR, native size and downscaling use the normal path.\n"
+                  L"F6 toggles the selected method without changing it or its sharpness.\n"
                   L"Display only: recordings/screenshots keep the capture source; OSD is drawn afterward.\n\n"
                 : L"CMAA2로 계단 현상을 보정한 뒤 NIS로 확대합니다. 기본 선명도는 0.15입니다.\n"
                   L"SDR에서만 가로·세로 최대 2배 확대를 지원합니다. HDR·원본 크기·축소는 기존 경로를 사용합니다.\n"
+                  L"F6은 선택한 방식과 선명도를 유지하면서 켜고 끕니다.\n"
                   L"화면 표시에만 적용되며 녹화·스크린샷 원본은 유지합니다. OSD는 처리 후 표시합니다.\n\n";
             MessageBoxW(hwnd, (guide+keys::Expand(llcv::ui_text::VsrSetupGuide(IsEnglishUi()),state->shortcutBindings)).c_str(),
                 IsEnglishUi() ? L"Upscaling — Setup guide" : L"업스케일링 — 설정 안내",
@@ -7272,7 +7309,8 @@ static bool ProcessSettingsRecordingShortcut(HWND dialog, const MSG& message, un
 #endif
 
 static bool ShowSettingsDialog(HINSTANCE hInst,
-                               bool preferSavedViewerMonitor,HWND liveViewer=nullptr) {
+                               bool preferSavedViewerMonitor,HWND liveViewer=nullptr,
+                               bool reviewStartupVersion=false) {
     static const wchar_t kSettingsClass[] = L"LowLatencyCaptureViewerSettingsDialogClass";
     static bool registered = false;
     if (!registered) {
@@ -7395,6 +7433,14 @@ static bool ShowSettingsDialog(HINSTANCE hInst,
     if(!liveViewer)SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     UpdateWindow(hwnd);
+    // Count only a successfully displayed startup dialog, including Cancel.
+    // Store the marker alone so this never commits unaccepted settings.
+    if (reviewStartupVersion && !g_suppressSettingsSave) {
+        EnsureUserDataDirectory();
+        unsigned long error=0;
+        if (!llcv::settings::MarkStartupSettingsShown(SettingsPath(),kAppVersionLabel,&error))
+            fwprintf(stderr,L"[settings] Startup review marker not saved (Win32=%lu); retry next launch.\n",error);
+    }
     MSG msg{};
     while (IsWindow(hwnd)) {
         const BOOL result = GetMessageW(&msg, nullptr, 0, 0);
@@ -10064,12 +10110,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     const auto vsrAdapter = llcv::vsr::ProbeDefaultAdapter();
     g_vsrGpuVendor.store(vsrAdapter.vendor, std::memory_order_release);
     if (!llcv::vsr::NvidiaAdapter(vsrAdapter.vendor)) g_settings.vsrEnabled = false;
+    const bool reviewStartupVersion = !g_suppressSettingsSave &&
+        llcv::settings::StartupReviewRequired(SettingsPath(),kAppVersionLabel);
     const bool showStartupSettings = !smokeTest && !exclusiveProbe &&
-        (forceSettings || shiftLaunch || !g_settings.skipStartupSettings ||
+        (forceSettings || shiftLaunch || reviewStartupVersion || !g_settings.skipStartupSettings ||
          !llcv::presentation::SupportsCapture(g_settings.presentationMode,
                                                g_settings.pixelFormat, g_settings.audioOnly));
     if (showStartupSettings &&
-        !ShowSettingsDialog(hInst, forceSettings)) return 0;
+        !ShowSettingsDialog(hInst, forceSettings,nullptr,reviewStartupVersion)) return 0;
     g_activeAudioMode.store(g_settings.audioMode, std::memory_order_release);
     if (g_settings.audioOnly) {
         // Audio-only is an audio meter window, so the existing audio OSD is
@@ -10084,7 +10132,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         fwprintf(stderr, L"[video] resolution plan: capture %d x %d -> display %d x %d; VSR toggles preserve both.\n",
             capture.width, capture.height, display.width, display.height);
     }
-    g_cmaaNisRequest.store(g_settings.cmaaNisEnabled?std::clamp(g_settings.nisSharpnessPercent,0,100):-1,
+    g_cmaaNisRequest.store(llcv::settings::SelectedUpscaler(g_settings)==llcv::settings::UpscalingMethod::CmaaNis
+        ? llcv::upscaling::Request(g_settings.cmaaNisEnabled,g_settings.nisSharpnessPercent) : -1,
         std::memory_order_release);
     g_vsrMode.store(g_settings.vsrEnabled && !g_settings.cmaaNisEnabled ? llcv::vsr::Mode::On
                                          : llcv::vsr::Mode::Disabled,

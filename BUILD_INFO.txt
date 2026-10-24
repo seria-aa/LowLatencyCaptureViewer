@@ -1,4 +1,14 @@
-LLCV v2.1.6 x64 (continued from the v0.14.2 rework)
+LLCV v2.1.7 x64 (continued from the v0.14.2 rework)
+
+v2.1.7 Selected upscaling toggle and first launch after updates
+------------------------------------------------------------
+- F6 toggles the selected upscaler without switching methods or resetting NIS sharpness.
+- Preserves enabled legacy VSR preferences and the existing custom shortcut binding.
+- With no selection history, F6 enables CMAA2 -> NIS at default sharpness 0.15; startup stays OFF.
+- Shortcut help and OSD follow the selected method, including HDR/scale bypass states.
+- Shows settings once after each version update without clearing the immediate-start preference.
+- Writes only the startup acknowledgement marker after settings are displayed, including Cancel.
+- See tests/RELEASE_V2_1_7_AUDIT.md for preparation status and validation evidence.
 
 v2.1.6 SDR upscaling and settings layout
 ---------------------------------------

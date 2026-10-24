@@ -43,9 +43,9 @@ build\Release\LowLatencyCaptureViewer.exe
 The release configuration uses the static MSVC runtime, so the packaged
 executable does not require a separate Visual C++ Redistributable installation.
 
-The 2.1.6 suite adds CMAA2 → NIS SDR quality, HDR bypass, OSD/recording isolation,
-settings layout, isolated test profiles and manual-tool build boundaries.
-See tests/RELEASE_V2_1_6_AUDIT.md for validation scope.
+The 2.1.7 suite adds F6 method/sharpness retention, legacy VSR migration,
+first-launch update review, marker save failures and real-profile access denial.
+See tests/RELEASE_V2_1_7_AUDIT.md for validation scope.
 
 NIS/CMAA2 shaders are compiled into the executable at build time. Runtime shader compilation
 and source files are not required. Sources, modifications and licenses are in third_party/upscaling.
@@ -85,7 +85,7 @@ report that as complete coverage. These programs are never included in packages.
 
 <br>
 
-A playback-only developer build can use `-DLLCV_RECORDING=OFF` without FFmpeg; it is not the 2.1.6 release package.
+A playback-only developer build can use `-DLLCV_RECORDING=OFF` without FFmpeg; it is not the 2.1.7 release package.
 The mux runtime and `ffmpeg-licenses` folder must remain beside the executable.
 
 The held audio-input recovery prototype is **off by default**. For private diagnosis only,
@@ -99,7 +99,7 @@ It is not a confirmed fix for capture-device silence.
 ## Installer and portable ZIP
 
 After the Release build, run these commands from the repository root. These
-examples package v2.1.6 using the `build\Release` output above; the build-directory
+examples package v2.1.7 using the `build\Release` output above; the build-directory
 override is required because the release scripts normally use a versioned
 build directory.
 
@@ -108,11 +108,11 @@ chcp.com 65001 > $null
 & "C:\Program Files\Inno Setup 7\ISCC.exe" `
   "--define=BuildDir=..\build\Release" ".\installer\LowLatencyCaptureViewer.iss"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
-  -Version 2.1.6 -BuildDir ..\build\Release -OutputDir outputs\v2.1.6
+  -Version 2.1.7 -BuildDir ..\build\Release -OutputDir outputs\v2.1.7
 ```
 
-The outputs are `outputs\v2.1.6\LowLatencyCaptureViewer_v2.1.6_Setup.exe`
-and `outputs\v2.1.6\LowLatencyCaptureViewer_v2.1.6_x64.zip`. When preparing
+The outputs are `outputs\v2.1.7\LowLatencyCaptureViewer_v2.1.7_Setup.exe`
+and `outputs\v2.1.7\LowLatencyCaptureViewer_v2.1.7_x64.zip`. When preparing
 another version, update the versioned release files first; changing a ZIP name
 does not update the executable. See the [release checklist](RELEASING.md).
 

@@ -21,5 +21,10 @@ bool MigrateLegacyPcmQueueTarget(const std::wstring& path);
 // leaves the last saved profile intact; error receives a Win32 error code.
 bool SaveToIni(const std::wstring& path, const AppSettings& settings,
                unsigned long* error = nullptr);
+// Version-specific startup review. Acknowledgement changes only its marker,
+// never the immediate-start preference or unaccepted dialog values.
+bool StartupReviewRequired(const std::wstring& path, const std::wstring& version);
+bool MarkStartupSettingsShown(const std::wstring& path, const std::wstring& version,
+                             unsigned long* error = nullptr);
 
 }  // namespace llcv::settings

@@ -338,7 +338,7 @@ This is the default for new profiles. On upgrade, equal saved capture/display si
 different sizes remain fixed. An explicitly saved fixed/matched mode always takes precedence.
 **Pixel-perfect / Lock display size** locks the selected display size. This is source 1:1 only
 when both resolutions match. Disable it for aspect-preserving manual resizing.
-F6 toggles only the effect; F5 restores input size.
+F6 toggles the selected upscaling method while retaining its sharpness; F5 restores input size.
 
 Resizing updates only the necessary video-output resources and reuses resources
 that do not depend on window size. This reduces recreation work; it does not

@@ -9,7 +9,7 @@ const wchar_t* VsrSetupGuide(bool useEnglish) {
     return useEnglish
         ? L"Setup\n"
           L"1. In NVIDIA App > System > Video, enable RTX Video Super Resolution.\n"
-          L"2. Enable NVIDIA VSR in this viewer. F6 toggles it during playback.\n"
+          L"2. Select NVIDIA VSR under Video > Upscaling. F6 toggles the selected method.\n"
           L"3. Check NVIDIA App's active indicator while playing. This viewer cannot verify activation.\n\n"
           L"Supported input\n"
           L"NV12/YUY2 SDR, MJPEG (decoded to NV12), or P010 HDR10; display at source size or larger. "
@@ -21,7 +21,7 @@ const wchar_t* VsrSetupGuide(bool useEnglish) {
           L"GPU processing can increase latency. Screenshots remain unfiltered source images."
         : L"설정 방법\n"
           L"1. NVIDIA App > 시스템 > 비디오에서 RTX Video Super Resolution을 켜세요.\n"
-          L"2. 이 뷰어에서 NVIDIA VSR을 켜세요. 재생 중에는 F6으로 전환합니다.\n"
+          L"2. 영상 > 업스케일링에서 NVIDIA VSR을 선택하세요. F6은 선택한 방식만 켜고 끕니다.\n"
           L"3. NVIDIA App의 활성 표시를 확인하세요. 이 뷰어는 실제 적용 여부를 확인하지 못합니다.\n\n"
           L"지원 조건\n"
           L"NV12/YUY2 SDR, MJPEG(NV12로 디코딩), P010 HDR10을 원본과 같거나 크게 표시할 때 사용합니다. "

@@ -16,9 +16,9 @@ Get one of the files from the [latest release](https://github.com/seria-aa/LowLa
   shortcut is created automatically; the desktop shortcut is optional.
 - **x64.zip — portable:** extract it, then run `LowLatencyCaptureViewer.exe`.
 
-**Updating to 2.1.6:** SDR-only **CMAA2 → NIS** upscaling with adjustable sharpness,
-plus consistent spacing, alignment and footer margins across settings tabs.
-[Recording guide](RECORDING.md) · [2.1.6 release notes](release-notes-v2.1.6.md)
+**Updating to 2.1.7:** F6 toggles the selected upscaling method without changing it.
+Settings are shown once after each update, even when Start directly is enabled.
+[Recording guide](RECORDING.md) · [2.1.7 release notes](release-notes-v2.1.7.md)
 **40 fps capture**, added in [2.0.4](release-notes-v2.0.4.md),
 remains off by default; enable it under **Video → More beside Frame rate** only when needed.
 Sleep prevention and earlier settings improvements are covered in the
@@ -247,7 +247,7 @@ with or without Ctrl/Alt/Shift. All valid assigned keys continue to work in the 
 | `Tab` | Show/hide live diagnostics |
 | `F3` | Show/hide the audio meter over video (audio-only has its own view) |
 | `F5` | Restore source-resolution 1:1 size (video mode) |
-| `F6` | Toggle NVIDIA VSR request (video mode) |
+| `F6` | Toggle selected upscaling (video mode) |
 | `F1` | App information and shortcuts (Help/Exit keys close only the help window while it is active) |
 | `F12` | Save a source-resolution screenshot (video mode) |
 | `F9` | Start / stop SDR/stereo recording during video playback |
@@ -263,7 +263,7 @@ with or without Ctrl/Alt/Shift. All valid assigned keys continue to work in the 
 resolutions gives 1:1 pixels; turn this off to resize the window while retaining aspect ratio.
 Borderless and exclusive fullscreen retain the selected display size with black margins.
 Choose **Fullscreen video position** under **Window** for center/edge positioning. Oversized video
-is fitted without cropping. F5 restores input size, while F6 changes only the VSR effect.
+is fitted without cropping. F5 restores input size, while F6 toggles only the selected upscaling method.
 
 **Hide title bar** removes windowed-mode borders and is separate from `F11`
 fullscreen. **Keep relative window size when moving monitors** maintains similar
@@ -304,6 +304,9 @@ page if you prefer a visible cursor.
 
 Enable **Start directly next time** to skip the settings window. Hold `Shift`
 while launching, or press `F2` from the viewer, to open it again.
+After an update, settings are shown once on the first launch. Your immediate-start
+preference is retained and applies again on the next launch after closing settings.
+Cancel also counts as the one-time display. If the acknowledgement cannot be saved, settings are shown again on the next launch.
 
 Use **Language** on the **App** page to follow the Windows language or explicitly choose
 Korean or English. The same page offers automatic update checks after startup
@@ -322,7 +325,9 @@ and is adjustable from 0.00 to 1.00. Existing VSR preferences are preserved; the
 - P010 HDR10 bypasses this filter and retains the original output. The SDR filter selection and sharpness are retained and apply again when returning to SDR.
 - Native size, downscaling and enlargement beyond 2× use the original path. Increase display size if it currently matches capture.
 - Display only: OSD is drawn afterward; recordings and screenshots retain the capture source.
-- Mutually exclusive with VSR. The existing F6 shortcut enables/disables VSR and disables CMAA2 → NIS when enabling VSR.
+- Mutually exclusive with VSR. F6 toggles the selected method without switching it. NIS sharpness is retained when toggling off and on.
+- Selecting Off in settings also remembers the last method. With no selection history, F6 enables CMAA2 → NIS (default sharpness 0.15). Startup still defaults to Off.
+- Older profiles with VSR enabled retain VSR selection. Older profiles saved with upscaling already off have no last-method record and are treated as having no selection history.
 - Additional GPU work is required. Select Off for the lowest processing cost.
 
 For example, with **1920 × 1080** capture, choose **2560 × 1440** display resolution and
@@ -343,7 +348,7 @@ message. This vendor check does not certify RTX support or actual enhancement,
 does not change GPU selection, and is not repeated on tab changes or per frame.
 
 Select **NVIDIA VSR** under **Video → Upscaling**; the adjacent **?** button opens the setup guide.
-The default is Off. The selected method and VSR state changed with F6 are saved on normal
+The default is Off. The remembered method and enable state changed with F6 are saved on normal
 exit. Supported viewer routes are NV12/YUY2 SDR, MJPEG decoded to NV12, and P010 HDR10
 displayed at the source size or larger. Same-size output can request native-resolution
 de-artifacting. **Capture resolution** selects the input, while **Display resolution** independently

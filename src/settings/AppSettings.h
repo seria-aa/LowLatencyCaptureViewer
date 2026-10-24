@@ -10,6 +10,8 @@
 
 namespace llcv::settings {
 
+enum class UpscalingMethod { NvidiaVsr = 0, CmaaNis = 1 };
+
 enum class AudioMode {
     WasapiShared,
     WasapiExclusive,
@@ -138,6 +140,7 @@ struct AppSettings {
     bool screenshotClipboard = false;
     bool vsrEnabled = false;
     bool cmaaNisEnabled = false;
+    UpscalingMethod preferredUpscaler = UpscalingMethod::CmaaNis;
     int nisSharpnessPercent = 15; // 0..100; default 0.15. Display processing only.
     bool showDiagnosticConsole = false;
     bool skipStartupSettings = false;
@@ -167,6 +170,12 @@ struct AppSettings {
     // Explicit startup display; empty preserves the last-window-position policy.
     std::wstring preferredDisplayMonitor;
 };
+
+// Enabled legacy preferences take priority; OFF remembers the last selection.
+inline UpscalingMethod SelectedUpscaler(const AppSettings& settings) {
+    return settings.cmaaNisEnabled ? UpscalingMethod::CmaaNis
+        : settings.vsrEnabled ? UpscalingMethod::NvidiaVsr : settings.preferredUpscaler;
+}
 
 inline VideoPreset EffectiveDisplayPreset(const AppSettings& settings) {
     return settings.displayMatchesCapture ? settings.capturePreset : settings.videoPreset;

@@ -24,6 +24,7 @@ static void TestPolicy() {
     Require(Eligible(0x10de, DXGI_FORMAT_NV12, false, 1280,720,1920,1080), "720p to 1080p eligible");
     const auto savedSettings = g_settings;
     const UINT savedVendor = g_vsrGpuVendor.load();
+    g_settings.preferredUpscaler=llcv::settings::UpscalingMethod::NvidiaVsr;
     for (UINT vendor : {0u, 0x8086u, 0x1002u, 0x1414u}) {
         g_vsrGpuVendor = vendor;
         g_settings.audioOnly = false;
@@ -1042,6 +1043,8 @@ static void TestNativeControls(HWND window, int width, int height, const std::ve
 
 static void TestLiveToggle(HWND window, int width, int height, const std::vector<BYTE>& pixels,
                            VideoPixelFormat format = VideoPixelFormat::Nv12) {
+    g_settings.cmaaNisEnabled=false;
+    g_settings.preferredUpscaler=llcv::settings::UpscalingMethod::NvidiaVsr;
     g_vsrMode.store(llcv::vsr::Mode::Disabled);
     DirectD3D11Renderer renderer;
     Check(renderer.initialize(window,width,height,60,format), "toggle renderer init");
@@ -1151,7 +1154,10 @@ static void TestLiveToggle(HWND window, int width, int height, const std::vector
         renderer.vsrState = savedState;
         for (const auto content : {TransientHudContent::VsrPending, TransientHudContent::VsrOn,
                 TransientHudContent::VsrOff, TransientHudContent::VsrUnavailable,
-                TransientHudContent::VsrRejected, TransientHudContent::VsrFailed}) {
+                TransientHudContent::VsrRejected, TransientHudContent::VsrFailed,
+                TransientHudContent::CmaaNisPending, TransientHudContent::CmaaNisOn,
+                TransientHudContent::CmaaNisOff, TransientHudContent::CmaaNisHdrBypass,
+                TransientHudContent::CmaaNisScaleBypass, TransientHudContent::CmaaNisFailed}) {
             ShowTransientHud(content);
             Check(renderer.refreshOverlayLayouts(), "bilingual VSR overlay");
             DWRITE_TEXT_METRICS metrics{};
