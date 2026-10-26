@@ -44,7 +44,8 @@ try {
             'docs/vsr-all-formats-validation.md', 'docs/vsr-experiment.md', 'docs/vsr-hdr-validation.md',
             'docs/SPATIAL_UPSCALING_EXPERIMENT.md', 'docs/SPATIAL_UPSCALING_EXTENDED_COMPARISON.md',
             'docs/SPATIAL_UPSCALING_FHD_RECOMPARISON.md',
-            'docs/UPSCALING_BOUNDARY_SAFETY.md', 'docs/UPSCALING_OVERFLOW_DIAGNOSTIC.md')) {
+            'docs/UPSCALING_BOUNDARY_SAFETY.md', 'docs/UPSCALING_OVERFLOW_DIAGNOSTIC.md',
+            'docs/UYVY_HDYC_SUPPORT.md')) {
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $package $relative))) "Unnecessary package file: $relative"
     }
     $renamedSources = @{

@@ -5,7 +5,7 @@
 A low-latency Windows viewer for video and audio from HDMI capture devices.
 Use it to play console games without OBS, or listen in audio-only mode.
 
-**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.1.7.md) · [한국어](README.ko.md)
+**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.1.8.md) · [한국어](README.ko.md)
 
 <br>
 
@@ -17,12 +17,12 @@ Use it to play console games without OBS, or listen in audio-only mode.
 
 <br>
 
-## What's new in 2.1.7
+## What's new in 2.1.8
 
-**F6** toggles the selected upscaling method without changing it or its sharpness.
-Previously enabled VSR settings are retained. With no selection history, F6 enables **CMAA2 → NIS (0.15)**.
-After an update, settings are shown once on the first launch; subsequent launches follow your existing **Start directly** preference.
-[Upscaling guide](docs/USAGE.md#cmaa2--nis-upscaling) · [Full release notes](docs/release-notes-v2.1.7.md)
+Fixes NIS edge-pixel contamination and strengthens CMAA2 safety checks.
+Adds **UYVY/HDYC 8-bit 4:2:2** playback and source screenshots; recording this input is not supported.
+Settings and logs now distinguish unsupported-only pixel formats from empty mode lists.
+[Video settings](docs/VIDEO.md) · [Full release notes](docs/release-notes-v2.1.8.md)
 
 <br>
 

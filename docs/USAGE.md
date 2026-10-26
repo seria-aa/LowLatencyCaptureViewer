@@ -16,9 +16,10 @@ Get one of the files from the [latest release](https://github.com/seria-aa/LowLa
   shortcut is created automatically; the desktop shortcut is optional.
 - **x64.zip — portable:** extract it, then run `LowLatencyCaptureViewer.exe`.
 
-**Updating to 2.1.7:** F6 toggles the selected upscaling method without changing it.
+**2.1.8:** fixes upscaling edge artifacts and adds UYVY/HDYC playback and source screenshots.
+UYVY/HDYC recording is not supported.
 Settings are shown once after each update, even when Start directly is enabled.
-[Recording guide](RECORDING.md) · [2.1.7 release notes](release-notes-v2.1.7.md)
+[Recording guide](RECORDING.md) · [2.1.8 release notes](release-notes-v2.1.8.md)
 **40 fps capture**, added in [2.0.4](release-notes-v2.0.4.md),
 remains off by default; enable it under **Video → More beside Frame rate** only when needed.
 Sleep prevention and earlier settings improvements are covered in the

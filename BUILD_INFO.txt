@@ -1,4 +1,16 @@
-LLCV v2.1.7 x64 (continued from the v0.14.2 rework)
+LLCV v2.1.8 x64 (continued from the v0.14.2 rework)
+
+v2.1.8 Upscaling safety and UYVY/HDYC input
+------------------------------------------
+- Fixes NIS left/top edge sampling and adds CMAA2 processing-list bounds checks.
+- Skips CMAA2 only for an overflowing dense frame while retaining NIS scaling.
+- Adds UYVY/HDYC 8-bit 4:2:2 playback and original screenshots; NV12/YUY2 remain preferred.
+- Uses a single GPU repack pass, without new CPU pixel conversion, waits or frame queues.
+- Preserves explicit color metadata and user SDR range without mixing UYVY/HDYC hints.
+- Rejects UYVY/HDYC recording before creating files/workers and explains the limitation.
+- Distinguishes unsupported-only capture formats from empty lists or query failures.
+- Keeps overflow sampling and report handling in separate profile-isolated diagnostic tools.
+- See tests/RELEASE_V2_1_8_AUDIT.md for preparation status and verification evidence.
 
 v2.1.7 Selected upscaling toggle and first launch after updates
 ------------------------------------------------------------

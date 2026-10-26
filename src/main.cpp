@@ -162,11 +162,11 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
 #if defined(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.7-audio-recovery-diagnostic";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.8-audio-recovery-diagnostic";
 #elif defined(LLCV_VSR_EXPERIMENT)
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.7-vsr-test";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.8-vsr-test";
 #else
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.7";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.8";
 #endif
 
 constexpr int kRecommendedCaptureBufferMs = 20;

@@ -13,6 +13,15 @@ try {
     & $CMake --install $build --config $Configuration --prefix $stage
     if ($LASTEXITCODE -ne 0) { throw "Release staging failed." }
     & $validator -PackageRoot $stage -Version $Version
+    if (-not (Test-Path -LiteralPath (Join-Path $stage "docs/release-notes-v$Version.md") -PathType Leaf)) {
+        throw "Missing release notes for $Version."
+    }
+    foreach ($name in @('UPSCALING_BOUNDARY_SAFETY.md', 'UPSCALING_OVERFLOW_DIAGNOSTIC.md',
+            'UYVY_HDYC_SUPPORT.md')) {
+        if (Test-Path -LiteralPath (Join-Path $stage "docs/$name")) {
+            throw "Development-only document included in release: $name"
+        }
+    }
     # A missing mux DLL must fail validation, not produce a playback-only release.
     $runtime = Join-Path $stage "avutil-60.dll"
     $backup = Join-Path $stage "avutil-test-backup.bin"

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 2.1.7 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 2.1.8 LANGUAGES CXX)
 
 include(cmake/MsvcDependencies.cmake)
 
@@ -1464,7 +1464,8 @@ install(DIRECTORY docs DESTINATION .
         PATTERN "SPATIAL_UPSCALING_EXTENDED_COMPARISON.md" EXCLUDE
         PATTERN "SPATIAL_UPSCALING_FHD_RECOMPARISON.md" EXCLUDE
         PATTERN "UPSCALING_BOUNDARY_SAFETY.md" EXCLUDE
-        PATTERN "UPSCALING_OVERFLOW_DIAGNOSTIC.md" EXCLUDE)
+        PATTERN "UPSCALING_OVERFLOW_DIAGNOSTIC.md" EXCLUDE
+        PATTERN "UYVY_HDYC_SUPPORT.md" EXCLUDE)
 
 if(BUILD_TESTING AND LLCV_RECORDING)
     add_executable(TestProfileTests tests/TestProfileTests.cpp src/settings/SettingsStore.cpp src/recording/RecordingOptions.cpp)
