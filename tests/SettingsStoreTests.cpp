@@ -391,7 +391,7 @@ void TestCaptureFrameRatePersistence(const std::wstring& path) {
     // removing the override must not destroy the rate restored afterward.
     for (const auto format : {VideoPixelFormat::Auto, VideoPixelFormat::Nv12,
                               VideoPixelFormat::Yuy2, VideoPixelFormat::Mjpeg,
-                              VideoPixelFormat::P010}) {
+                              VideoPixelFormat::P010, VideoPixelFormat::Uyvy}) {
         for (int fps : {0, 30, 60, 120}) {
             AppSettings saved{};
             saved.capturePreset = VideoPreset::R2560x1440;
@@ -417,6 +417,29 @@ void TestCaptureFrameRatePersistence(const std::wstring& path) {
     saved.videoFrameRate = 60;
     saved.allowUnlistedFps = true;
     if (!CheckSaved(path, saved, "reset legacy FPS parser fixture")) return;
+    const struct { const wchar_t* text; VideoPixelFormat expected; } formatCases[] = {
+        {L"Auto", VideoPixelFormat::Auto}, {L"NV12", VideoPixelFormat::Nv12},
+        {L"YUY2", VideoPixelFormat::Yuy2}, {L"MJPEG", VideoPixelFormat::Mjpeg},
+        {L"P010", VideoPixelFormat::P010}, {L"UYVY", VideoPixelFormat::Uyvy},
+        {L"uyvy", VideoPixelFormat::Uyvy}, {L"HDYC", VideoPixelFormat::Uyvy},
+        {L"unsupported", VideoPixelFormat::Auto}, {nullptr, VideoPixelFormat::Auto},
+    };
+    for (const auto& item : formatCases) {
+        if (!CheckWin32(WritePrivateProfileStringW(L"Video", L"PixelFormat", item.text,
+                path.c_str()), "write existing or new capture format fixture")) return;
+        const auto loaded = LoadFromIni(path).settings;
+        Check(loaded.pixelFormat == item.expected && loaded.videoFrameRate == 60 &&
+            loaded.allowUnlistedFps && loaded.capturePreset == saved.capturePreset &&
+            loaded.videoPreset == saved.videoPreset,
+            "UYVY support preserves legacy format names and unrelated capture settings");
+    }
+    saved.pixelFormat = VideoPixelFormat::Uyvy;
+    if (!CheckSaved(path, saved, "save canonical UYVY format")) return;
+    wchar_t formatText[32]{};
+    GetPrivateProfileStringW(L"Video", L"PixelFormat", L"", formatText,
+        ARRAYSIZE(formatText), path.c_str());
+    Check(std::wstring(formatText) == L"UYVY",
+        "UYVY and HDYC UI selection persist under one stable canonical format name");
     const struct { const wchar_t* text; int expected; } cases[] = {
         {L"30", 30}, {L"60", 60}, {L"120", 120}, {L"0", 0},
         {L" 30 ", 30}, {L"+60", 60},

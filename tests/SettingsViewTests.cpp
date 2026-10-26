@@ -22,6 +22,17 @@ using llcv::settings::VideoPixelFormat;
 static void Check(bool value, const char* message) {
     if (!value) { std::fprintf(stderr, "FAILED: %s\n", message); std::abort(); }
 }
+static void CheckCaptionFits(HWND,const char*,UINT,bool,int,bool,bool);
+static const wchar_t* FullCapabilityCaption(bool english) {
+    return english
+        ? L"Detected modes:\r\nNV12 240/144/120/100/90/60/50/30 fps\r\nYUY2 120/100/60/50/30 fps\r\nP010 60/50/30 fps\r\nMJPEG 240/144/120/100/90/60/50/30 fps\r\nUYVY 240/200/180/165/144/120/100/90/60/50/30 fps"
+        : L"자동 인식:\r\nNV12 240/144/120/100/90/60/50/30 fps\r\nYUY2 120/100/60/50/30 fps\r\nP010 60/50/30 fps\r\nMJPEG 240/144/120/100/90/60/50/30 fps\r\nUYVY 240/200/180/165/144/120/100/90/60/50/30 fps";
+}
+static const wchar_t* UnsupportedCapabilityCaption(bool english) {
+    return english
+        ? L"Only unsupported pixel formats at this resolution:\r\n{11111111-2222-3333-4455-66778899AABB}, {12345678-90AB-CDEF-1122-334455667788}, {AABBCCDD-EEFF-0011-2233-445566778899}, …"
+        : L"선택한 해상도에서 미지원 픽셀 포맷만 제공됩니다:\r\n{11111111-2222-3333-4455-66778899AABB}, {12345678-90AB-CDEF-1122-334455667788}, {AABBCCDD-EEFF-0011-2233-445566778899}, …";
+}
 struct Member { HWND SettingsControls::* handle; const char* name; };
 static LRESULT CALLBACK CountEnableTransitions(HWND hwnd, UINT message, WPARAM wParam,
                                                LPARAM lParam, UINT_PTR, DWORD_PTR data) {
@@ -389,9 +400,11 @@ static void CheckFieldMetrics(SettingsControls& state, HWND parent, UINT dpi) {
     const auto requested=ClientRectOf(parent,state.unlistedFpsStatus);
     const bool extra=GetWindowTextLengthW(state.unlistedFpsStatus)>0;
     const auto bottom=extra ? requested.bottom : detected.bottom;
-    Check(std::abs(bottom-SettingsPixels(state.footerTopDip-24,dpi))<=1 &&
+    Check(bottom>=SettingsPixels(state.footerTopDip-24,dpi)-1 &&
+          bottom<=SettingsPixels(state.footerTopDip-8,dpi)+1 &&
           detected.top>=ClientRectOf(parent,state.hdrChromaCombo).bottom+SettingsPixels(2,dpi)-1,
-          "detected modes stay bottom-anchored without overlapping HDR options");
+          "detected modes retain footer padding without overlapping HDR options");
+    CheckCaptionFits(state.videoCapabilityStatus,"complete detected mode list",dpi,state.english,0,true,false);
     if(extra) Check(requested.top>=detected.bottom+SettingsPixels(4,dpi)-1,
         "unlisted FPS note remains separate below detected modes");
     for(HWND last:{state.driftCombo,state.pcmQueueCombo,state.relativeSizeWarning,state.updateStatus})
@@ -405,15 +418,24 @@ static void CheckFieldMetrics(SettingsControls& state, HWND parent, UINT dpi) {
     wchar_t savedDetected[4096]{},savedRequested[512]{};
     GetWindowTextW(state.videoCapabilityStatus,savedDetected,ARRAYSIZE(savedDetected));
     GetWindowTextW(state.unlistedFpsStatus,savedRequested,ARRAYSIZE(savedRequested));
-    for(const auto caption : {L"Checking modes...", L"Detected:\nNV12 144/120/60 fps\nYUY2 60 fps\nP010 60 fps"}) {
+    for(const auto caption : {L"Checking modes...", L"Detected:\nNV12 144/120/60 fps\nYUY2 60 fps\nP010 60 fps",
+                             FullCapabilityCaption(state.english),UnsupportedCapabilityCaption(state.english)}) {
         for(const bool direct : {false,true}) {
             SetWindowTextW(state.videoCapabilityStatus,caption);
             SetWindowTextW(state.unlistedFpsStatus,direct ? L"Direct request: 30 fps" : L"");
             LayoutSettingsControls(&state,dpi);
             const auto info=ClientRectOf(parent,state.videoCapabilityStatus);
             const auto note=ClientRectOf(parent,state.unlistedFpsStatus);
-            Check(std::abs((direct?note.bottom:info.bottom)-SettingsPixels(state.footerTopDip-24,dpi))<=1,
-                "one/multiline detected summaries remain at the bottom after refresh");
+            const auto blockBottom=direct?note.bottom:info.bottom;
+            Check(blockBottom>=SettingsPixels(state.footerTopDip-24,dpi)-1 &&
+                  blockBottom<=SettingsPixels(state.footerTopDip-8,dpi)+1,
+                "one/six-line summaries retain bottom padding after refresh");
+            Check(info.top>=ClientRectOf(parent,state.hdrChromaCombo).bottom+SettingsPixels(2,dpi)-1,
+                "six-line capability summary never overlaps HDR options");
+            CheckCaptionFits(state.videoCapabilityStatus,"refreshed complete mode list",dpi,state.english,0,true,false);
+            if(std::wcscmp(caption,FullCapabilityCaption(state.english))!=0)
+                Check(std::abs(blockBottom-SettingsPixels(state.footerTopDip-24,dpi))<=1,
+                    "existing short summaries retain their original twenty-four-DIP footer margin");
             if(direct) Check(note.top-info.bottom>=SettingsPixels(4,dpi)-1,
                 "adding direct-request status never overlaps detected text");
         }
@@ -1263,11 +1285,9 @@ static void TestActualControlCreation() {
               "F11 right alignment unchanged");
         Check(SendMessageW(state.tooltipWindow, TTM_GETTOOLCOUNT, 0, 0) == 12,
               "eight help buttons plus monitor, audio mode, frame rate and pixel-perfect tooltips registered");
-        // Model a full five-line device capability report, not just the short
+        // Model a full six-line device capability report, not just the short
         // loading placeholder. Long formats/FPS lists must remain visible.
-        SetWindowTextW(state.videoCapabilityStatus, english
-            ? L"Detected modes:\r\nNV12 240/144/120/100/90/60/50/30 fps\r\nYUY2 120/100/60/50/30 fps\r\nP010 60/50/30 fps\r\nMJPEG 240/144/120/100/90/60/50/30 fps"
-            : L"자동 인식:\r\nNV12 240/144/120/100/90/60/50/30 fps\r\nYUY2 120/100/60/50/30 fps\r\nP010 60/50/30 fps\r\nMJPEG 240/144/120/100/90/60/50/30 fps");
+        SetWindowTextW(state.videoCapabilityStatus,FullCapabilityCaption(english));
         SetWindowTextW(state.unlistedFpsStatus, english
             ? L"Direct request: 30 fps" : L"직접 요청: 30 fps");
         SetWindowTextW(state.audioStatus, english
@@ -1323,7 +1343,7 @@ static void TestActualControlCreation() {
             ApplySettingsFont(&state, parent, textDpi);
             LayoutSettingsControls(&state, textDpi);
             state.activeTab = SettingsTab::VideoWindow;
-            if (profile == 0) for (auto format : {VideoPixelFormat::Auto, VideoPixelFormat::Nv12,
+            if (profile == 0) for (auto format : {VideoPixelFormat::Auto, VideoPixelFormat::Nv12,VideoPixelFormat::Uyvy,
                                 VideoPixelFormat::Mjpeg, VideoPixelFormat::P010}) {
                 UpdateAdvancedControlVisibility(&state, false, format);
                 const auto rangeBefore = selection(state.sdrRangeCombo);
@@ -1538,7 +1558,7 @@ static void TestCompactWorkAreas() {
         // A complete 128-DIP option cannot fit these roughly 96-DIP page
         // bodies. Its explanation and all five navigation entries still must.
         {{0,0,1280,624},192},{{0,0,1920,936},288}};
-    for(bool english:{false,true}) for(const auto& area:areas) {
+    for(bool english:{false,true}) for(const auto& area:areas) for(bool unsupported:{false,true}) {
         SettingsControls state;
         constexpr DWORD style=WS_CAPTION|WS_SYSMENU;
         constexpr DWORD exStyle=WS_EX_DLGMODALFRAME;
@@ -1558,15 +1578,14 @@ static void TestCompactWorkAreas() {
         ApplySettingsFont(&state,parent,area.dpi);
         const HFONT originalFont=reinterpret_cast<HFONT>(SendMessageW(state.audioLabel,WM_GETFONT,0,0));
         const auto originalFonts=state.uiFonts;
-        SetWindowTextW(state.videoCapabilityStatus,english
-            ? L"Detected modes:\r\nNV12 240/144/120/100/90/60/50/30 fps\r\nYUY2 120/100/60/50/30 fps\r\nP010 60/50/30 fps\r\nMJPEG 240/144/120/100/90/60/50/30 fps"
-            : L"자동 인식:\r\nNV12 240/144/120/100/90/60/50/30 fps\r\nYUY2 120/100/60/50/30 fps\r\nP010 60/50/30 fps\r\nMJPEG 240/144/120/100/90/60/50/30 fps");
+        SetWindowTextW(state.videoCapabilityStatus,unsupported?UnsupportedCapabilityCaption(english):FullCapabilityCaption(english));
+        SetWindowTextW(state.unlistedFpsStatus,english?L"Direct request: 30 fps":L"직접 요청: 30 fps");
         SendMessageW(state.pixelCheck,BM_SETCHECK,BST_CHECKED,0);
         SendMessageW(state.relativeSizeCheck,BM_SETCHECK,BST_CHECKED,0);
         std::set<HWND> seen;
         for(int tab=0;tab<kSettingsNavigationCount;++tab) {
             state.activeTab=SettingsTabFromNavigationIndex(tab);
-            for(const auto format:{VideoPixelFormat::Nv12,VideoPixelFormat::P010,VideoPixelFormat::Mjpeg}) {
+            for(const auto format:{VideoPixelFormat::Nv12,VideoPixelFormat::P010,VideoPixelFormat::Mjpeg,VideoPixelFormat::Uyvy}) {
                 SendMessageW(state.pixelFormatCombo,CB_SETITEMDATA,0,static_cast<LPARAM>(format));
                 LayoutSettingsControls(&state,area.dpi);
                 UpdateAdvancedControlVisibility(&state,true,format);

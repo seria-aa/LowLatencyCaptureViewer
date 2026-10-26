@@ -339,6 +339,13 @@ void StoreColorSample( uint2 pixelPos, lpfloat3 color, bool isComplexShape, uint
 {
     uint counterIndex;  g_workingControlBuffer.InterlockedAdd( 4*12, 1, counterIndex );
 
+    // LLCV: candidates can emit multiple items. Never publish an index that
+    // cannot be stored. The args pass skips AA for the whole overflowing frame,
+    // preserving the original linear image for NIS without CPU readback.
+    uint itemCapacity, itemStride;
+    g_workingDeferredBlendItemList.GetDimensions( itemCapacity, itemStride );
+    if( counterIndex >= min(itemCapacity, 1u << 26) ) return;
+
     // quad coordinates
     uint2 quadPos       = pixelPos / uint2( 2, 2 );
     // 2x2 inter-quad coordinates
@@ -357,7 +364,10 @@ void StoreColorSample( uint2 pixelPos, lpfloat3 color, bool isComplexShape, uint
     {
         // Make a list of all edge pixels - these cover all potential pixels where AA is applied.
         uint edgeListCounter;  g_workingControlBuffer.InterlockedAdd( 4*8, 1, edgeListCounter );
-        g_workingDeferredBlendLocationList[edgeListCounter] = (quadPos.x << 16) | quadPos.y;
+        uint locationCapacity, locationStride;
+        g_workingDeferredBlendLocationList.GetDimensions( locationCapacity, locationStride );
+        if( edgeListCounter < locationCapacity )
+            g_workingDeferredBlendLocationList[edgeListCounter] = (quadPos.x << 16) | quadPos.y;
     }
 }
 //
@@ -813,7 +823,10 @@ void EdgesColor2x2CS( uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_Group
                     if( isCandidate )
                     {
                         uint counterIndex;  g_workingControlBuffer.InterlockedAdd( 4*4, 1, counterIndex );
-                        g_workingShapeCandidates[counterIndex] = (localPixelPos.x << 18) | (msaaSampleIndex << 14) | localPixelPos.y;
+                        uint candidateCapacity, candidateStride;
+                        g_workingShapeCandidates.GetDimensions( candidateCapacity, candidateStride );
+                        if( counterIndex < candidateCapacity )
+                            g_workingShapeCandidates[counterIndex] = (localPixelPos.x << 18) | (msaaSampleIndex << 14) | localPixelPos.y;
                     }
 
                     // Write out edges - we write out all, including empty pixels, to make sure shape detection edge tracing
@@ -868,7 +881,11 @@ void ComputeDispatchArgsCS( uint3 groupID : SV_GroupID )
         // check for overflow!
         uint appendBufferMaxCount; uint appendBufferStride;
         g_workingShapeCandidates.GetDimensions( appendBufferMaxCount, appendBufferStride );
-        shapeCandidateCount = min( shapeCandidateCount, appendBufferMaxCount );
+        // Slot 0: per-frame overflow reasons (1=candidates, 2=items, 4=locations).
+        // Host Draw clears the control buffer before each frame.
+        const uint overflow = shapeCandidateCount > appendBufferMaxCount ? 1u : 0u;
+        g_workingControlBuffer.Store( 0, overflow );
+        if( overflow != 0 ) shapeCandidateCount = 0;
 
         // write dispatch indirect arguments for ProcessCandidatesCS
         g_workingExecuteIndirectBuffer.Store( 4*0, ( shapeCandidateCount + CMAA2_PROCESS_CANDIDATES_NUM_THREADS - 1 ) / CMAA2_PROCESS_CANDIDATES_NUM_THREADS );
@@ -883,13 +900,19 @@ void ComputeDispatchArgsCS( uint3 groupID : SV_GroupID )
     {
         // get current count
         uint blendLocationCount = g_workingControlBuffer.Load(4*8);
+        uint overflow = g_workingControlBuffer.Load(0);
+        uint itemCapacity, itemStride;
+        g_workingDeferredBlendItemList.GetDimensions( itemCapacity, itemStride );
+        if( g_workingControlBuffer.Load(4*12) > min(itemCapacity, 1u << 26) ) overflow |= 2u;
 
         // check for overflow!
         { 
             uint appendBufferMaxCount; uint appendBufferStride;
             g_workingDeferredBlendLocationList.GetDimensions( appendBufferMaxCount, appendBufferStride );
-            blendLocationCount = min( blendLocationCount, appendBufferMaxCount );
+            if( blendLocationCount > appendBufferMaxCount ) overflow |= 4u;
         }
+        g_workingControlBuffer.Store( 0, overflow );
+        if( overflow != 0 ) blendLocationCount = 0;
 
         // write dispatch indirect arguments for DeferredColorApply2x2CS
 #if CMAA2_DEFERRED_APPLY_THREADGROUP_SWAP
@@ -1359,6 +1382,8 @@ void DeferredColorApply2x2CS( uint3 dispatchThreadID : SV_DispatchThreadID, uint
 #endif
 
     const uint maxLoops = 32*CMAA_MSAA_SAMPLE_COUNT;   // do the loop to prevent bad data hanging the GPU <- probably not needed
+    uint itemCapacity, itemStride;
+    g_workingDeferredBlendItemList.GetDimensions( itemCapacity, itemStride );
     {
         for( uint i = 0; (counterIndexWithHeader != 0xFFFFFFFF) && ( i < maxLoops); i ++ )
         {
@@ -1367,7 +1392,9 @@ void DeferredColorApply2x2CS( uint3 dispatchThreadID : SV_DispatchThreadID, uint
             uint msaaSampleIndex    = (counterIndexWithHeader >> 27) & 0x07;
             bool isComplexShape     = (counterIndexWithHeader >> 26) & 0x01;
 
-            uint2 val = g_workingDeferredBlendItemList[ counterIndexWithHeader & ((1 << 26) - 1) ];
+            const uint itemIndex = counterIndexWithHeader & ((1 << 26) - 1);
+            if( itemIndex >= itemCapacity ) return;
+            uint2 val = g_workingDeferredBlendItemList[ itemIndex ];
 
             counterIndexWithHeader  = val.x;
 
@@ -1391,6 +1418,9 @@ void DeferredColorApply2x2CS( uint3 dispatchThreadID : SV_DispatchThreadID, uint
 #else
     if( outColors.a == 0 )      return;
 #endif
+
+    // Never apply an order-dependent prefix of an unexpectedly long list.
+    if( counterIndexWithHeader != 0xFFFFFFFF ) return;
 
     {
 #if CMAA_MSAA_SAMPLE_COUNT > 1

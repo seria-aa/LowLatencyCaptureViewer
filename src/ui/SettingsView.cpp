@@ -36,8 +36,14 @@ static void LayoutVideoStatus(SettingsControls* state, UINT dpi) {
         height=static_cast<int>((bounds.bottom*96+dpi-1)/dpi);
         SelectObject(dc,previous); ReleaseDC(state->videoCapabilityStatus,dc);
     }
-    height=std::clamp(height,16,94-extra);
-    const int bottom=state->footerTopDip-24;
+    // Five capture formats plus the heading can need a sixth line. Preserve
+    // the existing anchor for shorter summaries, borrowing only footer padding
+    // when needed; never overlap the HDR fields ending at 470 DIPs or shrink
+    // the type. Even the longest supported summary retains an 8-DIP footer gap.
+    constexpr int earliestTop=472;
+    const int latestBottom=state->footerTopDip-8;
+    height=std::clamp(height,16,std::max(16,latestBottom-earliestTop-extra));
+    const int bottom=std::min(latestBottom,std::max(state->footerTopDip-24,earliestTop+height+extra));
     PlaceSettingsControl(state->videoCapabilityStatus,184,bottom-extra-height,376,height,dpi);
     PlaceSettingsControl(state->unlistedFpsStatus,184,bottom-16,376,16,dpi);
 }

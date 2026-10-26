@@ -628,11 +628,13 @@ void NVScaler(NVU2 blockIdx, NVU threadIdx)
             // - (kSupportSize - 1) / 2 to shift by the kernel support size
             NVF kShift = 0.5f - (kSupportSize - 1) / 2;
 #if NIS_VIEWPORT_SUPPORT
-            const NVF tx = (srcBlockStartX + px + kInputViewportOriginX + kShift) * kSrcNormX;
-            const NVF ty = (srcBlockStartY + py + kInputViewportOriginY + kShift) * kSrcNormY;
+            // LLCV: a negative halo must clamp to the near edge, not wrap to
+            // a huge unsigned coordinate. Viewport origins must be signed too.
+            const NVF tx = (srcBlockStartX + NVI(px) + NVI(kInputViewportOriginX) + kShift) * kSrcNormX;
+            const NVF ty = (srcBlockStartY + NVI(py) + NVI(kInputViewportOriginY) + kShift) * kSrcNormY;
 #else
-            const NVF tx = (srcBlockStartX + px + kShift) * kSrcNormX;
-            const NVF ty = (srcBlockStartY + py + kShift) * kSrcNormY;
+            const NVF tx = (srcBlockStartX + NVI(px) + kShift) * kSrcNormX;
+            const NVF ty = (srcBlockStartY + NVI(py) + kShift) * kSrcNormY;
 #endif
             NVF p[2][2];
 #if NIS_TEXTURE_GATHER
@@ -713,7 +715,7 @@ void NVScaler(NVU2 blockIdx, NVU threadIdx)
     // discretized phase
     const NVI fx_int = NVI(fx * kPhaseCount);
 #if NIS_VIEWPORT_SUPPORT
-    if (NVU(srcX) > kInputViewportWidth || NVU(dstX) > kOutputViewportWidth)
+    if (srcX >= NVF(kInputViewportWidth) || NVU(dstX) >= kOutputViewportWidth)
     {
         return;
     }
@@ -725,7 +727,7 @@ void NVScaler(NVU2 blockIdx, NVU threadIdx)
         // y coord inside the input image
         const NVF srcY = (0.5f + dstY) * kScaleY - 0.5f;
 #if NIS_VIEWPORT_SUPPORT
-        if (!(NVU(srcY) > kInputViewportHeight || NVU(dstY) > kOutputViewportHeight))
+        if (!(srcY >= NVF(kInputViewportHeight) || NVU(dstY) >= kOutputViewportHeight))
 #endif
         {
             // nearest integer part
@@ -986,7 +988,7 @@ void NVSharpen(NVU2 blockIdx, NVU threadIdx)
 #if NIS_VIEWPORT_SUPPORT
         NVF2 coord = NVF2((dstX + kInputViewportOriginX + 0.5f) * kSrcNormX, (dstY + kInputViewportOriginY + 0.5f) * kSrcNormY);
         NVF2 dstCoord = NVF2(dstX + kOutputViewportOriginX, dstY + kOutputViewportOriginY);
-        if (!(NVU(dstX) > kOutputViewportWidth || NVU(dstY) > kOutputViewportHeight))
+        if (!(NVU(dstX) >= kOutputViewportWidth || NVU(dstY) >= kOutputViewportHeight))
 #else
         NVF2 coord = NVF2((dstX + 0.5f) * kSrcNormX, (dstY + 0.5f) * kSrcNormY);
         NVF2 dstCoord = NVF2(dstX, dstY);

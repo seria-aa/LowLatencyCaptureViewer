@@ -306,6 +306,106 @@ void TestCaptureColorStartupFallback() {
     g_settings = saved;
 }
 
+void TestPacked422ColorStartupIsolation() {
+    const auto saved=g_settings;
+    constexpr DWORD bt601Limited=AMCONTROL_COLORINFO_PRESENT |
+        (2u<<DXVA_VideoTransferMatrixShift) | (2u<<DXVA_NominalRangeShift);
+    constexpr DWORD bt709Full=AMCONTROL_COLORINFO_PRESENT |
+        (1u<<DXVA_VideoTransferMatrixShift) | (1u<<DXVA_NominalRangeShift);
+    constexpr DWORD rangeOnly=AMCONTROL_COLORINFO_PRESENT | (1u<<DXVA_NominalRangeShift);
+    g_settings.sdrRangeOverride=llcv::video_color::RangeOverride::Auto;
+    g_settings.legacyMjpegRangeOverride=llcv::video_color::RangeOverride::Auto;
+    for(const GUID subtype:{MEDIASUBTYPE_UYVY,llcv::video::kMediaSubtypeHdyc})
+    for(int requested:{60,30,40}) for(bool legacy:{false,true}) {
+        g_settings.capture40Fps=requested==40;g_settings.videoFrameRate=requested;
+        g_settings.allowUnlistedFps=requested==30;
+        FakeVideoPin pin;pin.modes={{60}};
+        pin.modes[0].subtype=subtype;pin.modes[0].imageBytes=1920*1080*2;
+        pin.modes[0].controlFlags=bt601Limited;
+        pin.echoAcceptedFormat=pin.stripReadbackColor=true;pin.legacyReadback=legacy;
+        DWORD bytes=0;UINT32 stride=0;int fps=0;VideoPixelFormat format{};
+        DirectShowColorMetadata candidate{},effective{};GUID acceptedSubtype{};
+        Require(SUCCEEDED(ConfigureVideoPin(&pin,1920,1080,requested,VideoPixelFormat::Uyvy,
+            bytes,stride,fps,format,candidate,&acceptedSubtype)) && acceptedSubtype==subtype &&
+            candidate.transferMatrix==2,"packed422 startup retains accepted raw subtype and explicit BT.601 hint");
+        AM_MEDIA_TYPE* active=nullptr;
+        Require(SUCCEEDED(GetActiveVideoPinFormat(&pin,&active)),"read untagged packed422 active format");
+        Require(ResolveInitialVideoColorMetadata(&pin,active,format,1920,1080,fps,candidate,effective,&acceptedSubtype) &&
+            effective.transferMatrix==2,"same-subtype stripped readback retains accepted BT.601 at 60/30/40fps");
+        Require(ResolveRawSdrVideoColor(format,1920,1080,effective).matrix==llcv::video_color::Matrix::Bt601,
+            "HDYC default does not override an explicit same-subtype BT.601 declaration");
+
+        AM_MEDIA_TYPE switched=*active;
+        switched.subtype=subtype==MEDIASUBTYPE_UYVY?llcv::video::kMediaSubtypeHdyc:MEDIASUBTYPE_UYVY;
+        Require(!ResolveInitialVideoColorMetadata(&pin,&switched,format,1920,1080,fps,candidate,effective,&acceptedSubtype) &&
+            !effective.present,"UYVY to HDYC and HDYC to UYVY readback never borrow the other alias's BT.601 hint");
+        const auto untagged=ResolveRawSdrVideoColor(format,1920,1080,effective);
+        Require(untagged.matrix==llcv::video_color::Matrix::Bt709 && untagged.range==llcv::video_color::Range::Limited,
+            "untagged switched packed422 subtype keeps the raw-SDR BT.709 limited default");
+
+        VIDEOINFOHEADER2 taggedInfo=pin.acceptedInfo;
+        taggedInfo.dwControlFlags=rangeOnly;
+        AM_MEDIA_TYPE partial=*active;partial.formattype=FORMAT_VideoInfo2;
+        partial.cbFormat=sizeof(taggedInfo);partial.pbFormat=reinterpret_cast<BYTE*>(&taggedInfo);
+        Require(ResolveInitialVideoColorMetadata(&pin,&partial,format,1920,1080,fps,candidate,effective,&acceptedSubtype) &&
+            effective.transferMatrix==2 && effective.nominalRange==1,
+            "same-subtype active range-only metadata preserves candidate matrix while overriding range");
+        const auto partialColor=ResolveRawSdrVideoColor(format,1920,1080,effective);
+        Require(partialColor.matrix==llcv::video_color::Matrix::Bt601 && partialColor.range==llcv::video_color::Range::Full,
+            "partial packed422 color declarations combine into BT.601 full range");
+        partial.subtype=switched.subtype;
+        Require(ResolveInitialVideoColorMetadata(&pin,&partial,format,1920,1080,fps,candidate,effective,&acceptedSubtype) &&
+            effective.transferMatrix==0 && effective.nominalRange==1,
+            "different-subtype range-only metadata does not import the old matrix");
+        Require(ResolveRawSdrVideoColor(format,1920,1080,effective).matrix==llcv::video_color::Matrix::Bt709,
+            "switched alias with only an explicit range still uses BT.709 fallback");
+
+        taggedInfo.dwControlFlags=bt709Full;
+        for(const GUID actualSubtype:{subtype,switched.subtype}) {
+            partial.subtype=actualSubtype;
+            Require(ResolveInitialVideoColorMetadata(&pin,&partial,format,1920,1080,fps,candidate,effective,&acceptedSubtype) &&
+                effective.transferMatrix==1 && effective.nominalRange==1,
+                "explicit active packed422 matrix and range always override candidate declarations");
+        }
+        // Accepted hints can be absent in Auto mode. The capability fallback
+        // must still filter the raw subtype, rather than the shared enum alone.
+        auto sameActive=pin.modes[0];sameActive.subtype=switched.subtype;sameActive.fps=fps;
+        sameActive.controlFlags=bt709Full;pin.modes.push_back(sameActive);
+        Require(ResolveInitialVideoColorMetadata(&pin,&switched,format,1920,1080,fps,{},effective) &&
+            effective.transferMatrix==1 && effective.nominalRange==1,
+            "caps-only fallback finds the current raw subtype instead of the first shared-enum alias");
+        FreeMediaType(*active);CoTaskMemFree(active);
+        Require(pin.references==1,"packed422 startup metadata fixture releases COM references");
+    }
+    // The packed422-only isolation must not alter the established NV12 path.
+    // P010 PQ/HLG and active-metadata priority remain covered by the unchanged
+    // TestCaptureColorStartupFallback immediately preceding this regression.
+    for(int requested:{60,30,40}) for(bool legacy:{false,true}) {
+        g_settings.capture40Fps=requested==40;g_settings.videoFrameRate=requested;
+        g_settings.allowUnlistedFps=requested==30;
+        FakeVideoPin pin;pin.modes={{60}};pin.modes[0].controlFlags=bt601Limited;
+        pin.echoAcceptedFormat=pin.stripReadbackColor=true;pin.legacyReadback=legacy;
+        DWORD bytes=0;UINT32 stride=0;int fps=0;VideoPixelFormat format{};
+        DirectShowColorMetadata candidate{},effective{};GUID acceptedSubtype{};
+        Require(SUCCEEDED(ConfigureVideoPin(&pin,1920,1080,requested,VideoPixelFormat::Nv12,
+            bytes,stride,fps,format,candidate,&acceptedSubtype)) && acceptedSubtype==MEDIASUBTYPE_NV12,
+            "NV12 startup retains its accepted subtype without changing negotiation");
+        AM_MEDIA_TYPE* active=nullptr;
+        Require(SUCCEEDED(GetActiveVideoPinFormat(&pin,&active)),"read NV12 color regression fixture");
+        Require(ResolveInitialVideoColorMetadata(&pin,active,format,1920,1080,fps,candidate,effective,&acceptedSubtype) &&
+            effective.transferMatrix==2,"NV12 caps-only color survives 60/30/40fps and legacy readback");
+        VIDEOINFOHEADER2 taggedInfo=pin.acceptedInfo;taggedInfo.dwControlFlags=bt709Full;
+        AM_MEDIA_TYPE tagged=*active;tagged.formattype=FORMAT_VideoInfo2;
+        tagged.cbFormat=sizeof(taggedInfo);tagged.pbFormat=reinterpret_cast<BYTE*>(&taggedInfo);
+        Require(ResolveInitialVideoColorMetadata(&pin,&tagged,format,1920,1080,fps,candidate,effective,&acceptedSubtype) &&
+            effective.transferMatrix==1 && effective.nominalRange==1,"NV12 explicit active metadata remains authoritative");
+        FreeMediaType(*active);CoTaskMemFree(active);
+        Require(pin.references==1,"NV12 startup metadata fixture releases COM references");
+    }
+    g_settings=saved;
+    std::puts("Packed422 startup: UYVY/HDYC subtype isolation, partial active metadata, and NV12 fallback passed.");
+}
+
 void TestVsrLiveTestRateIsolation() {
     const auto saved = g_settings;
     for (bool capture40 : {false, true}) for (int rate : {0, 40, 60, 120}) {
@@ -1001,6 +1101,7 @@ int main(int argc, char** argv) {
     TestSettingsCapabilityRefresh();
     Test40FpsSettingsIntegration();
     TestCaptureColorStartupFallback();
+    TestPacked422ColorStartupIsolation();
     TestVsrLiveTestRateIsolation();
     TestExclusiveScanResultLifetime();
     TestOutputTransitions();

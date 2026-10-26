@@ -1,4 +1,4 @@
-LLCV v2.1.7 - dependencies
+LLCV v2.1.8 - dependencies
 =========================
 
 License: GNU General Public License v3.0 or later. See the root LICENSE file.
@@ -8,7 +8,7 @@ separate Visual C++ Redistributable installation. The target PC needs:
 
 - Windows 10 or Windows 11 x64
 - A DirectShow capture-card driver
-- A card exposing NV12/YUY2/MJPEG or P010 HDR10, and compatible 48 kHz
+- A card exposing NV12/YUY2/UYVY (HDYC)/MJPEG or P010 HDR10, and compatible 48 kHz
   mono/stereo PCM or 32-bit float audio, either on the video filter or as a
   separate DirectShow audio-input filter
 - D3D11, DXGI, DirectShow, WASAPI, HID, SetupAPI, WIC, DWM and UxTheme Windows system components
@@ -23,12 +23,14 @@ separate Visual C++ Redistributable installation. The target PC needs:
   (third_party/asio/HOST-LICENSE.txt in source).
 
 Device support depends on the formats exposed by its DirectShow driver. When
-video and audio filters are separate, enable drift correction for
+using UYVY/HDYC, the GPU/driver must support integer-texture reads, YUY2 UAV writes
+and YUY2 video processing. UYVY/HDYC supports playback/screenshots, not recording.
+When video and audio filters are separate, enable drift correction for
 long sessions if the diagnostics show repeated imbalance.
 No mpv.exe, third-party codec pack or companion executable is required.
 Recording mux DLLs are included with the application.
 
-Recording (v2.1.7)
+Recording (v2.1.8)
 ------------------
 H.264/HEVC/AV1 crash-tolerant MP4 storage uses a mux-only FFmpeg 8.1.3 build:
 avformat-62.dll, avcodec-62.dll and avutil-60.dll. Encoding still uses the

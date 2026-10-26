@@ -5,7 +5,7 @@
 HDMI 캡처보드로 들어오는 영상과 소리를 재생하는 Windows용 저지연 뷰어입니다.
 OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리만 들을 수 있습니다.
 
-**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.1.7.md) · [English](README.md)
+**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.1.8.md) · [English](README.md)
 
 <br>
 
@@ -17,12 +17,12 @@ OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리�
 
 <br>
 
-## 2.1.7 업데이트
+## 2.1.8 업데이트
 
-**F6**은 선택한 업스케일링 방식과 선명도를 유지하면서 켜고 끕니다.
-기존에 VSR이 켜져 있던 설정은 유지하며, 선택 이력이 없으면 F6으로 **CMAA2 → NIS(0.15)**를 켭니다.
-업데이트 후 첫 실행에는 설정 창을 한 번 보여주고, 이후에는 기존 **바로 시작** 선택을 따릅니다.
-[업스케일링 사용 방법](docs/USAGE.ko.md#cmaa2--nis-업스케일링) · [전체 변경 내역](docs/release-notes-v2.1.7.md)
+NIS의 가장자리 픽셀 오염을 수정하고 CMAA2의 안전성 검사를 보완했습니다.
+**UYVY/HDYC 8비트 4:2:2** 재생·원본 스크린샷을 추가했으며, 해당 입력의 녹화는 지원하지 않습니다.
+지원하지 않는 픽셀 포맷만 제공되는 경우 설정 창과 로그에서 구분해 안내합니다.
+[영상 설정](docs/VIDEO.ko.md) · [전체 변경 내역](docs/release-notes-v2.1.8.md)
 
 <br>
 
@@ -48,7 +48,7 @@ Windows 10/11 x64와 캡처보드 드라이버가 필요합니다.
 ## 지원 기능
 
 - 최신 프레임 우선 표시, 저지연 출력(일반·독점 전체화면)과 VSync
-- NV12/YUY2, MJPEG, P010 HDR10 입력
+- NV12/YUY2/UYVY(HDYC), MJPEG, P010 HDR10 입력 — UYVY/HDYC는 재생·스크린샷 지원, 녹화 제외
 - 선택적 40fps 캡처 및 목록에 없는 30fps 직접 요청 — 드라이버 수락 필요
 - SDR 색 범위 자동/Limited/Full — 재생·스크린샷·녹화에 공통 적용
 - NVIDIA VSR (실험적), 캡처·표시 해상도 개별 설정 또는 연동

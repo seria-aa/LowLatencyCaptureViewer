@@ -222,11 +222,16 @@ High/luma SMAA is also retained as an image link on this same source.
 No GPU timing, PresentMon or display-latency benchmark was run for this AA
 comparison. Static images do not assess motion shimmer.
 
-CMAA2 uses explicit BT.709 decode/encode around linear processing and the
-upstream full-size safe buffer allocation. Its only marked shader adaptation
+CMAA2 used explicit BT.709 decode/encode around linear processing and the
+upstream full-size buffer allocation. At that comparison its shader adaptation
 clamps single-sample source loads at image bounds: the initial upstream
 out-of-bounds-zero behavior darkened a flat-color border in regression.
 The original license and upstream attribution remain intact.
+
+Later boundary auditing showed that the upstream full-size item allocation is
+not safe for every dense input. The production adapter now bounds list writes
+and bypasses AA for overflowing frames; NIS coordinate/bounds fixes and
+independent regression coverage are described in [the safety update](UPSCALING_BOUNDARY_SAFETY.md).
 
 The focused `--aa-regression` passes all four AA modes across BT.601/709 and
 Limited/Full, including flat colors, edge-to-flat transitions, alpha, OSD,

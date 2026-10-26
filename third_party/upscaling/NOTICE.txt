@@ -6,7 +6,8 @@ https://github.com/NVIDIAGameWorks/NVIDIAImageScaling
 Pinned source: 35e13ba316c98eeecf16f37eae70ce88019911f6
 See NIS-LICENSE.txt (source: nis/licence.txt).
 LLCV builds only the SDR scaler variants. The HDR-specific LLCV sharpening
-experiment has been removed; upstream SDK HDR code is retained unmodified.
+experiment has been removed. LLCV fixes signed halo coordinate arithmetic and
+exclusive output viewport bounds in the SDK; upstream HDR-specific math remains.
 
 Conservative Morphological Anti-Aliasing 2 (CMAA2)
 Copyright (c) 2018 Intel Corporation. Apache License 2.0.
@@ -16,8 +17,11 @@ See CMAA2-LICENSE.txt (source: cmaa2/license.txt).
 Upstream Microsoft color-packing helpers retain their attribution in CMAA2.hlsl.
 LLCV changes: clamp single-sample image loads to signed image bounds;
 allow disabling the collection optimization with a guarded define.
+Bounds-check candidate, blend-item and location writes; skip AA application
+for the entire overflowing frame, retaining the source for NIS. Reject invalid
+or incomplete linked lists before writing a blended color.
 Host integration uses the official direct-processing path, High preset,
-full-sized work buffers, linear-light edge blending, and SDR BT.709 transfers.
+bounded work buffers, linear-light edge blending, and SDR BT.709 transfers.
 HDR bypasses this display-only filter and retains the viewer's HDR output.
 Shaders are compiled and embedded at build time. No experimental comparison
 kernels other than CMAA2 and NIS are included in the regular application.

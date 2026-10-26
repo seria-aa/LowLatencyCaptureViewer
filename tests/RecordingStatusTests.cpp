@@ -52,6 +52,19 @@ int main() {
             Failure::EncoderFailed,Failure::InvalidInput,Failure::StorageUnavailable,Failure::FinalizeFailed})
             failureLabels.insert(presentation::FailureText(failure,english));
         Check(failureLabels.size()==7,"failure classes stay distinct");
+        snapshot={};snapshot.phase=Phase::Failed;snapshot.failure=Failure::InvalidInput;
+        snapshot.result=UnsupportedUyvyRecording;snapshot.path=L"C:\\recordings\\not-created.mp4";
+        view=presentation::Build(snapshot,english);
+        Check(view.description.find(L"UYVY/HDYC")!=std::wstring::npos &&
+            view.description.find(english?L"playback and screenshots":L"재생·스크린샷")!=std::wstring::npos &&
+            view.description.find(english?L"not recording":L"녹화는 지원하지")!=std::wstring::npos,
+            "UYVY/HDYC recording limitation is explicit and translated");
+        Check(!view.canOpenVideo && !view.canOpenFolder &&
+            view.description.find(english?L"remaining file":L"남은 파일")==std::wstring::npos,
+            "rejected UYVY recording does not imply damaged file residue");
+        snapshot.result=E_INVALIDARG;
+        Check(presentation::Build(snapshot,english).description.find(L"UYVY/HDYC")==std::wstring::npos,
+            "other invalid input retains the existing generic message");
     }
     std::puts("Recording status presentation tests passed");
 }

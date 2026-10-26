@@ -10,6 +10,7 @@ MJPEG recording adds decoding work and can increase CPU usage.
 Recordings use the same color interpretation as playback and screenshots. **Video → SDR color range**
 applies to all SDR inputs; **MJPEG matrix** applies only to MJPEG. Both default to Auto.
 HDR, multichannel and audio-only recording are not supported; playback supports more formats.
+UYVY/HDYC also supports playback/screenshots only; attempting to record shows an explanation. Select NV12, YUY2 or MJPEG if your device offers it.
 
 ![Recording settings example](images/settings-recording-en.png)
 

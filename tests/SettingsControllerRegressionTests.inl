@@ -1,4 +1,69 @@
 // Included by VsrExperimentTests: hidden/offscreen HWNDs and injected workers only.
+static void TestUnsupportedVideoModeStatus() {
+    const auto saved = g_settings;
+    g_settings = {};
+    SettingsDialogState state;
+    const HWND owner = CreateWindowW(L"STATIC", L"Unsupported modes fixture", WS_POPUP,
+        -32000, -32000, 800, 600, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    Require(owner != nullptr, "unsupported mode fixture");
+    const auto control = [&](const wchar_t* type, DWORD style) {
+        return CreateWindowW(type, L"", WS_CHILD | style, 0, 0, 600, 100,
+            owner, nullptr, GetModuleHandleW(nullptr), nullptr);
+    };
+    state.videoCombo = control(L"COMBOBOX", CBS_DROPDOWNLIST);
+    state.pixelFormatCombo = control(L"COMBOBOX", CBS_DROPDOWNLIST);
+    state.frameRateCombo = control(L"COMBOBOX", CBS_DROPDOWNLIST);
+    state.videoCapabilityStatus = control(L"STATIC", 0);
+    state.startButton = control(L"BUTTON", BS_PUSHBUTTON);
+    state.audioOnlyCheck = control(L"BUTTON", BS_AUTOCHECKBOX);
+    for (const auto& preset : kVideoPresets)
+        SendMessageW(state.videoCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(preset.label));
+    SendMessageW(state.videoCombo, CB_SETCURSEL, 0, 0);
+    std::atomic<int> stage{0};
+    state.videoModeCache = std::make_unique<llcv::settings_ui::SettingsModeCache<SettingsVideoModes>>(
+        [&](const auto&) {
+            SettingsVideoModes result;
+            if (stage == 0 || stage == 2) {
+                result.diagnostics.matchingResolutionTypes = 2;
+                result.diagnostics.unsupportedMatchingTypes = 2;
+                result.diagnostics.unsupportedFormatNames = {L"YV12", L"v210"};
+            }
+            if (stage == 2) result.status = E_FAIL;
+            if (stage == 3) result.formats = {{VideoPixelFormat::Nv12, 60}};
+            return result;
+        }, [] {});
+    const auto refresh = [&] {
+        state.videoModeCache->Invalidate(); state.appliedVideoModeKey.reset();
+        const auto deadline = GetTickCount64() + 2000;
+        do { PopulatePixelFormatCombo(&state); if (!state.videoModesPending) break; Sleep(1); }
+        while (GetTickCount64() < deadline);
+        Require(!state.videoModesPending, "synthetic capability result arrives");
+    };
+    const auto label = [&] {
+        wchar_t text[1024]{}; GetWindowTextW(state.videoCapabilityStatus, text, 1024);
+        return std::wstring(text);
+    };
+    refresh();
+    for (const auto language : {UiLanguage::Korean, UiLanguage::English}) {
+        g_settings.uiLanguage = language; UpdateVideoCapabilityStatus(&state);
+        Require(label().find(language == UiLanguage::English ? L"unsupported pixel formats" : L"미지원 픽셀 포맷") != std::wstring::npos &&
+                label().find(L"v210") != std::wstring::npos, "localized unsupported-format reason includes subtype");
+    }
+    Require(!IsWindowEnabled(state.pixelFormatCombo) && !IsWindowEnabled(state.frameRateCombo) &&
+            !IsWindowEnabled(state.startButton), "unsupported formats never enable video start");
+    SendMessageW(state.audioOnlyCheck, BM_SETCHECK, BST_CHECKED, 0); UpdateVideoCapabilityStatus(&state);
+    Require(IsWindowEnabled(state.startButton), "audio-only remains independent of video modes");
+    SendMessageW(state.audioOnlyCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+    stage = 2; refresh();
+    Require(label().find(L"failed") != std::wstring::npos, "query failure takes precedence over incomplete subtype list");
+    stage = 1; refresh();
+    Require(!state.videoCapabilityDiagnostics.UnsupportedFormatsOnly() && label().find(L"v210") == std::wstring::npos,
+        "empty successful query clears cached unsupported diagnostics");
+    stage = 3; refresh();
+    Require(IsWindowEnabled(state.startButton) && IsWindowEnabled(state.pixelFormatCombo) &&
+            IsWindowEnabled(state.frameRateCombo), "supported refresh restores controls");
+    state.videoModeCache.reset(); DestroyWindow(owner); g_settings = saved;
+}
 struct FrameOptionsRedrawProbe {
     bool observing = false;
     unsigned transitions = 0;

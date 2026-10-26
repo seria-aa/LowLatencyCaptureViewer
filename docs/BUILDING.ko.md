@@ -43,17 +43,21 @@ build\Release\LowLatencyCaptureViewer.exe
 Release 구성은 정적 MSVC 런타임을 사용하므로 패키지 실행에 별도 Visual C++
 재배포 패키지가 필요하지 않습니다.
 
-2.1.7에는 F6 방식·선명도 유지, 기존 VSR 설정 이전, 업데이트 최초 실행 표시와
-표시 기록 저장 실패·실제 프로필 접근 차단 검증을 추가했습니다.
-검증 범위는 tests/RELEASE_V2_1_7_AUDIT.md를 참고하세요.
+2.1.8에는 NIS 가장자리·CMAA2 목록 안전성, UYVY/HDYC 협상·색 정보·GPU 변환과
+녹화 차단·원본 스크린샷 검증을 추가했습니다. 기존 설정·단축키·재생·녹화 검사는 유지합니다.
+검증 범위는 tests/RELEASE_V2_1_8_AUDIT.md를 참고하세요.
 
-NIS·CMAA2 셰이더는 빌드할 때 실행 파일에 포함합니다. 실행 시 별도 셰이더 컴파일러나
-소스 파일은 필요하지 않습니다. 소스·수정 내역과 라이선스는 third_party/upscaling에 있습니다.
+NIS·CMAA2·UYVY 변환 셰이더는 빌드할 때 실행 파일에 포함합니다. 실행 시 별도 셰이더 컴파일러나
+소스 파일은 필요하지 않습니다. NIS/CMAA2 소스·수정 내역과 라이선스는 third_party/upscaling에,
+UYVY 변환 셰이더는 src/video에 있습니다.
 셰이더별 의존성을 구분하므로 NIS 변경만으로 CMAA2까지 다시 빌드하지 않습니다.
 
 SettingsPreview, RecordingIndicatorPreview, RecordingQualityBenchmark는 기본 빌드에서 제외한
 수동 도구입니다. 필요할 때 해당 이름을 cmake --build의 --target으로 지정하세요.
 자동 회귀 테스트는 기존대로 기본 빌드에 포함합니다.
+
+릴리스 빌드는 LLCV_UPSCALING_DIAGNOSTIC=OFF로 둡니다. 이 옵션을 켜면 별도 프로필을
+쓰는 오버플로 진단 대상만 추가되며, 일반 앱에는 GPU 상태를 읽어오는 진단 코드를 넣지 않습니다.
 
 테스트와 비공개 미리보기는 매 실행마다 별도 임시 프로필을 사용합니다.
 실제 설정을 불러오거나 저장하지 않으며, 일반 앱의 기본 실행은 기존 사용자 설정을 사용합니다.
@@ -81,7 +85,7 @@ PATH에 두거나 CMake의 `LLCV_TEST_FFMPEG`·`LLCV_TEST_FFPROBE`로 지정하�
 
 <br>
 
-재생 전용 개발 빌드는 `-DLLCV_RECORDING=OFF`로 FFmpeg 없이 만들 수 있지만 2.1.7 배포본과는 다릅니다.
+재생 전용 개발 빌드는 `-DLLCV_RECORDING=OFF`로 FFmpeg 없이 만들 수 있지만 2.1.8 배포본과는 다릅니다.
 실행 파일 옆의 저장 라이브러리 DLL과 `ffmpeg-licenses` 폴더를 패키지에 유지하세요.
 
 보류한 오디오 입력 자동 복구 시제품은 **기본 꺼짐**입니다. 비공개 진단이 필요할 때만 별도 빌드 폴더에서
@@ -94,7 +98,7 @@ PATH에 두거나 CMake의 `LLCV_TEST_FFMPEG`·`LLCV_TEST_FFPROBE`로 지정하�
 ## 설치 프로그램과 포터블 ZIP
 
 Release 빌드 뒤 저장소 루트에서 아래 명령을 실행합니다. 다음은 위에서 만든
-`build\Release` 실행 파일을 v2.1.7으로 패키징하는 예시입니다. 릴리스 스크립트의
+`build\Release` 실행 파일을 v2.1.8으로 패키징하는 예시입니다. 릴리스 스크립트의
 기본 경로는 버전별 빌드 폴더이므로 아래 빌드 경로 재정의가 필요합니다.
 
 ```powershell
@@ -102,11 +106,11 @@ chcp.com 65001 > $null
 & "C:\Program Files\Inno Setup 7\ISCC.exe" `
   "--define=BuildDir=..\build\Release" ".\installer\LowLatencyCaptureViewer.iss"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
-  -Version 2.1.7 -BuildDir ..\build\Release -OutputDir outputs\v2.1.7
+  -Version 2.1.8 -BuildDir ..\build\Release -OutputDir outputs\v2.1.8
 ```
 
-생성 파일은 `outputs\v2.1.7\LowLatencyCaptureViewer_v2.1.7_Setup.exe`와
-`outputs\v2.1.7\LowLatencyCaptureViewer_v2.1.7_x64.zip`입니다. 다른 버전은
+생성 파일은 `outputs\v2.1.8\LowLatencyCaptureViewer_v2.1.8_Setup.exe`와
+`outputs\v2.1.8\LowLatencyCaptureViewer_v2.1.8_x64.zip`입니다. 다른 버전은
 먼저 릴리스 관련 버전 표기를 맞춰야 합니다. ZIP 이름만 바꿔도 실행 파일 버전이
 바뀌지는 않습니다. 자세한 절차는 [릴리스 체크리스트](RELEASING.ko.md)를 따릅니다.
 

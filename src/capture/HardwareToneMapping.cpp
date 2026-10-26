@@ -169,6 +169,7 @@ ToneMappingResult ConfigureHardwareToneMapping(IUnknown* filter, std::wstring_vi
     case settings::VideoPixelFormat::P010: break;
     case settings::VideoPixelFormat::Nv12:
     case settings::VideoPixelFormat::Yuy2:
+    case settings::VideoPixelFormat::Uyvy:
     case settings::VideoPixelFormat::Mjpeg: enable = true; break;
     default: return {};
     }

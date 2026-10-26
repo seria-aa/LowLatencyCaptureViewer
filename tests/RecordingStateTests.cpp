@@ -10,6 +10,12 @@
 #include <fstream>
 #include <iterator>
 
+namespace llcv::recording {
+struct RecorderTestAccess {
+    static bool HasWorker(const Recorder& subject) { return subject.worker_.joinable(); }
+};
+}
+
 using llcv::recording::Failure;
 using llcv::recording::Options;
 using llcv::recording::Phase;
@@ -148,6 +154,26 @@ int main() {
         Expect(state.phase == Phase::Failed && state.failure == Failure::InvalidInput && !state.busy && !state.playable,
                "invalid input has actionable terminal failure without an openable file");
         Expect(!std::filesystem::exists(invalidFile), "unsupported input does not create a misleading empty video");
+
+        const auto uyvyFile=temporary.Path(L"unsupported-uyvy.mp4");
+        auto uyvy=video;uyvy.format=llcv::settings::VideoPixelFormat::Uyvy;uyvy.stride=uyvy.width*2;
+        recorder.Configure(uyvy,audio,{},false,options);
+        Expect(!recorder.Start(uyvyFile.wstring()),"UYVY/HDYC recording rejected before startup");
+        state=recorder.GetSnapshot();
+        Expect(state.phase==Phase::Failed && state.failure==Failure::InvalidInput &&
+            state.result==llcv::recording::UnsupportedUyvyRecording && !state.busy && !state.playable &&
+            !llcv::recording::RecorderTestAccess::HasWorker(recorder),"UYVY rejection has dedicated reason and starts no worker");
+        Expect(!std::filesystem::exists(uyvyFile),"UYVY rejection creates no recording file");
+        for(bool english:{false,true}) {
+            const auto view=presentation::Build(state,english);
+            Expect(view.description.find(L"UYVY/HDYC")!=std::wstring::npos &&
+                view.description.find(english?L"screenshots":L"스크린샷")!=std::wstring::npos &&
+                view.description.find(english?L"not recording":L"녹화는 지원하지")!=std::wstring::npos &&
+                !view.canOpenVideo && !view.canOpenFolder,"UYVY rejection clearly explains playback/screenshots only in both languages");
+        }
+        const auto uyvyExisting=temporary.Path(L"unsupported-uyvy-existing.mp4");Sentinel(uyvyExisting);
+        Expect(!recorder.Start(uyvyExisting.wstring()) && SentinelPreserved(uyvyExisting),
+            "UYVY rejection never touches an existing target");
 
         const auto occupiedFolder = temporary.Path(L"not-a-folder");
         Sentinel(occupiedFolder);

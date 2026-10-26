@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 2.1.7 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 2.1.8 LANGUAGES CXX)
 
 include(cmake/MsvcDependencies.cmake)
 
@@ -47,8 +47,9 @@ add_executable(LowLatencyCaptureViewer
     src/video/VsrExperiment.cpp
 )
 
+option(LLCV_UPSCALING_DIAGNOSTIC "Build separate, profile-isolated overflow diagnostic tools (not for release)" OFF)
 include(cmake/Upscaling.cmake)
-target_link_libraries(LowLatencyCaptureViewer PRIVATE llcv_upscaling)
+target_link_libraries(LowLatencyCaptureViewer PRIVATE llcv_upscaling llcv_uyvy)
 
 target_include_directories(LowLatencyCaptureViewer PRIVATE
     src
@@ -628,6 +629,23 @@ if (BUILD_TESTING)
     add_test(NAME CmaaNisRegression COMMAND CmaaNisTests)
     add_test(NAME CmaaNisHdr COMMAND CmaaNisTests --hdr)
     set_tests_properties(CmaaNisRegression CmaaNisHdr PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
+    add_executable(UpscalingSafetyTests tests/UpscalingSafetyTests.cpp)
+    target_include_directories(UpscalingSafetyTests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/upscaling")
+    target_compile_definitions(UpscalingSafetyTests PRIVATE NOMINMAX)
+    target_compile_options(UpscalingSafetyTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    target_link_libraries(UpscalingSafetyTests PRIVATE llcv_upscaling d3d11)
+    set_target_properties(UpscalingSafetyTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_test(NAME UpscalingSafetyHardware COMMAND UpscalingSafetyTests)
+    add_test(NAME UpscalingSafetyWarp COMMAND UpscalingSafetyTests --warp)
+    set_tests_properties(UpscalingSafetyHardware UpscalingSafetyWarp PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
+    add_executable(UyvyRepackerTests tests/UyvyRepackerTests.cpp)
+    target_compile_definitions(UyvyRepackerTests PRIVATE NOMINMAX)
+    target_compile_options(UyvyRepackerTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    target_link_libraries(UyvyRepackerTests PRIVATE llcv_uyvy d3d11)
+    set_target_properties(UyvyRepackerTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_test(NAME UyvyRepackerHardware COMMAND UyvyRepackerTests)
+    add_test(NAME UyvyRepackerWarp COMMAND UyvyRepackerTests --warp)
+    set_tests_properties(UyvyRepackerHardware UyvyRepackerWarp PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
     if(LLCV_RECORDING)
         add_test(NAME CmaaNisRecording COMMAND CmaaNisTests --recording "${CMAKE_CURRENT_BINARY_DIR}/cmaa-nis-recordings")
         set_tests_properties(CmaaNisRecording PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
@@ -906,6 +924,7 @@ if (BUILD_TESTING)
     add_executable(DirectShowVideoFormatTests
         tests/DirectShowVideoFormatTests.cpp
         src/video/DirectShowVideoFormat.cpp
+        src/video/VideoColor.cpp
     )
     target_include_directories(DirectShowVideoFormatTests PRIVATE src)
     target_compile_definitions(DirectShowVideoFormatTests PRIVATE
@@ -1367,6 +1386,53 @@ endif()
 if(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
     install(CODE "message(FATAL_ERROR \"Audio-input recovery diagnostics cannot be installed as a regular release\")")
 endif()
+if(LLCV_UPSCALING_DIAGNOSTIC)
+    # No diagnostic macro or library is propagated to LowLatencyCaptureViewer.
+    get_target_property(llcv_overflow_sources LowLatencyCaptureViewer SOURCES)
+    list(FILTER llcv_overflow_sources EXCLUDE REGEX "src/main.cpp$")
+    get_target_property(llcv_overflow_links LowLatencyCaptureViewer LINK_LIBRARIES)
+    list(REMOVE_ITEM llcv_overflow_links llcv_upscaling)
+    add_executable(LowLatencyCaptureViewer_UpscalingDiagnostic WIN32 EXCLUDE_FROM_ALL
+        tests/UpscalingOverflowViewer.cpp ${llcv_overflow_sources})
+    set_property(SOURCE tests/UpscalingOverflowViewer.cpp APPEND PROPERTY OBJECT_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
+    target_include_directories(LowLatencyCaptureViewer_UpscalingDiagnostic PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(LowLatencyCaptureViewer_UpscalingDiagnostic PRIVATE
+        $<TARGET_PROPERTY:LowLatencyCaptureViewer,COMPILE_DEFINITIONS>)
+    target_compile_options(LowLatencyCaptureViewer_UpscalingDiagnostic PRIVATE /W4 /EHsc /permissive- /utf-8)
+    target_link_libraries(LowLatencyCaptureViewer_UpscalingDiagnostic PRIVATE ${llcv_overflow_links} llcv_upscaling_diagnostic)
+    if(BUILD_TESTING)
+        add_executable(UpscalingOverflowReportTests tests/UpscalingOverflowReportTests.cpp)
+        target_compile_options(UpscalingOverflowReportTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+        set_target_properties(UpscalingOverflowReportTests PROPERTIES WIN32_EXECUTABLE FALSE)
+        add_test(NAME UpscalingOverflowReportTests COMMAND UpscalingOverflowReportTests)
+        set_tests_properties(UpscalingOverflowReportTests PROPERTIES TIMEOUT 30)
+        add_executable(UpscalingTelemetryTests tests/UpscalingTelemetryTests.cpp)
+        set_property(SOURCE tests/UpscalingTelemetryTests.cpp APPEND PROPERTY OBJECT_DEPENDS
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/UpscalingSafetyTests.cpp")
+        target_include_directories(UpscalingTelemetryTests PRIVATE "${llcv_shader_dir}")
+        target_compile_definitions(UpscalingTelemetryTests PRIVATE NOMINMAX)
+        target_compile_options(UpscalingTelemetryTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+        target_link_libraries(UpscalingTelemetryTests PRIVATE llcv_upscaling_diagnostic d3d11)
+        set_target_properties(UpscalingTelemetryTests PROPERTIES WIN32_EXECUTABLE FALSE)
+        add_test(NAME UpscalingTelemetryHardware COMMAND UpscalingTelemetryTests)
+        add_test(NAME UpscalingTelemetryWarp COMMAND UpscalingTelemetryTests --warp)
+        set_tests_properties(UpscalingTelemetryHardware UpscalingTelemetryWarp PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
+        file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/telemetry-boundary/normal-$<CONFIG>.txt"
+            CONTENT "$<JOIN:$<TARGET_PROPERTY:LowLatencyCaptureViewer,COMPILE_DEFINITIONS>,\n>")
+        file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/telemetry-boundary/diagnostic-$<CONFIG>.txt"
+            CONTENT "$<JOIN:$<TARGET_PROPERTY:LowLatencyCaptureViewer_UpscalingDiagnostic,COMPILE_DEFINITIONS>,\n>")
+        add_test(NAME UpscalingTelemetryBoundary COMMAND "${CMAKE_COMMAND}"
+            "-DNORMAL_LIBRARY=$<TARGET_FILE:llcv_upscaling>"
+            "-DDIAGNOSTIC_LIBRARY=$<TARGET_FILE:llcv_upscaling_diagnostic>"
+            "-DNORMAL_DEFINES=${CMAKE_CURRENT_BINARY_DIR}/telemetry-boundary/normal-$<CONFIG>.txt"
+            "-DDIAGNOSTIC_DEFINES=${CMAKE_CURRENT_BINARY_DIR}/telemetry-boundary/diagnostic-$<CONFIG>.txt"
+            "-DINSTALL_SCRIPT=${CMAKE_CURRENT_BINARY_DIR}/cmake_install.cmake"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/UpscalingTelemetryBoundaryTests.cmake")
+        set_tests_properties(UpscalingTelemetryBoundary PROPERTIES TIMEOUT 30 LABELS Build)
+    endif()
+endif()
 install(TARGETS LowLatencyCaptureViewer RUNTIME DESTINATION .)
 if(LLCV_RECORDING)
     if(NOT EXISTS "${LLCV_RECORDING_FFMPEG_ROOT}/licenses/COPYING.LGPLv2.1")
@@ -1396,7 +1462,10 @@ install(DIRECTORY docs DESTINATION .
         PATTERN "vsr-hdr-validation.md" EXCLUDE
         PATTERN "SPATIAL_UPSCALING_EXPERIMENT.md" EXCLUDE
         PATTERN "SPATIAL_UPSCALING_EXTENDED_COMPARISON.md" EXCLUDE
-        PATTERN "SPATIAL_UPSCALING_FHD_RECOMPARISON.md" EXCLUDE)
+        PATTERN "SPATIAL_UPSCALING_FHD_RECOMPARISON.md" EXCLUDE
+        PATTERN "UPSCALING_BOUNDARY_SAFETY.md" EXCLUDE
+        PATTERN "UPSCALING_OVERFLOW_DIAGNOSTIC.md" EXCLUDE
+        PATTERN "UYVY_HDYC_SUPPORT.md" EXCLUDE)
 
 if(BUILD_TESTING AND LLCV_RECORDING)
     add_executable(TestProfileTests tests/TestProfileTests.cpp src/settings/SettingsStore.cpp src/recording/RecordingOptions.cpp)

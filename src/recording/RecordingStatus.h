@@ -4,6 +4,11 @@
 #include <string>
 
 namespace llcv::recording {
+// Playback and source screenshots support packed UYVY/HDYC, but recording
+// currently accepts only NV12/YUY2/MJPEG. Keep this separate from malformed
+// media types so the UI can explain the supported alternative before startup.
+inline constexpr HRESULT UnsupportedUyvyRecording =
+    MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x401);
 enum class Phase { Idle, Starting, Recording, Finalizing, Saved, Failed };
 enum class Failure {
     None, DiskFull, WriteFailed, EncoderOverload, EncoderFailed,

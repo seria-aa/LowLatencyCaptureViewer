@@ -106,6 +106,72 @@ void LogQuery(LogCallback log, const wchar_t* stage, int index, HRESULT hr) {
     log(text);
 }
 
+// Geometry is useful for diagnostics even when LLCV cannot decode the subtype.
+// Keep header bounds checking shared with the accepted-format path.
+bool ReadVideoHeader(const AM_MEDIA_TYPE* mediaType, int& width, int& height,
+                     REFERENCE_TIME& frameDuration, DWORD& imageBytes) {
+    if (!mediaType || !mediaType->pbFormat || mediaType->majortype != MEDIATYPE_Video) return false;
+    const BITMAPINFOHEADER* bitmap = nullptr;
+    frameDuration = 0;
+    if (mediaType->formattype == FORMAT_VideoInfo2 &&
+        mediaType->cbFormat >= sizeof(VIDEOINFOHEADER2)) {
+        const auto* info = reinterpret_cast<const VIDEOINFOHEADER2*>(mediaType->pbFormat);
+        bitmap = &info->bmiHeader;
+        frameDuration = info->AvgTimePerFrame;
+    } else if (mediaType->formattype == FORMAT_VideoInfo &&
+               mediaType->cbFormat >= sizeof(VIDEOINFOHEADER)) {
+        const auto* info = reinterpret_cast<const VIDEOINFOHEADER*>(mediaType->pbFormat);
+        bitmap = &info->bmiHeader;
+        frameDuration = info->AvgTimePerFrame;
+    } else if (mediaType->formattype == FORMAT_MPEG2Video &&
+               mediaType->cbFormat >= FIELD_OFFSET(MPEG2VIDEOINFO, dwSequenceHeader)) {
+        const auto* info = reinterpret_cast<const MPEG2VIDEOINFO*>(mediaType->pbFormat);
+        bitmap = &info->hdr.bmiHeader;
+        frameDuration = info->hdr.AvgTimePerFrame;
+    }
+    if (!bitmap || bitmap->biHeight == (std::numeric_limits<LONG>::min)()) return false;
+    width = static_cast<int>(bitmap->biWidth);
+    height = std::abs(static_cast<int>(bitmap->biHeight));
+    imageBytes = bitmap->biSizeImage;
+    return width > 0 && height > 0;
+}
+
+std::wstring SubtypeName(const GUID& subtype) {
+    GUID fourccShape = MEDIASUBTYPE_YUY2;
+    fourccShape.Data1 = subtype.Data1;
+    if (subtype == fourccShape) {
+        wchar_t fourcc[5]{};
+        bool printable = true;
+        for (unsigned i = 0; i != 4; ++i) {
+            const auto value = (subtype.Data1 >> (i * 8)) & 0xff;
+            printable &= value >= 0x20 && value <= 0x7e;
+            fourcc[i] = static_cast<wchar_t>(value);
+        }
+        if (printable) return fourcc;
+    }
+    // RGB and vendor-defined GUIDs must not be mislabeled as FourCC values.
+    wchar_t guid[40]{};
+    StringFromGUID2(subtype, guid, static_cast<int>(std::size(guid)));
+    return guid;
+}
+
+void LogRejectedMode(LogCallback log, int index, const AM_MEDIA_TYPE* mediaType,
+                     const wchar_t* reason) {
+    if (!log || !mediaType) return;
+    int width = 0, height = 0;
+    REFERENCE_TIME duration = 0;
+    DWORD bytes = 0;
+    const bool header = ReadVideoHeader(mediaType, width, height, duration, bytes);
+    wchar_t guid[40]{};
+    StringFromGUID2(mediaType->subtype, guid, static_cast<int>(std::size(guid)));
+    wchar_t text[384]{};
+    swprintf_s(text, L"[video-caps] rejected entry=%d reason=%s subtype=%s guid=%s "
+        L"size=%dx%d duration=%lld (100ns) header=%s\n", index, reason,
+        SubtypeName(mediaType->subtype).c_str(), guid, width, height, duration,
+        header ? L"valid" : L"unavailable");
+    log(text);
+}
+
 void LogMode(LogCallback log, int index, VideoPixelFormat format, int width,
              int height, REFERENCE_TIME duration, const VIDEO_STREAM_CONFIG_CAPS& caps) {
     if (!log) return;
@@ -140,9 +206,10 @@ int PixelFormatRank(VideoPixelFormat format) {
     switch (format) {
     case VideoPixelFormat::Nv12: return 0;
     case VideoPixelFormat::Yuy2: return 1;
-    case VideoPixelFormat::P010: return 2;
-    case VideoPixelFormat::Mjpeg: return 3;
-    default: return 3;
+    case VideoPixelFormat::Uyvy: return 2;
+    case VideoPixelFormat::P010: return 3;
+    case VideoPixelFormat::Mjpeg: return 4;
+    default: return 5;
     }
 }
 
@@ -154,6 +221,7 @@ const wchar_t* PixelFormatName(VideoPixelFormat format) {
     case VideoPixelFormat::Yuy2: return L"YUY2";
     case VideoPixelFormat::Nv12: return L"NV12";
     case VideoPixelFormat::P010: return L"P010";
+    case VideoPixelFormat::Uyvy: return L"UYVY";
     default: return L"Auto";
     }
 }
@@ -164,12 +232,13 @@ bool IsCompressedVideoFormat(VideoPixelFormat format) {
 
 bool IsAutoSelectableVideoFormat(VideoPixelFormat format) {
     return format == VideoPixelFormat::Nv12 ||
-           format == VideoPixelFormat::Yuy2;
+           format == VideoPixelFormat::Yuy2 || format == VideoPixelFormat::Uyvy;
 }
 
 VideoPixelFormat PixelFormatFromSubtype(const GUID& subtype) {
     if (subtype == MEDIASUBTYPE_NV12) return VideoPixelFormat::Nv12;
     if (subtype == MEDIASUBTYPE_YUY2) return VideoPixelFormat::Yuy2;
+    if (subtype == MEDIASUBTYPE_UYVY || subtype == kMediaSubtypeHdyc) return VideoPixelFormat::Uyvy;
     if (subtype == MEDIASUBTYPE_MJPG || subtype == MFVideoFormat_MJPG) {
         return VideoPixelFormat::Mjpeg;
     }
@@ -184,34 +253,7 @@ bool VideoFormatDetails(const AM_MEDIA_TYPE* mediaType, int& width,
     const VideoPixelFormat detected = PixelFormatFromSubtype(mediaType->subtype);
     if (detected == VideoPixelFormat::Auto) return false;
     if (pixelFormat) *pixelFormat = detected;
-
-    const BITMAPINFOHEADER* bitmap = nullptr;
-    frameDuration = 0;
-    if (mediaType->formattype == FORMAT_VideoInfo2 &&
-        mediaType->cbFormat >= sizeof(VIDEOINFOHEADER2)) {
-        const auto* info =
-            reinterpret_cast<const VIDEOINFOHEADER2*>(mediaType->pbFormat);
-        bitmap = &info->bmiHeader;
-        frameDuration = info->AvgTimePerFrame;
-    } else if (mediaType->formattype == FORMAT_VideoInfo &&
-               mediaType->cbFormat >= sizeof(VIDEOINFOHEADER)) {
-        const auto* info =
-            reinterpret_cast<const VIDEOINFOHEADER*>(mediaType->pbFormat);
-        bitmap = &info->bmiHeader;
-        frameDuration = info->AvgTimePerFrame;
-    } else if (mediaType->formattype == FORMAT_MPEG2Video &&
-               mediaType->cbFormat >=
-                   FIELD_OFFSET(MPEG2VIDEOINFO, dwSequenceHeader)) {
-        const auto* info =
-            reinterpret_cast<const MPEG2VIDEOINFO*>(mediaType->pbFormat);
-        bitmap = &info->hdr.bmiHeader;
-        frameDuration = info->hdr.AvgTimePerFrame;
-    }
-    if (!bitmap || bitmap->biHeight == (std::numeric_limits<LONG>::min)()) return false;
-    width = static_cast<int>(bitmap->biWidth);
-    height = std::abs(static_cast<int>(bitmap->biHeight));
-    imageBytes = bitmap->biSizeImage;
-    return width > 0 && height > 0;
+    return ReadVideoHeader(mediaType, width, height, frameDuration, imageBytes);
 }
 
 HRESULT ValidateVideoLayout(const AM_MEDIA_TYPE* mediaType,
@@ -227,9 +269,10 @@ HRESULT ValidateVideoLayout(const AM_MEDIA_TYPE* mediaType,
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     UINT32 rowPitch = 0;
     if (!IsCompressedVideoFormat(format)) {
-        if ((width & 1) || (format != VideoPixelFormat::Yuy2 && (height & 1)))
+        const bool packed422 = format == VideoPixelFormat::Yuy2 || format == VideoPixelFormat::Uyvy;
+        if ((width & 1) || (!packed422 && (height & 1)))
             return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-        const uint64_t rows = format == VideoPixelFormat::Yuy2 ? height : uint64_t(height) * 3 / 2;
+        const uint64_t rows = packed422 ? height : uint64_t(height) * 3 / 2;
         const uint64_t minimumPitch = uint64_t(width) * (format == VideoPixelFormat::Nv12 ? 1 : 2);
         const uint64_t minimumBytes = rows * minimumPitch;
         if (minimumBytes > (std::numeric_limits<LONG>::max)() ||
@@ -418,7 +461,8 @@ void LogDirectShowColorMetadata(
 
 bool FindMatchingDirectShowColorMetadata(
     IPin* videoPin, VideoPixelFormat wantedFormat, int wantedWidth,
-    int wantedHeight, int wantedFps, CaptureColorMetadata& metadata) {
+    int wantedHeight, int wantedFps, CaptureColorMetadata& metadata,
+    const GUID* wantedSubtype) {
     metadata = {};
     if (!videoPin) return false;
     IAMStreamConfig* config = nullptr;
@@ -454,7 +498,12 @@ bool FindMatchingDirectShowColorMetadata(
         CaptureColorMetadata candidateMetadata{};
         const bool hasColor =
             ExtractDirectShowColorMetadata(candidate, candidateMetadata);
-        if (details && format == wantedFormat && width == wantedWidth &&
+        // UYVY and HDYC share byte layout, not necessarily color declarations.
+        // Keep the existing lookup for older formats, but never borrow hints
+        // from the other packed-422 subtype when the active subtype is known.
+        const bool subtypeMatches = wantedFormat != VideoPixelFormat::Uyvy ||
+            !wantedSubtype || candidate->subtype == *wantedSubtype;
+        if (details && subtypeMatches && format == wantedFormat && width == wantedWidth &&
             height == wantedHeight && fps == wantedFps && hasColor) {
             metadata = candidateMetadata;
             found = true;
@@ -486,8 +535,10 @@ HRESULT ConfigureVideoPin(
     VideoPixelFormat wantedFormat, DWORD& imageBytes, UINT32& stride,
     int& configuredFps, VideoPixelFormat& configuredFormat,
     LogCallback logCallback, bool requestExactFps,
-    CaptureColorMetadata* acceptedCandidateColor, bool allowUnlistedFps) {
+    CaptureColorMetadata* acceptedCandidateColor, bool allowUnlistedFps,
+    GUID* acceptedCandidateSubtype) {
     if (acceptedCandidateColor) *acceptedCandidateColor = {};
+    if (acceptedCandidateSubtype) *acceptedCandidateSubtype = GUID_NULL;
     if (!videoPin) return E_POINTER;
     if (requestExactFps && (wantedFps <= 0 || wantedFps > 10'000'000)) return E_INVALIDARG;
     if (allowUnlistedFps && !requestExactFps) return E_INVALIDARG;
@@ -605,6 +656,7 @@ HRESULT ConfigureVideoPin(
         }
         hr = config->SetFormat(candidate.mediaType);
         LogQuery(logCallback, L"SetFormat/fps", candidate.fps, hr);
+        bool candidateColorMatchesReadback = true;
         if (SUCCEEDED(hr) && requestExactFps) {
             AM_MEDIA_TYPE* actual = nullptr;
             hr = config->GetFormat(&actual);
@@ -613,6 +665,12 @@ HRESULT ConfigureVideoPin(
                     ? ValidateVideoLayout(actual, wantedWidth, wantedHeight,
                         candidate.format, candidateBytes, candidateStride, candidateFps)
                     : kRequestedFrameRateMismatch;
+                // A driver may substitute the other packed-422 subtype.
+                // Its byte layout still matches, but candidate-only color
+                // hints must not cross that alias boundary.
+                if (SUCCEEDED(hr) && candidate.format == VideoPixelFormat::Uyvy)
+                    candidateColorMatchesReadback =
+                        actual->subtype == candidate.mediaType->subtype;
             }
             DeleteMediaType(actual);
             LogQuery(logCallback, L"exact-fps/readback", wantedFps, hr);
@@ -623,10 +681,12 @@ HRESULT ConfigureVideoPin(
             stride = candidateStride;
             configuredFps = candidateFps;
             configuredFormat = candidate.format;
+            if (acceptedCandidateSubtype)
+                *acceptedCandidateSubtype = candidate.mediaType->subtype;
             // Retimed modes may not exist in GetStreamCaps, and GetFormat can
             // omit their color flags. Retain only the accepted candidate's
             // hints; active/connected metadata still takes precedence later.
-            if (acceptedCandidateColor) {
+            if (acceptedCandidateColor && candidateColorMatchesReadback) {
                 ExtractDirectShowColorMetadata(
                     candidate.mediaType, *acceptedCandidateColor);
             }
@@ -663,9 +723,11 @@ HRESULT GetActiveVideoPinFormat(IPin* videoPin, AM_MEDIA_TYPE** mediaType) {
 }
 
 std::vector<PixelFormatSupport> ProbePixelFormats(
-    IPin* videoPin, int width, int height, HRESULT* queryStatus, LogCallback logCallback) {
+    IPin* videoPin, int width, int height, HRESULT* queryStatus, LogCallback logCallback,
+    VideoCapabilityDiagnostics* diagnostics) {
     std::vector<PixelFormatSupport> result;
     if (queryStatus) *queryStatus = S_OK;
+    if (diagnostics) *diagnostics = {};
     if (!videoPin) { if (queryStatus) *queryStatus = E_POINTER; return result; }
     IAMStreamConfig* config = nullptr;
     HRESULT hr = videoPin->QueryInterface(IID_PPV_ARGS(&config));
@@ -687,6 +749,7 @@ std::vector<PixelFormatSupport> ProbePixelFormats(
         if (FAILED(entryHr) || !mediaType) {
             if (queryStatus) *queryStatus = FAILED(entryHr) ? entryHr : E_FAIL;
             LogQuery(logCallback, L"probe/entry", i, FAILED(entryHr) ? entryHr : E_FAIL);
+            LogRejectedMode(logCallback, i, mediaType, L"query-failed");
             DeleteMediaType(mediaType);
             continue;
         }
@@ -698,16 +761,31 @@ std::vector<PixelFormatSupport> ProbePixelFormats(
         int candidateHeight = 0;
         REFERENCE_TIME duration = 0;
         DWORD bytes = 0;
-        VideoPixelFormat format = VideoPixelFormat::Auto;
+        const VideoPixelFormat format = PixelFormatFromSubtype(mediaType->subtype);
         const bool knownVideoType = mediaType->majortype == MEDIATYPE_Video &&
-            PixelFormatFromSubtype(mediaType->subtype) != VideoPixelFormat::Auto;
-        const bool validDetails = VideoFormatDetails(mediaType, candidateWidth, candidateHeight,
-                                                       duration, bytes, &format);
-        if (knownVideoType && !validDetails) {
+            format != VideoPixelFormat::Auto;
+        const bool readableHeader = ReadVideoHeader(mediaType, candidateWidth, candidateHeight, duration, bytes);
+        if (diagnostics && readableHeader && candidateWidth == width && candidateHeight == height) {
+            ++diagnostics->matchingResolutionTypes;
+            if (!knownVideoType) {
+                ++diagnostics->unsupportedMatchingTypes;
+                const auto name = SubtypeName(mediaType->subtype);
+                auto& names = diagnostics->unsupportedFormatNames;
+                if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+            }
+        }
+        if (!knownVideoType) {
+            LogRejectedMode(logCallback, i, mediaType,
+                mediaType->majortype == MEDIATYPE_Video ? L"unsupported-subtype" : L"not-video");
+            DeleteMediaType(mediaType);
+            continue;
+        }
+        if (!readableHeader) {
             const HRESULT invalid = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
             if (queryStatus) *queryStatus = invalid;
             LogQuery(logCallback, L"probe/invalid-format", i, invalid);
-        } else if (validDetails && candidateWidth == width && candidateHeight == height) {
+            LogRejectedMode(logCallback, i, mediaType, L"invalid-header");
+        } else if (candidateWidth == width && candidateHeight == height) {
             LogMode(logCallback, i, format, candidateWidth, candidateHeight, duration, streamCaps);
             const int fps = duration > 0 ? static_cast<int>(
                 (10'000'000 + duration / 2) / duration) : 0;
@@ -722,6 +800,7 @@ std::vector<PixelFormatSupport> ProbePixelFormats(
             if (FAILED(layoutHr)) {
                 if (queryStatus) *queryStatus = layoutHr;
                 LogQuery(logCallback, L"probe/invalid-layout", i, layoutHr);
+                LogRejectedMode(logCallback, i, mediaType, L"invalid-layout-or-timing");
                 DeleteMediaType(mediaType);
                 continue;
             }
@@ -741,7 +820,7 @@ std::vector<PixelFormatSupport> ProbePixelFormats(
                 if (!duplicateRate && FrameRateAllowedByCaps(streamCaps, rate))
                     result.push_back({format, rate});
             }
-        }
+        } else LogRejectedMode(logCallback, i, mediaType, L"resolution-mismatch");
         DeleteMediaType(mediaType);
     }
     std::sort(

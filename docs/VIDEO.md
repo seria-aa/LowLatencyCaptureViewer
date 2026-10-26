@@ -48,8 +48,8 @@ A fresh configuration starts at 1920 x 1080. The selected
 resolution is saved and does not change when the settings or viewer window is
 moved to another monitor.
 
-Auto pixel format prefers uncompressed NV12, followed by YUY2. Every NV12,
-YUY2, P010, and MJPEG format reported by the device at the selected resolution
+Auto pixel format prefers uncompressed NV12, followed by YUY2, then UYVY/HDYC. Every NV12,
+YUY2, UYVY/HDYC, P010, and MJPEG format reported by the device at the selected resolution
 is listed regardless of performance. **MJPEG (compressed
 compatibility)** is never chosen by Auto and must be selected explicitly.
 
@@ -59,6 +59,15 @@ reordering make a consistently low-latency path difficult to guarantee.
 <br>
 
 ## NV12, YUY2, and MJPEG
+
+**UYVY / HDYC (8-bit 4:2:2)** is also supported for playback and source screenshots.
+The GPU reorders its bytes into YUY2 on the existing upload surface; the capture
+sample is unchanged. HDYC defaults to BT.709 when color metadata is absent.
+Explicit device color metadata and the user's SDR range setting remain effective.
+UYVY/HDYC recording is not supported: select NV12, YUY2 or MJPEG to record.
+This uses DirectShow, not the separate Blackmagic DeckLink SDK; a device name
+appearing in the list does not guarantee a compatible mode at every resolution.
+XRGB/RGB32 and v210 inputs remain unsupported.
 
 **NV12 is the recommended low-latency format.** It transfers 12 bits per pixel,
 compared with 16 bits per pixel for YUY2, during the system-memory-to-D3D11
