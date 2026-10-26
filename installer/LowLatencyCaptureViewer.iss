@@ -82,7 +82,7 @@ Source: "..\third_party\upscaling\NOTICE.txt"; DestDir: "{app}"; DestName: "UPSC
 Source: "..\실행안내.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\DEPENDENCIES.txt"; DestDir: "{app}"; Flags: ignoreversion
 ; Keep exclusions in sync with Copy-PackageDocs.ps1 and CMake install rules.
-Source: "..\docs\*"; DestDir: "{app}\docs"; Excludes: "rounded-corners-validation.md,TEST-BLT.ko.md,vsr-all-formats-validation.md,vsr-experiment.md,vsr-hdr-validation.md,SPATIAL_UPSCALING_EXPERIMENT.md,SPATIAL_UPSCALING_EXTENDED_COMPARISON.md,SPATIAL_UPSCALING_FHD_RECOMPARISON.md,images\viewer.png"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\docs\*"; DestDir: "{app}\docs"; Excludes: "rounded-corners-validation.md,TEST-BLT.ko.md,vsr-all-formats-validation.md,vsr-experiment.md,vsr-hdr-validation.md,SPATIAL_UPSCALING_EXPERIMENT.md,SPATIAL_UPSCALING_EXTENDED_COMPARISON.md,SPATIAL_UPSCALING_FHD_RECOMPARISON.md,UPSCALING_BOUNDARY_SAFETY.md,UPSCALING_OVERFLOW_DIAGNOSTIC.md,images\viewer.png"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 ; Always create the Start Menu shortcut, including upgrades from an opt-out.

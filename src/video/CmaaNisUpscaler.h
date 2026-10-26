@@ -1,7 +1,12 @@
 #pragma once
-// SDR display-only, current-frame CMAA2 -> NIS. No capture queues or CPU readback.
+// SDR display-only, current-frame CMAA2 -> NIS. The release path has no capture
+// queues or CPU readback; only the separately linked diagnostic variant samples.
 #include <d3d11.h>
 #include <wrl/client.h>
+#ifdef LLCV_UPSCALING_TELEMETRY
+#include <memory>
+#include "UpscalingOverflowTelemetry.h"
+#endif
 namespace llcv::upscaling {
 // One atomic request carries selection, enable state and retained sharpness.
 // -1: VSR selected; 0..100: CMAA/NIS on; -2..-102: CMAA/NIS off.
@@ -22,6 +27,10 @@ class CmaaPipeline {
     Ptr<ID3D11ComputeShader> compute_[4];
     Ptr<ID3D11VertexShader> vertex_;
     Ptr<ID3D11PixelShader> decode_,encode_;
+#ifdef LLCV_UPSCALING_TELEMETRY
+    std::unique_ptr<OverflowTelemetry> overflowTelemetry_;
+    Ptr<ID3D11Buffer> diagnosticControl_;
+#endif
 public:
     HRESULT Configure(ID3D11Device*,UINT width,UINT height);
     ID3D11ShaderResourceView* Draw(ID3D11DeviceContext*,ID3D11ShaderResourceView*);

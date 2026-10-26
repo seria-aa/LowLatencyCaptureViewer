@@ -23,8 +23,9 @@ logs/
 *.log
 smoke-test.log
 
-# Local recovery archives for generated historical UI screenshots
-outputs/snapshot-archives/
+# Generated comparisons, diagnostic packages, captures and local test results.
+# Keep reproducible tests and concise evidence in tests/ and docs/, not here.
+/outputs/
 
 # Per-user IDE files
 .vs/

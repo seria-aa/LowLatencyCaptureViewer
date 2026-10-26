@@ -50,3 +50,12 @@ target_include_directories(llcv_upscaling PRIVATE "${llcv_shader_dir}")
 target_compile_definitions(llcv_upscaling PRIVATE NOMINMAX)
 target_compile_options(llcv_upscaling PRIVATE /W4 /EHsc /permissive- /utf-8)
 target_link_libraries(llcv_upscaling PRIVATE d3d11)
+if(LLCV_UPSCALING_DIAGNOSTIC)
+    add_library(llcv_upscaling_diagnostic STATIC EXCLUDE_FROM_ALL
+        src/video/CmaaNisUpscaler.cpp src/video/UpscalingOverflowTelemetry.cpp ${llcv_shader_headers})
+    target_include_directories(llcv_upscaling_diagnostic PRIVATE "${llcv_shader_dir}")
+    # PUBLIC is required: diagnostic CmaaPipeline layout must match every consumer.
+    target_compile_definitions(llcv_upscaling_diagnostic PUBLIC LLCV_UPSCALING_TELEMETRY PRIVATE NOMINMAX)
+    target_compile_options(llcv_upscaling_diagnostic PRIVATE /W4 /EHsc /permissive- /utf-8)
+    target_link_libraries(llcv_upscaling_diagnostic PRIVATE d3d11)
+endif()

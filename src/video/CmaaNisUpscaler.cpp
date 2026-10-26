@@ -53,7 +53,8 @@ HRESULT CmaaPipeline::Configure(ID3D11Device* d,UINT w,UINT h) {
         result=d->CreateUnorderedAccessView(resource.Get(),&view,&uavs_[slot]);
         if(indirect)indirect_=resource;return result;
     };
-    // Fully sized edge lists preserve dense details without dropping work.
+    // Bounded working storage. Multiple blend items can be emitted per pixel;
+    // shader guards skip AA for an overflowing frame and retain NIS scaling.
     hr=buffer(2,w*h,4,false,false);if(FAILED(hr))return hr;
     hr=buffer(3,((w+1)/2)*((h+1)/2),4,false,false);if(FAILED(hr))return hr;
     hr=buffer(4,w*h,8,false,false);if(FAILED(hr))return hr;
@@ -71,7 +72,17 @@ HRESULT CmaaPipeline::Configure(ID3D11Device* d,UINT w,UINT h) {
     }
     hr=d->CreateVertexShader(transferVertex,sizeof(transferVertex),nullptr,&vertex_);if(FAILED(hr))return hr;
     hr=d->CreatePixelShader(decode709,sizeof(decode709),nullptr,&decode_);if(FAILED(hr))return hr;
+#ifdef LLCV_UPSCALING_TELEMETRY
+    hr=d->CreatePixelShader(encode709,sizeof(encode709),nullptr,&encode_);
+    if(SUCCEEDED(hr)&&OverflowSamplingEnabled()) {
+        // Failure of optional measurement must never fail video rendering.
+        Ptr<ID3D11Resource> control;uavs_[6]->GetResource(&control);control.As(&diagnosticControl_);
+        overflowTelemetry_.reset(new(std::nothrow) OverflowTelemetry(d,w,h));
+    }
+    return hr;
+#else
     return d->CreatePixelShader(encode709,sizeof(encode709),nullptr,&encode_);
+#endif
 }
 ID3D11ShaderResourceView* CmaaPipeline::Draw(ID3D11DeviceContext* c,ID3D11ShaderResourceView* input) {
     D3D11_VIEWPORT vp{0,0,float(width_),float(height_),0,1};c->RSSetViewports(1,&vp);
@@ -94,6 +105,9 @@ ID3D11ShaderResourceView* CmaaPipeline::Draw(ID3D11DeviceContext* c,ID3D11Shader
     uavs[0]=uavs_[0].Get();c->CSSetUnorderedAccessViews(0,8,uavs,nullptr);
     c->CSSetShader(compute_[3].Get(),nullptr,0);c->DispatchIndirect(indirect_.Get(),0);
     ID3D11UnorderedAccessView* clear[8]{};c->CSSetUnorderedAccessViews(0,8,clear,nullptr);c->CSSetShader(nullptr,nullptr,0);
+#ifdef LLCV_UPSCALING_TELEMETRY
+    if(overflowTelemetry_)overflowTelemetry_->Observe(c,diagnosticControl_.Get());
+#endif
     transfer(linearView_.Get(),encodedTarget_.Get(),encode_.Get());return encodedView_.Get();
 }
 

@@ -10003,6 +10003,22 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     }
 #endif
     LoadSettings();
+#ifdef LLCV_UPSCALING_TELEMETRY
+    // Only the separately named diagnostic viewer defines this flag. Its
+    // TestProfile boundary prevents reading/migrating/writing real settings.
+    g_settings.checkForUpdates=false;g_settings.skipStartupSettings=false;
+    if(CommandLineOptionValue(L"--overflow-live")==L"yes") {
+        g_settings.capturePreset=VideoPreset::R1920x1080;
+        g_settings.videoPreset=VideoPreset::R2560x1440;
+        g_settings.displayMatchesCapture=false;g_settings.videoFrameRate=60;
+        g_settings.capture40Fps=false;g_settings.pixelFormat=VideoPixelFormat::Nv12;
+        g_settings.pixelPerfect=false;g_settings.relativeWindowSize=false;
+        g_settings.presentationMode=PresentationMode::AllowTearing;
+        g_settings.vsrEnabled=false;g_settings.cmaaNisEnabled=true;
+        g_settings.preferredUpscaler=llcv::settings::UpscalingMethod::CmaaNis;
+        g_settings.nisSharpnessPercent=15;
+    }
+#endif
 #ifdef LLCV_SPATIAL_PROTOTYPE
     // Private fixed-condition live comparison. Overrides are never persisted.
     g_spatialInteractivePreview = CommandLineOptionValue(L"--spatial-interactive") == L"yes";
