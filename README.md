@@ -48,7 +48,7 @@ These are the default keys; change them under **Guide & logs**.
 ## Features
 
 - Latest-frame-first presentation with low latency (standard or exclusive fullscreen) and VSync
-- NV12/YUY2, MJPEG, and P010 HDR10 input
+- NV12/YUY2/UYVY (HDYC), MJPEG, and P010 HDR10 input — UYVY/HDYC supports playback and screenshots, not recording
 - Optional 40 fps capture and unlisted 30 fps requests, subject to driver acceptance
 - SDR range Auto/Limited/Full, shared by playback, screenshots and recording
 - NVIDIA VSR (experimental), with separate or capture-matched display resolutions

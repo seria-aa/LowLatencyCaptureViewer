@@ -49,7 +49,7 @@ add_executable(LowLatencyCaptureViewer
 
 option(LLCV_UPSCALING_DIAGNOSTIC "Build separate, profile-isolated overflow diagnostic tools (not for release)" OFF)
 include(cmake/Upscaling.cmake)
-target_link_libraries(LowLatencyCaptureViewer PRIVATE llcv_upscaling)
+target_link_libraries(LowLatencyCaptureViewer PRIVATE llcv_upscaling llcv_uyvy)
 
 target_include_directories(LowLatencyCaptureViewer PRIVATE
     src
@@ -638,6 +638,14 @@ if (BUILD_TESTING)
     add_test(NAME UpscalingSafetyHardware COMMAND UpscalingSafetyTests)
     add_test(NAME UpscalingSafetyWarp COMMAND UpscalingSafetyTests --warp)
     set_tests_properties(UpscalingSafetyHardware UpscalingSafetyWarp PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
+    add_executable(UyvyRepackerTests tests/UyvyRepackerTests.cpp)
+    target_compile_definitions(UyvyRepackerTests PRIVATE NOMINMAX)
+    target_compile_options(UyvyRepackerTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    target_link_libraries(UyvyRepackerTests PRIVATE llcv_uyvy d3d11)
+    set_target_properties(UyvyRepackerTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_test(NAME UyvyRepackerHardware COMMAND UyvyRepackerTests)
+    add_test(NAME UyvyRepackerWarp COMMAND UyvyRepackerTests --warp)
+    set_tests_properties(UyvyRepackerHardware UyvyRepackerWarp PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
     if(LLCV_RECORDING)
         add_test(NAME CmaaNisRecording COMMAND CmaaNisTests --recording "${CMAKE_CURRENT_BINARY_DIR}/cmaa-nis-recordings")
         set_tests_properties(CmaaNisRecording PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
@@ -916,6 +924,7 @@ if (BUILD_TESTING)
     add_executable(DirectShowVideoFormatTests
         tests/DirectShowVideoFormatTests.cpp
         src/video/DirectShowVideoFormat.cpp
+        src/video/VideoColor.cpp
     )
     target_include_directories(DirectShowVideoFormatTests PRIVATE src)
     target_compile_definitions(DirectShowVideoFormatTests PRIVATE

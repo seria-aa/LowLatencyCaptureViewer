@@ -48,7 +48,7 @@ Windows 10/11 x64와 캡처보드 드라이버가 필요합니다.
 ## 지원 기능
 
 - 최신 프레임 우선 표시, 저지연 출력(일반·독점 전체화면)과 VSync
-- NV12/YUY2, MJPEG, P010 HDR10 입력
+- NV12/YUY2/UYVY(HDYC), MJPEG, P010 HDR10 입력 — UYVY/HDYC는 재생·스크린샷 지원, 녹화 제외
 - 선택적 40fps 캡처 및 목록에 없는 30fps 직접 요청 — 드라이버 수락 필요
 - SDR 색 범위 자동/Limited/Full — 재생·스크린샷·녹화에 공통 적용
 - NVIDIA VSR (실험적), 캡처·표시 해상도 개별 설정 또는 연동

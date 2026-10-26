@@ -50,6 +50,17 @@ inline View Build(const Snapshot& snapshot,bool english) {
     }
     result.canOpenVideo=!snapshot.busy && snapshot.playable && !snapshot.path.empty();
     result.canOpenFolder=!snapshot.busy && !snapshot.path.empty();
+    if(snapshot.phase==Phase::Failed && snapshot.failure==Failure::InvalidInput &&
+       snapshot.result==UnsupportedUyvyRecording && !snapshot.busy && !snapshot.playable) {
+        result.title=english?L"Recording unavailable":L"녹화할 수 없음";
+        result.description=english?
+            L"UYVY/HDYC supports playback and screenshots, but not recording.\r\nSelect NV12, YUY2 or MJPEG input to record.":
+            L"UYVY/HDYC 입력은 재생·스크린샷을 지원하지만 녹화는 지원하지 않습니다.\r\n녹화하려면 NV12·YUY2·MJPEG 입력을 선택하세요.";
+        // No file or recording worker was created; do not imply a damaged
+        // remaining file, or offer an output path that was never opened.
+        result.canOpenVideo=false;result.canOpenFolder=false;
+        return result;
+    }
     if(snapshot.failure!=Failure::None || snapshot.phase==Phase::Failed) {
         if(snapshot.phase==Phase::Saved && snapshot.playable && !snapshot.busy)
             result.title=english?L"Recording stopped · file saved":L"녹화 중단 · 파일 저장됨";

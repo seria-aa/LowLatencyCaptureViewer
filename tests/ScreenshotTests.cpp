@@ -27,7 +27,10 @@ std::vector<std::uint8_t> Neutral(Description d, unsigned level) {
     } else if (d.format==Format::Nv12) {
         std::fill(raw.begin(),raw.begin()+std::size_t(d.width)*d.height,static_cast<std::uint8_t>(level));
         std::fill(raw.begin()+std::size_t(d.width)*d.height,raw.end(),std::uint8_t{128});
-    } else for (std::size_t i=0;i<raw.size();i+=2) { raw[i]=static_cast<std::uint8_t>(level); raw[i+1]=128; }
+    } else for (std::size_t i=0;i<raw.size();i+=2) {
+        raw[i+(d.format==Format::Uyvy ? 1 : 0)]=static_cast<std::uint8_t>(level);
+        raw[i+(d.format==Format::Uyvy ? 0 : 1)]=128;
+    }
     return raw;
 }
 std::vector<std::uint8_t> Convert(Description d, const std::vector<std::uint8_t>& raw) {
@@ -55,7 +58,7 @@ private:
     std::size_t size_;
 };
 void GuardPages() {
-    for (auto format:{Format::Nv12,Format::Yuy2,Format::P010})
+    for (auto format:{Format::Nv12,Format::Yuy2,Format::P010,Format::Uyvy})
     for (bool trailing:{false,true}) for (unsigned width:{2u,32u}) {
         Description desc{width,2,format};
         const auto input=Neutral(desc,format==Format::P010 ? 550 : 100);
@@ -78,7 +81,7 @@ void Pixels() {
     Check(!PackedSize({3,4}),"odd width rejected");
     Check(!PackedSize({4,3}),"odd planar height rejected");
     Check(!PackedSize({4,4,static_cast<Format>(100)}),"unknown format rejected");
-    for (auto format : {Format::Nv12,Format::Yuy2,Format::P010}) {
+    for (auto format : {Format::Nv12,Format::Yuy2,Format::P010,Format::Uyvy}) {
         Description d{4,4,format};
         auto raw=Neutral(d,format==Format::P010 ? 64 : 16);
         const auto black=Convert(d,raw);
@@ -103,7 +106,7 @@ void Pixels() {
         const auto white=Convert(d,raw);
         Check(white[0]>=252 && white[0]==white[1] && white[1]==white[2],"white mapped neutral without wrap");
     }
-    for (auto format : {Format::Nv12,Format::Yuy2}) {
+    for (auto format : {Format::Nv12,Format::Yuy2,Format::Uyvy}) {
         Description d{4,4,format};
         d.color.range=llcv::video_color::Range::Full;
         Check(Convert(d,Neutral(d,0))[0]==0 && Convert(d,Neutral(d,255))[0]==255,"full range black white");
@@ -142,6 +145,43 @@ void Pixels() {
         const double mapped=actual<=100 ? actual/203 : 1-10609/(203*(actual+3));
         const int expected=static_cast<int>(std::lround(255*(mapped<=.0031308 ? 12.92*mapped : 1.055*std::pow(mapped,1/2.4)-.055)));
         Check(std::abs(int(Convert(d,Neutral(d,code))[0])-expected)<=1,"PQ LUT + tonemap within one 8-bit code of oracle");
+    }
+}
+void UyvyPixels() {
+    for (unsigned width : {2u,6u,32u}) for (unsigned height : {2u,6u,18u}) {
+        Description yuy2{width,height,Format::Yuy2};
+        Description uyvy=yuy2;uyvy.format=Format::Uyvy;
+        std::vector<std::uint8_t> yuy2Bytes(PackedSize(yuy2)),uyvyBytes(PackedSize(uyvy));
+        Check(uyvyBytes.size()==std::size_t(width)*height*2 && yuy2Bytes.size()==uyvyBytes.size(),
+            "UYVY uses exactly one packed 4:2:2 plane");
+        for(std::size_t i=0;i<yuy2Bytes.size();i+=4) {
+            const auto pair=i/4;
+            yuy2Bytes[i]=static_cast<std::uint8_t>((pair*41+16)%256);
+            yuy2Bytes[i+1]=static_cast<std::uint8_t>((pair*29+90)%256);
+            yuy2Bytes[i+2]=static_cast<std::uint8_t>((pair*67+235)%256);
+            yuy2Bytes[i+3]=static_cast<std::uint8_t>((pair*53+240)%256);
+            uyvyBytes[i]=yuy2Bytes[i+1];uyvyBytes[i+1]=yuy2Bytes[i];
+            uyvyBytes[i+2]=yuy2Bytes[i+3];uyvyBytes[i+3]=yuy2Bytes[i+2];
+        }
+        for(auto matrix:{llcv::video_color::Matrix::Bt601,llcv::video_color::Matrix::Bt709})
+        for(auto range:{llcv::video_color::Range::Limited,llcv::video_color::Range::Full}) {
+            yuy2.color.matrix=uyvy.color.matrix=matrix;yuy2.color.range=uyvy.color.range=range;
+            const auto expected=Convert(yuy2,yuy2Bytes);
+            Check(Convert(uyvy,uyvyBytes)==expected,"UYVY BGRA bit-exact to matching YUY2 for every SDR matrix/range");
+            std::vector<std::uint8_t> rows(expected.size());
+            for(unsigned y=0;y<height;++y)
+                Check(ConvertRows(uyvy,uyvyBytes,y,1,std::span(rows).subspan(std::size_t(y)*width*4,width*4)),
+                    "UYVY conversion supports existing worker row chunks");
+            Check(rows==expected,"UYVY row chunks preserve pixel-exact YUY2 equivalence");
+        }
+        const unsigned stride=width*2+11;
+        const size_t required=std::size_t(stride)*(height-1)+width*2;
+        GuardedBuffer source(required,true),packed(uyvyBytes.size(),true);
+        for(unsigned y=0;y<height;++y)
+            std::memcpy(source.Bytes().data()+std::size_t(y)*stride,uyvyBytes.data()+std::size_t(y)*width*2,width*2);
+        Check(CopyFrame(uyvy,source.Bytes().data(),required,stride,packed.Bytes()),"UYVY padded last row guard exact copy");
+        Check(std::equal(uyvyBytes.begin(),uyvyBytes.end(),packed.Bytes().begin()),"UYVY padded copy preserves source byte order");
+        Check(!CopyFrame(uyvy,source.Bytes().data(),required-1,stride,packed.Bytes()),"UYVY truncated last row rejected without reading guard");
     }
 }
 std::vector<std::uint8_t> ReadPng(const std::wstring& path, unsigned w, unsigned h) {
@@ -206,7 +246,7 @@ void Native(const std::wstring& dir) {
         Check(ReadPng(result.path,32,18)==expected,"colored HDR PNG pixel-exact with resolved siting");
         service.Stop();
     }
-    for (auto format : {Format::Nv12,Format::Yuy2,Format::P010}) {
+    for (auto format : {Format::Nv12,Format::Yuy2,Format::P010,Format::Uyvy}) {
         desc.format=format; raw=Neutral(desc,format==Format::P010 ? 550 : 100); bgra=Convert(desc,raw);
         Check(service.Start(32,18,format,dir),"start screenshot worker");
         Check(service.Request(false) && !service.Request(false),"single pending request");
@@ -331,7 +371,7 @@ int wmain(int argc, wchar_t** argv) {
     wchar_t id[40]{}; StringFromGUID2(guid,id,40);
     const auto dir=std::wstring(temp)+L"llcv-screenshot-test-"+id;
     Check(std::filesystem::create_directory(dir),"isolated test folder");
-    Pixels(); GuardPages(); HdrScreenshotReferenceTests(); Native(dir); ConcurrentLifecycle(dir);
+    Pixels(); GuardPages(); UyvyPixels(); HdrScreenshotReferenceTests(); Native(dir); ConcurrentLifecycle(dir);
     if (argc>1 && std::wcscmp(argv[1],L"--clipboard")==0) Clipboard();
     if (argc>1 && std::wcscmp(argv[1],L"--benchmark")==0) Benchmark(dir);
     // Only exact files produced in this unique test folder are removed.

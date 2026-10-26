@@ -206,9 +206,10 @@ int PixelFormatRank(VideoPixelFormat format) {
     switch (format) {
     case VideoPixelFormat::Nv12: return 0;
     case VideoPixelFormat::Yuy2: return 1;
-    case VideoPixelFormat::P010: return 2;
-    case VideoPixelFormat::Mjpeg: return 3;
-    default: return 3;
+    case VideoPixelFormat::Uyvy: return 2;
+    case VideoPixelFormat::P010: return 3;
+    case VideoPixelFormat::Mjpeg: return 4;
+    default: return 5;
     }
 }
 
@@ -220,6 +221,7 @@ const wchar_t* PixelFormatName(VideoPixelFormat format) {
     case VideoPixelFormat::Yuy2: return L"YUY2";
     case VideoPixelFormat::Nv12: return L"NV12";
     case VideoPixelFormat::P010: return L"P010";
+    case VideoPixelFormat::Uyvy: return L"UYVY";
     default: return L"Auto";
     }
 }
@@ -230,12 +232,13 @@ bool IsCompressedVideoFormat(VideoPixelFormat format) {
 
 bool IsAutoSelectableVideoFormat(VideoPixelFormat format) {
     return format == VideoPixelFormat::Nv12 ||
-           format == VideoPixelFormat::Yuy2;
+           format == VideoPixelFormat::Yuy2 || format == VideoPixelFormat::Uyvy;
 }
 
 VideoPixelFormat PixelFormatFromSubtype(const GUID& subtype) {
     if (subtype == MEDIASUBTYPE_NV12) return VideoPixelFormat::Nv12;
     if (subtype == MEDIASUBTYPE_YUY2) return VideoPixelFormat::Yuy2;
+    if (subtype == MEDIASUBTYPE_UYVY || subtype == kMediaSubtypeHdyc) return VideoPixelFormat::Uyvy;
     if (subtype == MEDIASUBTYPE_MJPG || subtype == MFVideoFormat_MJPG) {
         return VideoPixelFormat::Mjpeg;
     }
@@ -266,9 +269,10 @@ HRESULT ValidateVideoLayout(const AM_MEDIA_TYPE* mediaType,
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     UINT32 rowPitch = 0;
     if (!IsCompressedVideoFormat(format)) {
-        if ((width & 1) || (format != VideoPixelFormat::Yuy2 && (height & 1)))
+        const bool packed422 = format == VideoPixelFormat::Yuy2 || format == VideoPixelFormat::Uyvy;
+        if ((width & 1) || (!packed422 && (height & 1)))
             return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-        const uint64_t rows = format == VideoPixelFormat::Yuy2 ? height : uint64_t(height) * 3 / 2;
+        const uint64_t rows = packed422 ? height : uint64_t(height) * 3 / 2;
         const uint64_t minimumPitch = uint64_t(width) * (format == VideoPixelFormat::Nv12 ? 1 : 2);
         const uint64_t minimumBytes = rows * minimumPitch;
         if (minimumBytes > (std::numeric_limits<LONG>::max)() ||
@@ -457,7 +461,8 @@ void LogDirectShowColorMetadata(
 
 bool FindMatchingDirectShowColorMetadata(
     IPin* videoPin, VideoPixelFormat wantedFormat, int wantedWidth,
-    int wantedHeight, int wantedFps, CaptureColorMetadata& metadata) {
+    int wantedHeight, int wantedFps, CaptureColorMetadata& metadata,
+    const GUID* wantedSubtype) {
     metadata = {};
     if (!videoPin) return false;
     IAMStreamConfig* config = nullptr;
@@ -493,7 +498,12 @@ bool FindMatchingDirectShowColorMetadata(
         CaptureColorMetadata candidateMetadata{};
         const bool hasColor =
             ExtractDirectShowColorMetadata(candidate, candidateMetadata);
-        if (details && format == wantedFormat && width == wantedWidth &&
+        // UYVY and HDYC share byte layout, not necessarily color declarations.
+        // Keep the existing lookup for older formats, but never borrow hints
+        // from the other packed-422 subtype when the active subtype is known.
+        const bool subtypeMatches = wantedFormat != VideoPixelFormat::Uyvy ||
+            !wantedSubtype || candidate->subtype == *wantedSubtype;
+        if (details && subtypeMatches && format == wantedFormat && width == wantedWidth &&
             height == wantedHeight && fps == wantedFps && hasColor) {
             metadata = candidateMetadata;
             found = true;
@@ -525,8 +535,10 @@ HRESULT ConfigureVideoPin(
     VideoPixelFormat wantedFormat, DWORD& imageBytes, UINT32& stride,
     int& configuredFps, VideoPixelFormat& configuredFormat,
     LogCallback logCallback, bool requestExactFps,
-    CaptureColorMetadata* acceptedCandidateColor, bool allowUnlistedFps) {
+    CaptureColorMetadata* acceptedCandidateColor, bool allowUnlistedFps,
+    GUID* acceptedCandidateSubtype) {
     if (acceptedCandidateColor) *acceptedCandidateColor = {};
+    if (acceptedCandidateSubtype) *acceptedCandidateSubtype = GUID_NULL;
     if (!videoPin) return E_POINTER;
     if (requestExactFps && (wantedFps <= 0 || wantedFps > 10'000'000)) return E_INVALIDARG;
     if (allowUnlistedFps && !requestExactFps) return E_INVALIDARG;
@@ -644,6 +656,7 @@ HRESULT ConfigureVideoPin(
         }
         hr = config->SetFormat(candidate.mediaType);
         LogQuery(logCallback, L"SetFormat/fps", candidate.fps, hr);
+        bool candidateColorMatchesReadback = true;
         if (SUCCEEDED(hr) && requestExactFps) {
             AM_MEDIA_TYPE* actual = nullptr;
             hr = config->GetFormat(&actual);
@@ -652,6 +665,12 @@ HRESULT ConfigureVideoPin(
                     ? ValidateVideoLayout(actual, wantedWidth, wantedHeight,
                         candidate.format, candidateBytes, candidateStride, candidateFps)
                     : kRequestedFrameRateMismatch;
+                // A driver may substitute the other packed-422 subtype.
+                // Its byte layout still matches, but candidate-only color
+                // hints must not cross that alias boundary.
+                if (SUCCEEDED(hr) && candidate.format == VideoPixelFormat::Uyvy)
+                    candidateColorMatchesReadback =
+                        actual->subtype == candidate.mediaType->subtype;
             }
             DeleteMediaType(actual);
             LogQuery(logCallback, L"exact-fps/readback", wantedFps, hr);
@@ -662,10 +681,12 @@ HRESULT ConfigureVideoPin(
             stride = candidateStride;
             configuredFps = candidateFps;
             configuredFormat = candidate.format;
+            if (acceptedCandidateSubtype)
+                *acceptedCandidateSubtype = candidate.mediaType->subtype;
             // Retimed modes may not exist in GetStreamCaps, and GetFormat can
             // omit their color flags. Retain only the accepted candidate's
             // hints; active/connected metadata still takes precedence later.
-            if (acceptedCandidateColor) {
+            if (acceptedCandidateColor && candidateColorMatchesReadback) {
                 ExtractDirectShowColorMetadata(
                     candidate.mediaType, *acceptedCandidateColor);
             }

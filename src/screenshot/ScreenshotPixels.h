@@ -7,7 +7,7 @@
 
 namespace llcv::screenshot {
 
-enum class Format { Nv12, Yuy2, P010 };
+enum class Format { Nv12, Yuy2, P010, Uyvy };
 struct Description {
     unsigned width = 0, height = 0;
     Format format = Format::Nv12;

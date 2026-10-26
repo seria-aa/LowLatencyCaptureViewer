@@ -2,7 +2,9 @@
 #include "video/HdrPolicy.h"
 
 #include <dvdmedia.h>
+#include <dxva.h>
 #include <mfapi.h>
+#include "video/VideoColor.h"
 
 #include <cstdio>
 #include <random>
@@ -22,12 +24,21 @@ void Check(bool condition, const char* message) {
 
 void TestPixelFormatHelpers() {
     using llcv::settings::VideoPixelFormat;
+    static_assert(static_cast<int>(VideoPixelFormat::Auto) == 0 &&
+                  static_cast<int>(VideoPixelFormat::Nv12) == 1 &&
+                  static_cast<int>(VideoPixelFormat::Yuy2) == 2 &&
+                  static_cast<int>(VideoPixelFormat::Mjpeg) == 3 &&
+                  static_cast<int>(VideoPixelFormat::P010) == 4 &&
+                  static_cast<int>(VideoPixelFormat::Uyvy) == 5);
     Check(llcv::video::PixelFormatFromSubtype(MEDIASUBTYPE_NV12) ==
               VideoPixelFormat::Nv12,
           "NV12 subtype");
     Check(llcv::video::PixelFormatFromSubtype(MEDIASUBTYPE_YUY2) ==
               VideoPixelFormat::Yuy2,
           "YUY2 subtype");
+    Check(llcv::video::PixelFormatFromSubtype(MEDIASUBTYPE_UYVY) == VideoPixelFormat::Uyvy &&
+              llcv::video::PixelFormatFromSubtype(llcv::video::kMediaSubtypeHdyc) == VideoPixelFormat::Uyvy,
+          "UYVY and HDYC share packed 4:2:2 byte ordering");
     Check(llcv::video::PixelFormatFromSubtype(MFVideoFormat_P010) ==
               VideoPixelFormat::P010,
           "P010 subtype");
@@ -42,6 +53,9 @@ void TestPixelFormatHelpers() {
           "NV12 is auto selectable");
     Check(llcv::video::IsAutoSelectableVideoFormat(VideoPixelFormat::Yuy2),
           "YUY2 is auto selectable");
+    Check(llcv::video::IsAutoSelectableVideoFormat(VideoPixelFormat::Uyvy) &&
+          !llcv::video::IsCompressedVideoFormat(VideoPixelFormat::Uyvy),
+          "UYVY is an uncompressed automatic fallback");
     Check(!llcv::video::IsAutoSelectableVideoFormat(VideoPixelFormat::Mjpeg),
           "MJPEG remains opt-in");
 }
@@ -648,8 +662,8 @@ void TestMalformedCapabilityOwnership() {
 
 void TestUnsupportedFormatDiagnostics() {
     using namespace llcv::video;
-    GUID hdyc = MEDIASUBTYPE_YUY2;
-    hdyc.Data1 = MAKEFOURCC('H', 'D', 'Y', 'C');
+    GUID yv12 = MEDIASUBTYPE_YUY2;
+    yv12.Data1 = MAKEFOURCC('Y', 'V', '1', '2');
     GUID v210 = MEDIASUBTYPE_YUY2;
     v210.Data1 = MAKEFOURCC('v', '2', '1', '0');
     FakeVideoPin pin;
@@ -664,15 +678,15 @@ void TestUnsupportedFormatDiagnostics() {
         "successful empty list is not an unsupported-subtype verdict");
 
     pin.modes = {{60}, {30}, {60}, {60, 1280, 720}};
-    pin.modes[0].subtype = pin.modes[1].subtype = MEDIASUBTYPE_UYVY;
-    pin.modes[2].subtype = hdyc;
+    pin.modes[0].subtype = pin.modes[1].subtype = v210;
+    pin.modes[2].subtype = yv12;
     pin.modes[3].subtype = v210;
     Check(probe().empty() && SUCCEEDED(status) && diagnostics.UnsupportedFormatsOnly() &&
         diagnostics.matchingResolutionTypes == 3 && diagnostics.unsupportedMatchingTypes == 3 &&
-        diagnostics.unsupportedFormatNames == std::vector<std::wstring>{L"UYVY", L"HDYC"},
+        diagnostics.unsupportedFormatNames == std::vector<std::wstring>{L"v210", L"YV12"},
         "unsupported-only verdict is resolution scoped with unique actual FourCC names");
-    Check(selectionLog.find(L"reason=unsupported-subtype subtype=UYVY") != std::wstring::npos &&
-        selectionLog.find(L"subtype=HDYC") != std::wstring::npos &&
+    Check(selectionLog.find(L"reason=unsupported-subtype subtype=v210") != std::wstring::npos &&
+        selectionLog.find(L"subtype=YV12") != std::wstring::npos &&
         selectionLog.find(L"subtype=v210") != std::wstring::npos &&
         selectionLog.find(L"size=1920x1080 duration=166666 (100ns) header=valid") != std::wstring::npos &&
         selectionLog.find(L"size=1280x720") != std::wstring::npos,
@@ -691,10 +705,10 @@ void TestUnsupportedFormatDiagnostics() {
         diagnostics.unsupportedFormatNames.empty(),
         "unsupported types at another resolution do not misdiagnose the selected resolution");
     pin.modes.push_back({60});
-    pin.modes.back().subtype = MEDIASUBTYPE_UYVY;
+    pin.modes.back().subtype = v210;
     pin.modes.front().subtype = MEDIASUBTYPE_NV12;
     Check(probe().empty() && diagnostics.UnsupportedFormatsOnly() &&
-        diagnostics.unsupportedFormatNames == std::vector<std::wstring>{L"UYVY"} &&
+        diagnostics.unsupportedFormatNames == std::vector<std::wstring>{L"v210"} &&
         selectionLog.find(L"reason=resolution-mismatch subtype=NV12") != std::wstring::npos,
         "recognized types elsewhere do not hide unsupported selected-resolution types");
 
@@ -719,7 +733,7 @@ void TestUnsupportedFormatDiagnostics() {
         "recognized invalid layouts remain query errors rather than unsupported-only formats");
 
     pin.modes = {{60}, {60}};
-    pin.modes[0].subtype = MEDIASUBTYPE_UYVY;
+    pin.modes[0].subtype = v210;
     pin.modes[1].queryFails = true;
     Check(probe().empty() && FAILED(status) && diagnostics.UnsupportedFormatsOnly(),
         "partial enumeration failure is retained separately from the observed format evidence");
@@ -730,6 +744,213 @@ void TestUnsupportedFormatDiagnostics() {
     Check(ProbePixelFormats(nullptr, 1920, 1080, &status, nullptr, &diagnostics).empty() &&
         status == E_POINTER && diagnostics.matchingResolutionTypes == 0 && pin.references == 1,
         "null pin clears diagnostics and capability queries preserve COM ownership");
+}
+
+void TestUyvyNegotiationAndColor() {
+    using namespace llcv::video;
+    namespace color = llcv::video_color;
+    const auto mode = [](GUID subtype) {
+        FakeVideoPin::Mode result{60};
+        result.subtype = subtype;
+        result.imageBytes = 1920 * 1080 * (subtype == MEDIASUBTYPE_NV12 ? 3 : 4) / 2;
+        return result;
+    };
+    FakeVideoPin pin;
+    pin.echoAcceptedFormat = true;
+    pin.modes = {mode(kMediaSubtypeHdyc), mode(MEDIASUBTYPE_UYVY),
+                 mode(MEDIASUBTYPE_YUY2), mode(MEDIASUBTYPE_NV12)};
+    DWORD bytes = 0;
+    UINT32 stride = 0;
+    int fps = 0;
+    VideoPixelFormat format{};
+    CaptureColorMetadata selected{};
+    GUID selectedSubtype{};
+    const auto configure = [&](VideoPixelFormat wanted = VideoPixelFormat::Auto, int rate = 60,
+                               bool unlisted = false) {
+        return ConfigureVideoPin(&pin, 1920, 1080, rate, wanted, bytes, stride, fps,
+                                 format, nullptr, unlisted, &selected, unlisted, &selectedSubtype);
+    };
+    for (const auto expected : {VideoPixelFormat::Nv12, VideoPixelFormat::Yuy2, VideoPixelFormat::Uyvy}) {
+        Check(SUCCEEDED(configure()) && format == expected && fps == 60,
+            "automatic preference remains NV12 then YUY2 then UYVY independent of enumeration order");
+        if (expected != VideoPixelFormat::Uyvy) pin.modes.pop_back();
+    }
+    Check(pin.acceptedSubtype == kMediaSubtypeHdyc && selectedSubtype == kMediaSubtypeHdyc && !selected.present &&
+        bytes == 1920 * 1080 * 2 && stride == 1920 * 2,
+        "HDYC negotiates packed UYVY without inventing explicit device metadata");
+    Check(SUCCEEDED(configure(VideoPixelFormat::Uyvy, 40, true)) && fps == 40 && !selected.present,
+        "explicit unlisted UYVY timing accepts untagged HDYC without fabricating metadata");
+
+    pin.modes = {mode(kMediaSubtypeHdyc), mode(MEDIASUBTYPE_UYVY)};
+    VideoCapabilityDiagnostics diagnostics;
+    HRESULT query = E_FAIL;
+    const auto formats = ProbePixelFormats(&pin, 1920, 1080, &query, nullptr, &diagnostics);
+    Check(formats.size() == 1 && formats.front().format == VideoPixelFormat::Uyvy &&
+        SUCCEEDED(query) && !diagnostics.UnsupportedFormatsOnly() &&
+        diagnostics.unsupportedMatchingTypes == 0,
+        "UYVY and HDYC capabilities appear once and no longer produce unsupported diagnostics");
+
+    constexpr DWORD bt601Full = AMCONTROL_COLORINFO_PRESENT | (2u << 15) | (1u << 12);
+    constexpr DWORD bt709Limited = AMCONTROL_COLORINFO_PRESENT | (1u << 15) | (2u << 12);
+    for (const auto activeSubtype : {kMediaSubtypeHdyc, MEDIASUBTYPE_UYVY}) {
+        const auto otherSubtype = activeSubtype == kMediaSubtypeHdyc
+            ? MEDIASUBTYPE_UYVY : kMediaSubtypeHdyc;
+        for (const bool reverse : {false, true}) {
+            pin.modes = {mode(activeSubtype), mode(otherSubtype)};
+            pin.modes.back().controlFlags = bt601Full;
+            if (reverse) std::reverse(pin.modes.begin(), pin.modes.end());
+            CaptureColorMetadata capsColor{};
+            capsColor.present = true; capsColor.transferMatrix = 4;
+            Check(!FindMatchingDirectShowColorMetadata(&pin, VideoPixelFormat::Uyvy,
+                1920, 1080, 60, capsColor, &activeSubtype) && !capsColor.present &&
+                capsColor.transferMatrix == 0,
+                "untagged packed-422 subtype never borrows the other alias color in either enumeration order");
+            for (auto& entry : pin.modes)
+                if (entry.subtype == activeSubtype) entry.controlFlags = bt709Limited;
+            Check(FindMatchingDirectShowColorMetadata(&pin, VideoPixelFormat::Uyvy,
+                1920, 1080, 60, capsColor, &activeSubtype) &&
+                capsColor.transferMatrix == 1 && capsColor.nominalRange == 2,
+                "caps fallback selects the active packed-422 subtype's own matrix and range");
+            Check(FindMatchingDirectShowColorMetadata(&pin, VideoPixelFormat::Uyvy,
+                1920, 1080, 60, capsColor, &otherSubtype) &&
+                capsColor.transferMatrix == 2 && capsColor.nominalRange == 1,
+                "opposite alias lookup retains its separate explicit color declaration");
+        }
+
+        // Reject the first candidate, accept the other alias, then model a
+        // driver returning the first subtype without color in GetFormat.
+        pin.modes = {mode(activeSubtype), mode(otherSubtype)};
+        pin.modes.front().controlFlags = bt601Full;
+        pin.modes.back().controlFlags = bt709Limited;
+        pin.rejectedControlFlags = bt601Full;
+        pin.echoAcceptedFormat = false;
+        pin.stripReadbackColor = true;
+        Check(SUCCEEDED(configure(VideoPixelFormat::Uyvy, 60, true)) &&
+            pin.acceptedSubtype == otherSubtype && selectedSubtype == otherSubtype && !selected.present,
+            "substituted UYVY/HDYC readback discards color belonging only to the accepted other alias");
+        pin.echoAcceptedFormat = true;
+        Check(SUCCEEDED(configure(VideoPixelFormat::Uyvy, 60, true)) &&
+            selectedSubtype == otherSubtype && selected.present &&
+            selected.transferMatrix == 1 && selected.nominalRange == 2,
+            "same-subtype stripped readback still preserves accepted candidate color");
+    }
+    pin.rejectedControlFlags = 0;
+    pin.echoAcceptedFormat = true;
+    pin.stripReadbackColor = false;
+
+    for (const auto subtype : {MEDIASUBTYPE_UYVY, kMediaSubtypeHdyc}) {
+        VIDEOINFOHEADER2 info{};
+        info.AvgTimePerFrame = 166'833;
+        info.bmiHeader.biWidth = 1920;
+        info.bmiHeader.biHeight = 1081; // Packed 4:2:2 needs even width, not even height.
+        AM_MEDIA_TYPE media{};
+        media.majortype = MEDIATYPE_Video; media.subtype = subtype;
+        media.formattype = FORMAT_VideoInfo2; media.cbFormat = sizeof(info);
+        media.pbFormat = reinterpret_cast<BYTE*>(&info);
+        bytes = 0; stride = 0; fps = 60;
+        Check(SUCCEEDED(ValidateVideoLayout(&media, 1920, 1081, VideoPixelFormat::Uyvy,
+            bytes, stride, fps)) && bytes == 1920 * 1081 * 2 && stride == 3840 && fps == 60,
+            "packed UYVY layout supports odd heights with exact two-byte pixel storage");
+        info.bmiHeader.biSizeImage = (3840 + 64) * 1081;
+        Check(SUCCEEDED(ValidateVideoLayout(&media, 1920, 1081, VideoPixelFormat::Uyvy,
+            bytes, stride, fps)) && stride == 3904,
+            "UYVY row padding is preserved");
+        info.bmiHeader.biSizeImage = 1920 * 1081 * 2 - 1;
+        Check(FAILED(ValidateVideoLayout(&media, 1920, 1081, VideoPixelFormat::Uyvy, bytes, stride, fps)),
+            "truncated UYVY payload is rejected");
+        info.bmiHeader.biWidth = 1919; info.bmiHeader.biSizeImage = 0;
+        Check(FAILED(ValidateVideoLayout(&media, 1919, 1081, VideoPixelFormat::Uyvy, bytes, stride, fps)),
+            "odd-width UYVY cannot split a shared chroma pair");
+    }
+
+    VIDEOINFOHEADER legacy{};
+    legacy.bmiHeader.biWidth = 1920; legacy.bmiHeader.biHeight = 1080;
+    AM_MEDIA_TYPE media{};
+    media.majortype = MEDIATYPE_Video; media.subtype = kMediaSubtypeHdyc;
+    media.formattype = FORMAT_VideoInfo; media.cbFormat = sizeof(legacy);
+    media.pbFormat = reinterpret_cast<BYTE*>(&legacy);
+    CaptureColorMetadata metadata{};
+    Check(!ExtractDirectShowColorMetadata(&media, metadata) && !metadata.present &&
+        metadata.transferMatrix == 0 && metadata.nominalRange == 0,
+        "legacy HDYC does not label its BT.709 fallback as explicit device metadata");
+    const auto resolved = color::Resolve(false, 1920, 1080, {},
+        {metadata.transferMatrix, metadata.nominalRange}, color::MatrixOverride::Bt601,
+        color::RangeOverride::Full);
+    Check(resolved.matrix == color::Matrix::Bt709 && resolved.range == color::Range::Full &&
+        resolved.rangeSource == color::Source::UserOverride,
+        "HDYC respects SDR range override and never inherits MJPEG-only matrix override");
+    media.subtype = MEDIASUBTYPE_UYVY;
+    Check(!ExtractDirectShowColorMetadata(&media, metadata) && !metadata.present,
+        "untagged UYVY does not pretend to have HDYC subtype metadata");
+
+    VIDEOINFOHEADER2 info{};
+    info.bmiHeader = legacy.bmiHeader;
+    info.dwControlFlags = AMCONTROL_COLORINFO_PRESENT | (2u << 15) | (1u << 12);
+    media.subtype = kMediaSubtypeHdyc; media.formattype = FORMAT_VideoInfo2;
+    media.cbFormat = sizeof(info); media.pbFormat = reinterpret_cast<BYTE*>(&info);
+    Check(ExtractDirectShowColorMetadata(&media, metadata) && metadata.transferMatrix == 2 &&
+        metadata.nominalRange == 1,
+        "explicit HDYC matrix/range metadata wins over the subtype default");
+    const auto explicitColor = color::Resolve(false, 1920, 1080, {},
+        {metadata.transferMatrix, metadata.nominalRange}, color::MatrixOverride::Bt709,
+        color::RangeOverride::Limited);
+    Check(explicitColor.matrix == color::Matrix::Bt601 && explicitColor.range == color::Range::Limited,
+        "explicit metadata matrix and user SDR range have independent precedence");
+    info.dwControlFlags = AMCONTROL_COLORINFO_PRESENT | (1u << 12);
+    Check(ExtractDirectShowColorMetadata(&media, metadata) && metadata.transferMatrix == 0 &&
+        metadata.nominalRange == 1 && color::Resolve(false, 1920, 1080, {},
+            {metadata.transferMatrix, metadata.nominalRange}).matrix == color::Matrix::Bt709,
+        "partial HDYC color resolves missing matrix to BT.709 without inventing a declaration");
+    media.cbFormat = 1;
+    Check(!ExtractDirectShowColorMetadata(&media, metadata) && !metadata.present,
+        "truncated HDYC headers do not fabricate valid color metadata");
+
+    for (const bool legacyReadback : {false, true}) {
+        pin.modes = {mode(kMediaSubtypeHdyc)};
+        pin.modes.front().controlFlags = AMCONTROL_COLORINFO_PRESENT | (2u << 15) | (1u << 12);
+        pin.stripReadbackColor = true;
+        pin.legacyReadback = legacyReadback;
+        Check(SUCCEEDED(configure(VideoPixelFormat::Uyvy, 40, true)) && selected.present &&
+            selected.transferMatrix == 2 && selected.nominalRange == 1,
+            "retimed HDYC preserves explicit accepted-candidate BT.601/full hints");
+        AM_MEDIA_TYPE* active = nullptr;
+        Check(SUCCEEDED(GetActiveVideoPinFormat(&pin, &active)) && active,
+            "HDYC driver returns an active media type after dropping color flags");
+        if (!active) continue;
+        CaptureColorMetadata activeColor{};
+        Check(!ExtractDirectShowColorMetadata(active, activeColor),
+            "stripped HDYC active metadata cannot override accepted color with a default");
+        CaptureColorMetadata capsColor{};
+        Check(FindMatchingDirectShowColorMetadata(&pin, VideoPixelFormat::Uyvy, 1920, 1080, 60,
+            capsColor) && capsColor.transferMatrix == 2 && capsColor.nominalRange == 1,
+            "advertised HDYC mode retains explicit metadata for ordinary startup fallback");
+        auto effective = selected;
+        MergeDirectShowColorMetadata(effective, activeColor);
+        VideoSampleFormat connected{};
+        Check(ReadVideoSampleFormat(active, fps, connected), "read stripped connected HDYC layout");
+        MergeDirectShowColorMetadata(effective, connected.color);
+        Check(effective.transferMatrix == 2 && effective.nominalRange == 1,
+            "active and connected missing HDYC declarations preserve accepted explicit color");
+        connected.color = effective;
+        Check(MatchesVideoSampleFormat(active, connected),
+            "untagged dynamic HDYC samples do not falsely trigger a BT.601 to BT.709 format change");
+        if (!legacyReadback) {
+            reinterpret_cast<VIDEOINFOHEADER2*>(active->pbFormat)->dwControlFlags =
+                AMCONTROL_COLORINFO_PRESENT | (1u << 15) | (1u << 12);
+            Check(!MatchesVideoSampleFormat(active, connected),
+                "genuine explicit dynamic HDYC matrix changes are still rejected");
+        }
+        if (active->pUnk) active->pUnk->Release();
+        CoTaskMemFree(active->pbFormat);
+        CoTaskMemFree(active);
+    }
+    Check(pin.references == 1, "UYVY negotiation releases all COM references");
+    selected.present = true;
+    selectedSubtype = kMediaSubtypeHdyc;
+    Check(ConfigureVideoPin(nullptr, 1920, 1080, 60, VideoPixelFormat::Uyvy,
+        bytes, stride, fps, format, nullptr, true, &selected, false, &selectedSubtype) == E_POINTER &&
+        !selected.present && selectedSubtype == GUID_NULL,
+        "failed negotiation clears both color hints and their subtype provenance");
 }
 
 }  // namespace
@@ -750,6 +971,7 @@ int main(int argc, char** argv) {
     TestLayoutBoundariesAndProbeErrors();
     TestMalformedCapabilityOwnership();
     TestUnsupportedFormatDiagnostics();
+    TestUyvyNegotiationAndColor();
     if (failures != 0) {
         std::fprintf(stderr, "%d test(s) failed.\n", failures);
         return 1;

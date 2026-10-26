@@ -78,6 +78,7 @@ enum class VideoPixelFormat {
     Yuy2,
     Mjpeg,
     P010,
+    Uyvy,
 };
 
 enum class UiLanguage {

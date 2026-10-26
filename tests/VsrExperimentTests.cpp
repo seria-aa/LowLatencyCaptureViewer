@@ -1048,6 +1048,11 @@ static void TestLiveToggle(HWND window, int width, int height, const std::vector
     g_vsrMode.store(llcv::vsr::Mode::Disabled);
     DirectD3D11Renderer renderer;
     Check(renderer.initialize(window,width,height,60,format), "toggle renderer init");
+    for (UINT slot=0;slot<DirectD3D11Renderer::kUploadSurfaceCount;++slot)
+        Require((renderer.uyvyUploadTextures[slot]!=nullptr)==(format==VideoPixelFormat::Uyvy) &&
+                (renderer.uyvyUploadViews[slot]!=nullptr)==(format==VideoPixelFormat::Uyvy) &&
+                (renderer.uyvyViews[slot]!=nullptr)==(format==VideoPixelFormat::Uyvy),
+                "only UYVY allocates conversion surfaces for VSR playback");
     const auto* originalDevice = renderer.device;
     const auto* originalProcessor = renderer.processor;
     const auto* originalSwapchain = renderer.swapChain;
@@ -1055,7 +1060,8 @@ static void TestLiveToggle(HWND window, int width, int height, const std::vector
     const auto originalGeneration = g_outputConfigurationGeneration.load();
     const auto originalRendererGeneration = renderer.outputConfigurationGeneration;
     auto renderHash = [&] {
-        renderer.upload(pixels.data(), static_cast<UINT32>(width*(format == VideoPixelFormat::Yuy2 ? 2 : 1)));
+        const bool packed422=format==VideoPixelFormat::Yuy2 || format==VideoPixelFormat::Uyvy;
+        renderer.upload(pixels.data(), static_cast<UINT32>(width*(packed422 ? 2 : 1)));
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE; stream.pInputSurface = renderer.inputViews[renderer.activeUploadSurface];
         Check(renderer.videoContext->VideoProcessorBlt(renderer.processor,renderer.outputView,0,1,&stream),
@@ -1628,6 +1634,8 @@ int main(int argc, char** argv) {
         for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x)
             yuyPixels[(static_cast<size_t>(y)*width+x)*2] = pixels[static_cast<size_t>(y)*width+x];
         TestLiveToggle(window,width,height,yuyPixels,VideoPixelFormat::Yuy2);
+        for(size_t i=0;i<yuyPixels.size();i+=2)std::swap(yuyPixels[i],yuyPixels[i+1]);
+        TestLiveToggle(window,width,height,yuyPixels,VideoPixelFormat::Uyvy);
         TestCenteredPixelPerfect(window);
         TestSplitResolutionRenderer(window);
     }

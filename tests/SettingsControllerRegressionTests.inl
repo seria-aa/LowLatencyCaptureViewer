@@ -26,7 +26,7 @@ static void TestUnsupportedVideoModeStatus() {
             if (stage == 0 || stage == 2) {
                 result.diagnostics.matchingResolutionTypes = 2;
                 result.diagnostics.unsupportedMatchingTypes = 2;
-                result.diagnostics.unsupportedFormatNames = {L"UYVY", L"v210"};
+                result.diagnostics.unsupportedFormatNames = {L"YV12", L"v210"};
             }
             if (stage == 2) result.status = E_FAIL;
             if (stage == 3) result.formats = {{VideoPixelFormat::Nv12, 60}};
@@ -47,7 +47,7 @@ static void TestUnsupportedVideoModeStatus() {
     for (const auto language : {UiLanguage::Korean, UiLanguage::English}) {
         g_settings.uiLanguage = language; UpdateVideoCapabilityStatus(&state);
         Require(label().find(language == UiLanguage::English ? L"unsupported pixel formats" : L"미지원 픽셀 포맷") != std::wstring::npos &&
-                label().find(L"UYVY") != std::wstring::npos, "localized unsupported-format reason includes subtype");
+                label().find(L"v210") != std::wstring::npos, "localized unsupported-format reason includes subtype");
     }
     Require(!IsWindowEnabled(state.pixelFormatCombo) && !IsWindowEnabled(state.frameRateCombo) &&
             !IsWindowEnabled(state.startButton), "unsupported formats never enable video start");
@@ -57,7 +57,7 @@ static void TestUnsupportedVideoModeStatus() {
     stage = 2; refresh();
     Require(label().find(L"failed") != std::wstring::npos, "query failure takes precedence over incomplete subtype list");
     stage = 1; refresh();
-    Require(!state.videoCapabilityDiagnostics.UnsupportedFormatsOnly() && label().find(L"UYVY") == std::wstring::npos,
+    Require(!state.videoCapabilityDiagnostics.UnsupportedFormatsOnly() && label().find(L"v210") == std::wstring::npos,
         "empty successful query clears cached unsupported diagnostics");
     stage = 3; refresh();
     Require(IsWindowEnabled(state.startButton) && IsWindowEnabled(state.pixelFormatCombo) &&

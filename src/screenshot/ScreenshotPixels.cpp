@@ -11,7 +11,7 @@ unsigned RowBytes(const Description& d) noexcept {
     return d.width * (d.format == Format::Nv12 ? 1u : 2u);
 }
 unsigned Rows(const Description& d) noexcept {
-    return d.format == Format::Yuy2 ? d.height : d.height + d.height / 2;
+    return d.format == Format::Yuy2 || d.format == Format::Uyvy ? d.height : d.height + d.height / 2;
 }
 float Word(const std::uint8_t* p) noexcept {
     return static_cast<float>((unsigned(p[0]) | (unsigned(p[1]) << 8)) >> 6);
@@ -83,7 +83,8 @@ std::uint8_t Byte(float v) noexcept {
 std::size_t PackedSize(const Description& d) noexcept {
     if (!d.width || !d.height || d.width > 3840 || d.height > 2160 ||
         (d.width & 1) || (d.height & 1) ||
-        (d.format != Format::Nv12 && d.format != Format::Yuy2 && d.format != Format::P010))
+        (d.format != Format::Nv12 && d.format != Format::Yuy2 &&
+         d.format != Format::P010 && d.format != Format::Uyvy))
         return 0;
     return std::size_t(RowBytes(d)) * Rows(d);
 }
@@ -112,10 +113,14 @@ bool ConvertRows(const Description& d, std::span<const std::uint8_t> packed,
         rowCount > d.height-firstRow || bgra.size() < std::size_t(d.width)*rowCount*4) return false;
     const unsigned rowBytes = RowBytes(d);
     const bool hdr = d.format == Format::P010;
-    const bool planar = d.format != Format::Yuy2;
+    const bool planar = d.format != Format::Yuy2 && d.format != Format::Uyvy;
+    // UYVY/HDYC retains its original byte order until this existing worker
+    // conversion. No extra capture copy or intermediate YUY2 frame is needed.
+    const unsigned lumaOffset = d.format == Format::Uyvy ? 1u : 0u;
+    const unsigned chromaOffset = d.format == Format::Uyvy ? 0u : 1u;
     const auto* uv = packed.data() + std::size_t(rowBytes)*d.height;
     const auto component = [&](unsigned cx, unsigned cy, unsigned c) {
-        if (!planar) return float(packed[std::size_t(cy)*rowBytes + cx*4 + (c ? 3 : 1)]);
+        if (!planar) return float(packed[std::size_t(cy)*rowBytes + cx*4 + c*2 + chromaOffset]);
         const auto* p = uv + std::size_t(cy)*rowBytes + (cx*2+c)*(hdr ? 2 : 1);
         return hdr ? Word(p) : float(*p);
     };
@@ -123,7 +128,7 @@ bool ConvertRows(const Description& d, std::span<const std::uint8_t> packed,
     const float kr = hdr ? .2627f : d.color.matrix == video_color::Matrix::Bt601 ? .299f : .2126f;
     const float kb = hdr ? .0593f : d.color.matrix == video_color::Matrix::Bt601 ? .114f : .0722f;
     for (unsigned y = firstRow; y < firstRow + rowCount; ++y) {
-        // Bilinear chroma reconstruction with edge clamping. NV12/YUY2 use
+        // Bilinear chroma reconstruction with edge clamping. NV12/YUY2/UYVY use
         // left siting; P010 uses the capture path's resolved vertical siting.
         const float fy = planar ? std::max(0.0f, (float(y) - (hdr && d.topLeftChroma ? 0.0f : .5f))*.5f) : float(y);
         const unsigned y0 = static_cast<unsigned>(fy);
@@ -138,7 +143,7 @@ bool ConvertRows(const Description& d, std::span<const std::uint8_t> packed,
                 chroma[c] = (std::lerp(a,b,ty) - (hdr ? 512.0f : 128.0f)) /
                             (hdr ? 896.0f : full ? 255.0f : 224.0f);
             }
-            const auto* p = packed.data() + std::size_t(y)*rowBytes + x*(d.format == Format::Nv12 ? 1 : 2);
+            const auto* p = packed.data() + std::size_t(y)*rowBytes + x*(d.format == Format::Nv12 ? 1 : 2) + lumaOffset;
             const float luma = ((hdr ? Word(p) : float(*p)) - (hdr ? 64.0f : full ? 0.0f : 16.0f)) /
                                (hdr ? 876.0f : full ? 255.0f : 219.0f);
             float r = luma + 2*(1-kr)*chroma[1];

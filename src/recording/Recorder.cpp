@@ -106,6 +106,11 @@ bool Recorder::Start(const std::wstring& path,const Options* options) {
         pausedSinceMs_=totalPausedMs_=0;
     }
     if(!wake_){Fail(E_OUTOFMEMORY);phase_=Phase::Failed;return false;}
+    if(video_.format==settings::VideoPixelFormat::Uyvy) {
+        // Reject before file creation, encoder startup or a recording worker.
+        // Never feed UYVY bytes into the existing YUY2 recording path.
+        Fail(UnsupportedUyvyRecording,Operation::Input);phase_=Phase::Failed;return false;
+    }
     const bool nv12=video_.format==settings::VideoPixelFormat::Nv12;
     const bool yuy2=video_.format==settings::VideoPixelFormat::Yuy2;
     const bool mjpeg=video_.format==settings::VideoPixelFormat::Mjpeg;

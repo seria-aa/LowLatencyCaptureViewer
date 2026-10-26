@@ -11,6 +11,20 @@ constexpr wchar_t kOtherPage[] = L"LLCV.Settings.OtherPage";
 struct Item { HWND control; int x, y, width, height; };
 struct Page { std::wstring name; std::vector<Item> items; int used = 0; };
 
+int CapabilityTextHeight(HWND control,int width,UINT dpi) {
+    int height=88;
+    HDC dc=GetDC(control);
+    if(dc) {
+        const auto previous=SelectObject(dc,reinterpret_cast<HFONT>(SendMessageW(control,WM_GETFONT,0,0)));
+        wchar_t caption[4096]{};GetWindowTextW(control,caption,ARRAYSIZE(caption));
+        RECT measured{0,0,SettingsPixels(width,dpi),0};
+        DrawTextW(dc,caption,-1,&measured,DT_CALCRECT|DT_WORDBREAK|DT_NOPREFIX);
+        height=std::max(height,static_cast<int>((measured.bottom*96+dpi-1)/dpi));
+        SelectObject(dc,previous);ReleaseDC(control,dc);
+    }
+    return height;
+}
+
 // Keep complete options together whenever they fit. Oversized compound options
 // can continue at an explicit semantic boundary, never inside a label/field,
 // explanation or help-button pair. All dimensions remain in DIPs.
@@ -167,7 +181,7 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
         pages.Check(s->capture40Check,s->capture40Help);
         pages.Group(text(L"영상 형식",L"Video format"));
         pages.Field(s->pixelFormatLabel,s->pixelFormatCombo);
-        pages.Text(s->videoCapabilityStatus,88);
+        pages.Text(s->videoCapabilityStatus,CapabilityTextHeight(s->videoCapabilityStatus,width,dpi));
         if (GetWindowTextLengthW(s->unlistedFpsStatus) > 0)
             pages.Text(s->unlistedFpsStatus,20);
         // Do not create blank continuation pages for formats without overrides.

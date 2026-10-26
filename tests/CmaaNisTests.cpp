@@ -254,19 +254,39 @@ static void Regression() {
     HWND hwnd=Window(480,270);
     for(auto mode:{PresentationMode::VSync,PresentationMode::Compatibility,PresentationMode::AllowTearing}) {
     g_settings.presentationMode=mode;
-    for(auto format:{VideoPixelFormat::Nv12,VideoPixelFormat::Yuy2})
+    for(auto format:{VideoPixelFormat::Nv12,VideoPixelFormat::Yuy2,VideoPixelFormat::Uyvy})
     for(auto range:{llcv::video_color::Range::Limited,llcv::video_color::Range::Full})
     for(auto matrix:{llcv::video_color::Matrix::Bt709,llcv::video_color::Matrix::Bt601}) {
         llcv::video_color::Configuration color{};color.range=range;color.matrix=matrix;
         std::vector<BYTE> input(size_t(w)*h*(format==VideoPixelFormat::Nv12?3:4)/2,126);
         if(format==VideoPixelFormat::Nv12)
             for(size_t i=size_t(w)*h;i<input.size();i+=2){input[i]=96;input[i+1]=158;}
-        else for(size_t i=0;i<input.size();i+=4){input[i+1]=96;input[i+3]=158;}
+        else if(format==VideoPixelFormat::Yuy2)
+            for(size_t i=0;i<input.size();i+=4){input[i+1]=96;input[i+3]=158;}
+        else for(size_t i=0;i<input.size();i+=4){input[i]=96;input[i+2]=158;}
         const auto original=input;
         const UINT stride=format==VideoPixelFormat::Nv12?w:w*2;
         g_cmaaNisRequest=-1;DirectD3D11Renderer r;
+        std::vector<BYTE> uyvyReference;
+        if(format==VideoPixelFormat::Uyvy) {
+            auto yuy2=input;
+            for(size_t i=0;i<yuy2.size();i+=2)std::swap(yuy2[i],yuy2[i+1]);
+            Check(r.initialize(hwnd,w,h,60,VideoPixelFormat::Yuy2,false,color),"YUY2 reference initialize");
+            Require(!r.uyvyInput && !r.uyvyViews[0],"YUY2 allocates no conversion resources");
+            Render(r,yuy2,stride);uyvyReference=Read(r);r.reset();
+        }
         Check(r.initialize(hwnd,w,h,60,format,false,color),"SDR initialize");
         Render(r,input,stride);const auto plain=Read(r);
+        if(format==VideoPixelFormat::Uyvy) {
+            Require(plain==uyvyReference,"UYVY production output is bit-identical to equivalent YUY2");
+            for(int repeat=0;repeat<3;++repeat) {
+                Check(r.presentUploaded(),"UYVY repeated presentation without upload");
+                D3D11_VIDEO_PROCESSOR_STREAM existing{};existing.Enable=TRUE;
+                existing.pInputSurface=r.inputViews[r.activeUploadSurface];
+                Check(r.processVideo(existing),"UYVY existing converted surface");
+                Require(Read(r)==plain,"presenting an old UYVY frame never converts it twice");
+            }
+        }
         for(int sharp:{0,15,100}) {
             g_cmaaNisRequest=sharp;Check(r.configureVideoOutput(w,h),"enable production");
             Require(r.cmaaNisPipeline.Enabled(),"production pipeline active, no silent fallback");
