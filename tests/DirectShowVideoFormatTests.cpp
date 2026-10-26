@@ -646,6 +646,92 @@ void TestMalformedCapabilityOwnership() {
         "normal enumeration and selection recover after malformed capability responses");
 }
 
+void TestUnsupportedFormatDiagnostics() {
+    using namespace llcv::video;
+    GUID hdyc = MEDIASUBTYPE_YUY2;
+    hdyc.Data1 = MAKEFOURCC('H', 'D', 'Y', 'C');
+    GUID v210 = MEDIASUBTYPE_YUY2;
+    v210.Data1 = MAKEFOURCC('v', '2', '1', '0');
+    FakeVideoPin pin;
+    VideoCapabilityDiagnostics diagnostics;
+    HRESULT status = E_FAIL;
+    auto probe = [&](int width = 1920, int height = 1080) {
+        selectionLog.clear();
+        return ProbePixelFormats(&pin, width, height, &status, SelectionLog, &diagnostics);
+    };
+    Check(probe().empty() && SUCCEEDED(status) && !diagnostics.UnsupportedFormatsOnly() &&
+        diagnostics.matchingResolutionTypes == 0 && diagnostics.unsupportedFormatNames.empty(),
+        "successful empty list is not an unsupported-subtype verdict");
+
+    pin.modes = {{60}, {30}, {60}, {60, 1280, 720}};
+    pin.modes[0].subtype = pin.modes[1].subtype = MEDIASUBTYPE_UYVY;
+    pin.modes[2].subtype = hdyc;
+    pin.modes[3].subtype = v210;
+    Check(probe().empty() && SUCCEEDED(status) && diagnostics.UnsupportedFormatsOnly() &&
+        diagnostics.matchingResolutionTypes == 3 && diagnostics.unsupportedMatchingTypes == 3 &&
+        diagnostics.unsupportedFormatNames == std::vector<std::wstring>{L"UYVY", L"HDYC"},
+        "unsupported-only verdict is resolution scoped with unique actual FourCC names");
+    Check(selectionLog.find(L"reason=unsupported-subtype subtype=UYVY") != std::wstring::npos &&
+        selectionLog.find(L"subtype=HDYC") != std::wstring::npos &&
+        selectionLog.find(L"subtype=v210") != std::wstring::npos &&
+        selectionLog.find(L"size=1920x1080 duration=166666 (100ns) header=valid") != std::wstring::npos &&
+        selectionLog.find(L"size=1280x720") != std::wstring::npos,
+        "rejected entries log FourCC, GUID, raw dimensions and frame interval even outside selection");
+
+    pin.modes.push_back({60});
+    const auto mixed = probe();
+    Check(mixed.size() == 1 && mixed.front().format == VideoPixelFormat::Nv12 &&
+        SUCCEEDED(status) && !diagnostics.UnsupportedFormatsOnly() &&
+        diagnostics.matchingResolutionTypes == 4 && diagnostics.unsupportedMatchingTypes == 3,
+        "an available recognized format prevents an unsupported-only verdict");
+
+    pin.modes = {{60, 1280, 720}};
+    pin.modes[0].subtype = v210;
+    Check(probe().empty() && SUCCEEDED(status) && !diagnostics.UnsupportedFormatsOnly() &&
+        diagnostics.unsupportedFormatNames.empty(),
+        "unsupported types at another resolution do not misdiagnose the selected resolution");
+    pin.modes.push_back({60});
+    pin.modes.back().subtype = MEDIASUBTYPE_UYVY;
+    pin.modes.front().subtype = MEDIASUBTYPE_NV12;
+    Check(probe().empty() && diagnostics.UnsupportedFormatsOnly() &&
+        diagnostics.unsupportedFormatNames == std::vector<std::wstring>{L"UYVY"} &&
+        selectionLog.find(L"reason=resolution-mismatch subtype=NV12") != std::wstring::npos,
+        "recognized types elsewhere do not hide unsupported selected-resolution types");
+
+    pin.modes = {{60}};
+    pin.modes[0].subtype = v210;
+    pin.modes[0].subtype.Data2 = 7; // Same Data1 bytes, but not a FourCC GUID.
+    Check(probe().empty() && diagnostics.UnsupportedFormatsOnly() &&
+        diagnostics.unsupportedFormatNames.size() == 1 &&
+        diagnostics.unsupportedFormatNames.front().front() == L'{' &&
+        selectionLog.find(L"subtype=v210") == std::wstring::npos,
+        "vendor GUIDs are not incorrectly described as FourCC values");
+
+    pin.modes[0].emptyFormat = true;
+    Check(probe().empty() && SUCCEEDED(status) && !diagnostics.UnsupportedFormatsOnly() &&
+        selectionLog.find(L"header=unavailable") != std::wstring::npos,
+        "malformed unknown headers cannot establish a resolution-specific diagnosis");
+    pin.modes[0].emptyFormat = false;
+    pin.modes[0].subtype = MEDIASUBTYPE_NV12;
+    pin.modes[0].imageBytes = 1;
+    Check(probe().empty() && FAILED(status) && !diagnostics.UnsupportedFormatsOnly() &&
+        selectionLog.find(L"reason=invalid-layout-or-timing subtype=NV12") != std::wstring::npos,
+        "recognized invalid layouts remain query errors rather than unsupported-only formats");
+
+    pin.modes = {{60}, {60}};
+    pin.modes[0].subtype = MEDIASUBTYPE_UYVY;
+    pin.modes[1].queryFails = true;
+    Check(probe().empty() && FAILED(status) && diagnostics.UnsupportedFormatsOnly(),
+        "partial enumeration failure is retained separately from the observed format evidence");
+    pin.countFails = true;
+    Check(probe().empty() && FAILED(status) && !diagnostics.UnsupportedFormatsOnly() &&
+        diagnostics.unsupportedFormatNames.empty(),
+        "failed requery clears a stale unsupported-only diagnosis");
+    Check(ProbePixelFormats(nullptr, 1920, 1080, &status, nullptr, &diagnostics).empty() &&
+        status == E_POINTER && diagnostics.matchingResolutionTypes == 0 && pin.references == 1,
+        "null pin clears diagnostics and capability queries preserve COM ownership");
+}
+
 }  // namespace
 
 #include "VideoFaultInjection.inl"
@@ -663,6 +749,7 @@ int main(int argc, char** argv) {
     TestAcceptedCandidateColorMetadata();
     TestLayoutBoundariesAndProbeErrors();
     TestMalformedCapabilityOwnership();
+    TestUnsupportedFormatDiagnostics();
     if (failures != 0) {
         std::fprintf(stderr, "%d test(s) failed.\n", failures);
         return 1;

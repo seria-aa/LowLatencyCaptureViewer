@@ -1441,6 +1441,7 @@ int main(int argc, char** argv) {
         TestSettingsAudioIdentityAndRefresh();
         TestExclusiveScanLifecycle();
         TestSettingsModeFlow();
+        TestUnsupportedVideoModeStatus();
         Require(profileBytes()==beforeProfile,"controller fixtures leave the isolated profile unchanged");
         CoUninitialize();
         return 0;

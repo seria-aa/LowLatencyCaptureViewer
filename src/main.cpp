@@ -2058,9 +2058,11 @@ static std::vector<PixelFormatSupport> (*g_testVideoCapabilityProbe)(
 #endif
 static std::mutex g_settingsCaptureProbeMutex;
 static std::vector<PixelFormatSupport> ProbePixelFormats(
-    const std::wstring& captureDeviceId, int width, int height, HRESULT* queryStatus = nullptr) {
+    const std::wstring& captureDeviceId, int width, int height, HRESULT* queryStatus = nullptr,
+    llcv::video::VideoCapabilityDiagnostics* diagnostics = nullptr) {
     std::lock_guard captureLock(g_settingsCaptureProbeMutex);
     if (queryStatus) *queryStatus = S_OK;
+    if (diagnostics) *diagnostics = {};
 #if defined(LLCV_GPU_DIAGNOSTICS) || defined(LLCV_SETTINGS_MODE_TEST)
     if (g_testVideoCapabilityProbe)
         return g_testVideoCapabilityProbe(captureDeviceId, width, height, queryStatus);
@@ -2078,7 +2080,7 @@ static std::vector<PixelFormatSupport> ProbePixelFormats(
         hr = FindOutputPinByMajorType(capture, MEDIATYPE_Video, &videoPin);
     }
     if (SUCCEEDED(hr)) {
-        result = llcv::video::ProbePixelFormats(videoPin, width, height, queryStatus, LogModuleMessage);
+        result = llcv::video::ProbePixelFormats(videoPin, width, height, queryStatus, LogModuleMessage, diagnostics);
     } else {
         if (queryStatus) *queryStatus = hr;
         LogHr(L"Video capability device/pin query", hr);
@@ -5129,6 +5131,7 @@ using llcv::settings_ui::SettingsHelpTopic;
 struct SettingsVideoModes {
     std::vector<PixelFormatSupport> formats;
     HRESULT status = S_OK;
+    llcv::video::VideoCapabilityDiagnostics diagnostics;
 };
 struct SettingsDeviceInventory {
     std::vector<CaptureDeviceInfo> videoInputs;
@@ -5170,6 +5173,7 @@ struct SettingsDialogState : llcv::settings_ui::SettingsControls {
     std::vector<llcv::asio::DriverInfo> asioDrivers;
     std::vector<PixelFormatSupport> pixelFormats;
     HRESULT videoCapabilityQueryStatus = S_OK;
+    llcv::video::VideoCapabilityDiagnostics videoCapabilityDiagnostics;
     VideoPreset initialVideoPreset = VideoPreset::R1920x1080;
     HMONITOR viewerMonitor = nullptr;
     UINT32 selectedSharedPeriodFrames = 0;
@@ -6070,6 +6074,17 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
             : L"장치 모드 조회 실패 (0x%08X). 새로고침을 눌러 다시 확인하세요.",
             static_cast<unsigned>(state->videoCapabilityQueryStatus));
         message = failure;
+    } else if (!supported && state->videoCapabilityDiagnostics.UnsupportedFormatsOnly()) {
+        std::wstring names;
+        const auto& formats = state->videoCapabilityDiagnostics.unsupportedFormatNames;
+        for (size_t i = 0; i < formats.size() && i < 3; ++i) {
+            if (!names.empty()) names += L", ";
+            names += formats[i];
+        }
+        if (formats.size() > 3) names += L", …";
+        message = IsEnglishUi()
+            ? L"Only unsupported pixel formats at this resolution:\r\n" + names
+            : L"선택한 해상도에서 미지원 픽셀 포맷만 제공됩니다:\r\n" + names;
     } else if (!supported) {
         message = UI_TEXT(L"지원 모드 없음: 다른 장치 또는 해상도를 선택하세요.");
     } else {
@@ -6195,7 +6210,7 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
         state->videoModeCache = std::make_unique<llcv::settings_ui::SettingsModeCache<SettingsVideoModes>>(
             [](const llcv::settings_ui::ModeQueryKey& request) {
                 SettingsVideoModes result;
-                result.formats = ProbePixelFormats(request.device, request.width, request.height, &result.status);
+                result.formats = ProbePixelFormats(request.device, request.width, request.height, &result.status, &result.diagnostics);
                 return result;
             }, [owner] { PostMessageW(owner, WM_SETTINGS_VIDEO_MODES_READY, 0, 0); });
     }
@@ -6213,6 +6228,7 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
     }
     state->pixelFormats = modes->formats;
     state->videoCapabilityQueryStatus = modes->status;
+    state->videoCapabilityDiagnostics = modes->diagnostics;
     SendMessageW(state->pixelFormatCombo, CB_RESETCONTENT, 0, 0);
     if (state->pixelFormats.empty()) {
         const LRESULT noModeIndex = SendMessageW(

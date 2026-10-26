@@ -5,6 +5,7 @@
 
 #include <dshow.h>
 
+#include <string>
 #include <vector>
 
 namespace llcv::video {
@@ -15,6 +16,20 @@ using LogCallback = void (*)(const wchar_t* message);
 struct PixelFormatSupport {
     VideoPixelFormat format = VideoPixelFormat::Auto;
     int selectedFps = 0;
+};
+
+// Startup/settings diagnostics, separate from query HRESULTs. Only media types
+// at the requested resolution contribute: an unsupported format elsewhere must
+// not hide a simple resolution mismatch.
+struct VideoCapabilityDiagnostics {
+    unsigned matchingResolutionTypes = 0;
+    unsigned unsupportedMatchingTypes = 0;
+    std::vector<std::wstring> unsupportedFormatNames;
+
+    bool UnsupportedFormatsOnly() const {
+        return matchingResolutionTypes != 0 &&
+            matchingResolutionTypes == unsupportedMatchingTypes;
+    }
 };
 
 const wchar_t* PixelFormatName(VideoPixelFormat format);
@@ -56,7 +71,8 @@ inline constexpr HRESULT kRequestedFrameRateMismatch =
 HRESULT GetActiveVideoPinFormat(IPin* videoPin, AM_MEDIA_TYPE** mediaType);
 std::vector<PixelFormatSupport> ProbePixelFormats(
     IPin* videoPin, int width, int height, HRESULT* queryStatus = nullptr,
-    LogCallback logCallback = nullptr);
+    LogCallback logCallback = nullptr,
+    VideoCapabilityDiagnostics* diagnostics = nullptr);
 
 // Startup-only validation. Outputs change only after a complete valid layout.
 // fps supplies the negotiated fallback when the media type omits frame timing.
