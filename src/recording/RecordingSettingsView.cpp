@@ -87,8 +87,8 @@ void CreateRecordingSettings(SettingsControls* s,HWND owner){
     s->recSplitValueLabel=label(L"분할 기준",L"Split threshold");s->recSplitValue=combo(kRecordingSplitValue);
     s->recPause=create(L"BUTTON",Text(s,L"녹화 일시정지",L"Pause recording"),BS_PUSHBUTTON|WS_TABSTOP,kRecordingPause);
     s->recSplitHint=label(L"독립 재생 가능한 지점에서 분할합니다.",L"Splits wait for an independently decodable frame.");
-    s->recNote=label(L"현재 NV12·YUY2·MJPEG SDR 영상과\n16비트 PCM 스테레오 오디오를 녹화할 수 있습니다.\nMP4 저장 · CQP 용량은 장면에 따라 달라집니다.\n\nVSR·OSD·앱 음량은 녹화에 반영되지 않습니다.\n녹화 프레임 설정은 재생에 영향을 주지 않습니다.",
-        L"Recording supports NV12/YUY2/MJPEG SDR video\nand 16-bit PCM stereo audio.\nMP4 files · CQP size varies with the scene.\n\nVSR, OSD and app volume are not recorded.\nThe frame rate limit applies only to recording.");
+    s->recNote=label(L"현재 NV12·YUY2·MJPEG·RGB SDR 영상과\n16비트 PCM 스테레오 오디오를 녹화할 수 있습니다.\nMP4 저장 · CQP 용량은 장면에 따라 달라집니다.\n\nVSR·OSD·앱 음량은 녹화에 반영되지 않습니다.\n녹화 프레임 설정은 재생에 영향을 주지 않습니다.",
+        L"Recording supports NV12/YUY2/MJPEG/RGB SDR video\nand 16-bit PCM stereo audio.\nMP4 files · CQP size varies with the scene.\n\nVSR, OSD and app volume are not recorded.\nThe frame rate limit applies only to recording.");
     // New page fields precede the shared footer in keyboard traversal.
     for(auto h:s->recordingControls)SetWindowPos(h,HWND_BOTTOM,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
     for(auto h:{s->startButton,s->cancelButton})if(h)SetWindowPos(h,HWND_BOTTOM,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);

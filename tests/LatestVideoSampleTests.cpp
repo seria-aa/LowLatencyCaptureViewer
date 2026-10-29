@@ -335,6 +335,8 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--format") { TestVideoSampleChanges(); return failures ? 1 : 0; }
     if (argc == 2 && std::string(argv[1]) == "--benchmark") return BenchmarkSampleGuard();
     TestVideoSampleChanges();
+    TestRgb32CallbackOrientationAndShortBuffer();
+    TestRgb24CallbackOrientationAndShortBuffer();
     using namespace llcv::capture;
     HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     Check(ready != nullptr, "create test frame event");

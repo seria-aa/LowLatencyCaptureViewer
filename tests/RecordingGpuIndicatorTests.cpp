@@ -2,6 +2,7 @@
 // never opens capture/audio devices, visible windows, or user settings.
 #include "recording/RecordingGpuIndicator.h"
 #include "recording/Recorder.h"
+#include "recording/RecordingStatusPresentation.h"
 #include "ui/OverlayStyle.h"
 #include <array>
 #include <cstdio>
@@ -196,6 +197,22 @@ void TestOffscreenTexture() {
     Check(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
         reinterpret_cast<IUnknown**>(dwrite.GetAddressOf())), "create DirectWrite factory");
     llcv::overlay_ui::Fonts fonts; // Explicitly exercise installed-font fallback.
+    for (bool english : {false, true}) {
+        Snapshot rejected; rejected.phase = Phase::Failed;
+        rejected.result = RgbRecordingTooSlow;
+        rejected.rgbConversionMs = 31; rejected.rgbBudgetMs = 1000.0 / 60;
+        const auto view = presentation::Build(rejected, english);
+        const auto message = view.title + L"\n" + view.description;
+        ComPtr<IDWriteTextFormat> format; ComPtr<IDWriteTextLayout> layout;
+        Check(fonts.CreateFormat(dwrite.Get(), DWRITE_FONT_WEIGHT_MEDIUM, 40.0f / 3.0f,
+            english, &format), "RGB rejection font");
+        Check(dwrite->CreateTextLayout(message.c_str(), static_cast<UINT32>(message.size()),
+            format.Get(), 356, 84, &layout), "RGB rejection text layout");
+        DWRITE_TEXT_METRICS metrics{};
+        Check(layout->GetMetrics(&metrics), "RGB rejection text metrics");
+        Expect(metrics.height <= 84 && metrics.width <= 356,
+            "RGB preflight guidance fits existing failure card in both languages");
+    }
     GpuIndicator indicator;
     Check(indicator.Initialize(device.Get(), d2d.Get(), dwrite.Get(), fonts, true),
         "initialize GPU indicator");

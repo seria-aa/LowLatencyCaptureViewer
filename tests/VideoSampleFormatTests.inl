@@ -205,6 +205,155 @@ static void TestVideoSampleChanges() {
     std::printf("Dynamic video format: %u callback scenarios + 100 publication races; ownership, wakeup and reset freshness passed.\n",scenarios);
 }
 
+// Real VideoSampleGrabberCallback/LatestVideoSample integration (not just the
+// DirectShowVideoFormat unit layer) for RGB32: a silent orientation flip on
+// dynamic reconnect must be rejected, and a short/truncated RGB32 buffer must
+// be dropped by the existing generic length guard rather than accepted as a
+// partial frame.
+static void TestRgb32CallbackOrientationAndShortBuffer() {
+    using namespace llcv::capture;
+    using namespace llcv::video;
+    HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    Check(ready != nullptr, "rgb32 callback format event");
+    if (!ready) return;
+
+    VIDEOINFOHEADER2 info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biWidth = 4; info.bmiHeader.biHeight = -4; // top-down
+    info.bmiHeader.biBitCount = 32; info.bmiHeader.biCompression = BI_RGB;
+    info.bmiHeader.biSizeImage = 64; // 4 * 4 * 4
+    info.AvgTimePerFrame = 166667;
+    AM_MEDIA_TYPE type{};
+    type.majortype = MEDIATYPE_Video; type.subtype = MEDIASUBTYPE_RGB32;
+    type.formattype = FORMAT_VideoInfo2;
+    type.cbFormat = sizeof(info); type.pbFormat = reinterpret_cast<BYTE*>(&info);
+    VideoSampleFormat expected{};
+    Check(ReadVideoSampleFormat(&type, 60, expected) && expected.topDown,
+          "RGB32 top-down orientation captured on connect");
+
+    LatestVideoSample slot(64, ready);
+    auto* cb = new VideoSampleGrabberCallback(&slot, nullptr, expected);
+    auto* normal = new Sample(64);
+    Check(cb->SampleCB(0, normal) == S_OK, "rgb32 initial valid frame accepted");
+    normal->Release();
+
+    auto flippedInfo = info;
+    flippedInfo.bmiHeader.biHeight = 4; // same dimensions, bottom-up now
+    auto flippedType = type;
+    flippedType.pbFormat = reinterpret_cast<BYTE*>(&flippedInfo);
+    auto* changed = new Sample(64);
+    changed->dynamicType = &flippedType; changed->typeResult = S_OK;
+    Check(cb->SampleCB(0, changed) != S_OK,
+          "silent RGB32 orientation flip with unchanged dimensions is rejected end to end");
+    int64_t arrival = 0;
+    auto* retainedAfterFlip = slot.TakeLatest(arrival);
+    Check(retainedAfterFlip == nullptr, "rejected orientation flip clears the retained sample");
+    if (retainedAfterFlip) retainedAfterFlip->Release();
+    changed->Release();
+    cb->Release();
+
+    // A fresh callback/slot for the short-buffer case: an RGB32 frame
+    // declaring fewer bytes than width*height*4 must not be retained by the
+    // generic LatestVideoSample length guard, regardless of pixel format.
+    LatestVideoSample shortSlot(64, ready);
+    auto* shortCb = new VideoSampleGrabberCallback(&shortSlot, nullptr, expected);
+    auto* shortSample = new Sample(64);
+    shortSample->SetActualDataLength(32); // half the declared RGB32 frame
+    shortCb->SampleCB(0, shortSample);
+    int64_t shortArrival = 0;
+    auto* retainedShort = shortSlot.TakeLatest(shortArrival);
+    Check(retainedShort == nullptr, "truncated RGB32 buffer is not retained as a partial frame");
+    if (retainedShort) retainedShort->Release();
+    shortSample->Release();
+    shortCb->Release();
+
+    CloseHandle(ready);
+}
+
+// Same real callback/mailbox integration for RGB24 (GC573's actual advertised
+// format, bottom-up by convention): orientation flip rejection, short-buffer
+// drop, and a dynamic RGB24<->RGB32 subtype switch at an unchanged size must
+// not be silently accepted as "still RGB".
+static void TestRgb24CallbackOrientationAndShortBuffer() {
+    using namespace llcv::capture;
+    using namespace llcv::video;
+    HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    Check(ready != nullptr, "rgb24 callback format event");
+    if (!ready) return;
+
+    VIDEOINFOHEADER info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biWidth = 4; info.bmiHeader.biHeight = 4; // bottom-up, matches GC573
+    info.bmiHeader.biBitCount = 24; info.bmiHeader.biCompression = BI_RGB;
+    info.bmiHeader.biSizeImage = 48; // stride align(4*3,4)=12 * height 4
+    info.AvgTimePerFrame = 166667;
+    AM_MEDIA_TYPE type{};
+    type.majortype = MEDIATYPE_Video; type.subtype = MEDIASUBTYPE_RGB24;
+    type.formattype = FORMAT_VideoInfo;
+    type.cbFormat = sizeof(info); type.pbFormat = reinterpret_cast<BYTE*>(&info);
+    VideoSampleFormat expected{};
+    Check(ReadVideoSampleFormat(&type, 60, expected) && !expected.topDown,
+          "RGB24 bottom-up orientation captured on connect");
+
+    LatestVideoSample slot(48, ready);
+    auto* cb = new VideoSampleGrabberCallback(&slot, nullptr, expected);
+    auto* normal = new Sample(48);
+    Check(cb->SampleCB(0, normal) == S_OK, "rgb24 initial valid frame accepted");
+    normal->Release();
+
+    auto flippedInfo = info;
+    flippedInfo.bmiHeader.biHeight = -4; // same dimensions, top-down now
+    auto flippedType = type;
+    flippedType.pbFormat = reinterpret_cast<BYTE*>(&flippedInfo);
+    auto* changed = new Sample(48);
+    changed->dynamicType = &flippedType; changed->typeResult = S_OK;
+    Check(cb->SampleCB(0, changed) != S_OK,
+          "silent RGB24 orientation flip with unchanged dimensions is rejected end to end");
+    int64_t arrival = 0;
+    auto* retainedAfterFlip = slot.TakeLatest(arrival);
+    Check(retainedAfterFlip == nullptr, "rejected orientation flip clears the retained sample");
+    if (retainedAfterFlip) retainedAfterFlip->Release();
+    changed->Release();
+
+    // Dynamic RGB24 -> RGB32 subtype switch at the same pixel dimensions:
+    // the format field itself must differ and be rejected, not aliased.
+    VIDEOINFOHEADER2 rgb32Info{};
+    rgb32Info.AvgTimePerFrame = 166667;
+    rgb32Info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    rgb32Info.bmiHeader.biPlanes = 1;
+    rgb32Info.bmiHeader.biWidth = 4; rgb32Info.bmiHeader.biHeight = 4;
+    rgb32Info.bmiHeader.biBitCount = 32; rgb32Info.bmiHeader.biCompression = BI_RGB;
+    AM_MEDIA_TYPE rgb32Type{};
+    rgb32Type.majortype = MEDIATYPE_Video; rgb32Type.subtype = MEDIASUBTYPE_RGB32;
+    rgb32Type.formattype = FORMAT_VideoInfo2; rgb32Type.cbFormat = sizeof(rgb32Info);
+    rgb32Type.pbFormat = reinterpret_cast<BYTE*>(&rgb32Info);
+    auto* switched = new Sample(64);
+    switched->dynamicType = &rgb32Type; switched->typeResult = S_OK;
+    Check(cb->SampleCB(0, switched) != S_OK,
+          "silent RGB24 -> RGB32 subtype switch at the same size is rejected end to end");
+    switched->Release();
+    cb->Release();
+
+    // A fresh callback/slot for the short-buffer case: an RGB24 frame
+    // declaring fewer bytes than stride*height must not be retained by the
+    // generic LatestVideoSample length guard.
+    LatestVideoSample shortSlot(48, ready);
+    auto* shortCb = new VideoSampleGrabberCallback(&shortSlot, nullptr, expected);
+    auto* shortSample = new Sample(48);
+    shortSample->SetActualDataLength(24); // half the declared RGB24 frame
+    shortCb->SampleCB(0, shortSample);
+    int64_t shortArrival = 0;
+    auto* retainedShort = shortSlot.TakeLatest(shortArrival);
+    Check(retainedShort == nullptr, "truncated RGB24 buffer is not retained as a partial frame");
+    if (retainedShort) retainedShort->Release();
+    shortSample->Release();
+    shortCb->Release();
+
+    CloseHandle(ready);
+}
+
 static int BenchmarkSampleGuard() {
     using namespace llcv::capture;
     HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);

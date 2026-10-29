@@ -64,6 +64,7 @@
 #include "diagnostics/Logger.h"
 #include "diagnostics/AudioErrorHistory.h"
 #include "settings/AppSettings.h"
+#include "settings/SmokeVideoOptions.h"
 #include "power/PlaybackPowerRequest.h"
 #include "power/PlaybackPowerEvents.h"
 #include "power/SuspendResumeNotification.h"
@@ -77,6 +78,7 @@
 #include "ui/PresentationModeUi.h"
 #include "video/VideoClearPolicy.h"
 #include "video/UyvyRepacker.h"
+#include "video/Rgb24Repacker.h"
 #include "video/VideoPlacement.h"
 #include "video/ExclusivePresentationState.h"
 #include "ui/SettingsView.h"
@@ -162,11 +164,11 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
 #if defined(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.8-audio-recovery-diagnostic";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.9-audio-recovery-diagnostic";
 #elif defined(LLCV_VSR_EXPERIMENT)
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.8-vsr-test";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.9-vsr-test";
 #else
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.8";
+constexpr wchar_t kAppVersionLabel[] = L"v2.1.9";
 #endif
 
 constexpr int kRecommendedCaptureBufferMs = 20;
@@ -602,10 +604,17 @@ static bool IsAutoSelectableVideoFormat(VideoPixelFormat format) {
 
 static DXGI_FORMAT PixelFormatDxgi(VideoPixelFormat format) {
     switch (format) {
+    case VideoPixelFormat::Nv12: return DXGI_FORMAT_NV12;
     case VideoPixelFormat::Yuy2: return DXGI_FORMAT_YUY2;
     case VideoPixelFormat::Uyvy: return DXGI_FORMAT_YUY2;
     case VideoPixelFormat::P010: return DXGI_FORMAT_P010;
-    default: return DXGI_FORMAT_NV12;
+    // X channel is never treated as alpha; the renderer never blends the
+    // capture texture directly (D2D overlays render to a separate surface).
+    case VideoPixelFormat::Rgb32: return DXGI_FORMAT_B8G8R8X8_UNORM;
+    case VideoPixelFormat::Rgb24: return DXGI_FORMAT_R8G8B8A8_UNORM;
+    // No silent NV12 fallback: an unrecognized format must fail explicitly
+    // in initialize() rather than reinterpret its bytes as planar YUV.
+    default: return DXGI_FORMAT_UNKNOWN;
     }
 }
 
@@ -1989,6 +1998,27 @@ static llcv::video_color::RangeOverride SelectedSdrRange(VideoPixelFormat format
 static llcv::video_color::Configuration ResolveRawSdrVideoColor(
     VideoPixelFormat format, int width, int height,
     const DirectShowColorMetadata& metadata) {
+    if (format == VideoPixelFormat::Rgb32 || format == VideoPixelFormat::Rgb24) {
+        // RGB has no chroma matrix (Configuration::matrix is left at its
+        // unused default); only range is meaningful. Unlike YUV's Limited
+        // default, RGB defaults to Full when neither a user override nor a
+        // valid DirectShow nominalRange hint is present.
+        llcv::video_color::Configuration result{};
+        result.range = llcv::video_color::Range::Full;
+        if (metadata.present && (metadata.nominalRange == 1 || metadata.nominalRange == 2)) {
+            result.range = metadata.nominalRange == 1
+                ? llcv::video_color::Range::Full : llcv::video_color::Range::Limited;
+            result.rangeSource = llcv::video_color::Source::DirectShow;
+        }
+        const auto rangeOverride = SelectedSdrRange(format);
+        if (rangeOverride == llcv::video_color::RangeOverride::Full ||
+            rangeOverride == llcv::video_color::RangeOverride::Limited) {
+            result.range = rangeOverride == llcv::video_color::RangeOverride::Full
+                ? llcv::video_color::Range::Full : llcv::video_color::Range::Limited;
+            result.rangeSource = llcv::video_color::Source::UserOverride;
+        }
+        return result;
+    }
     if (format != VideoPixelFormat::Nv12 && format != VideoPixelFormat::Yuy2 &&
         format != VideoPixelFormat::Uyvy) return {};
     // The raw-SDR fallback is BT.709, including HDYC. Do not synthesize a
@@ -2156,6 +2186,16 @@ static InternalCaptureAudioProbe ProbeInternalCaptureAudio(
 
 static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight);
 
+// Source rectangles are specified in texture coordinates before VP mirroring.
+static RECT VideoSourceRectForStorage(RECT imageRect, int height, bool bottomUp) {
+    if (bottomUp) {
+        const LONG top = imageRect.top;
+        imageRect.top = height - imageRect.bottom;
+        imageRect.bottom = height - top;
+    }
+    return imageRect;
+}
+
 struct DirectD3D11Renderer {
     static constexpr UINT kUploadSurfaceCount = 3;
     static constexpr UINT kOsdOverlayWidth = 700;
@@ -2176,6 +2216,18 @@ struct DirectD3D11Renderer {
     ID3D11Texture2D* uyvyUploadTextures[kUploadSurfaceCount]{};
     ID3D11ShaderResourceView* uyvyUploadViews[kUploadSurfaceCount]{};
     bool uyvyInput = false;
+    llcv::video::Rgb24Repacker rgb24Repacker;
+    ID3D11UnorderedAccessView* rgb24Views[kUploadSurfaceCount]{};
+    ID3D11Texture2D* rgb24UploadTextures[kUploadSurfaceCount]{};
+    ID3D11ShaderResourceView* rgb24UploadViews[kUploadSurfaceCount]{};
+    bool rgb24Input = false;
+    DXGI_COLOR_SPACE_TYPE rgbInputColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    bool rgbInput = false;
+    bool rgbFullRange = true;
+    // DIB row direction at last initialize(); orientation-only state, kept
+    // separate from rgbInput so a reconnect with an unchanged format but a
+    // flipped orientation can be detected and trigger a reinitialize.
+    bool lastTopDown = true;
     ID3D11VideoProcessorEnumerator* enumerator = nullptr;
     ID3D11VideoProcessor* processor = nullptr;
     ID3D11VideoProcessorInputView* inputViews[kUploadSurfaceCount]{};
@@ -2520,13 +2572,21 @@ struct DirectD3D11Renderer {
         SafeRelease(processor);
         SafeRelease(enumerator);
         for (UINT i = 0; i < kUploadSurfaceCount; ++i) {
+            SafeRelease(rgb24Views[i]);
+            SafeRelease(rgb24UploadViews[i]);
+            SafeRelease(rgb24UploadTextures[i]);
             SafeRelease(uyvyViews[i]);
             SafeRelease(uyvyUploadViews[i]);
             SafeRelease(uyvyUploadTextures[i]);
             SafeRelease(nv12Textures[i]);
         }
         uyvyRepacker.Reset();
+        rgb24Repacker.Reset();
+        rgb24Input = false;
         uyvyInput = false;
+        rgbInput = false;
+        rgbFullRange = true;
+        lastTopDown = true;
         SafeRelease(swapChain);
         SafeRelease(videoContext);
         SafeRelease(videoContext1);
@@ -2579,7 +2639,9 @@ struct DirectD3D11Renderer {
                        VideoPixelFormat pixelFormat,
                        bool hdrInputMetadataAvailable = false,
                        llcv::video_color::Configuration color = {},
-                       DXGI_COLOR_SPACE_TYPE hdrColorSpace = DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020) {
+                       DXGI_COLOR_SPACE_TYPE hdrColorSpace = DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020,
+                       bool topDown = true,
+                       DirectShowColorMetadata rgbMetadata = {}) {
         reset();
         captureWidth = width; captureHeight = height; captureFps = fps;
         if (pixelFormat == VideoPixelFormat::P010 && !hdrInputMetadataAvailable) {
@@ -2634,16 +2696,35 @@ struct DirectD3D11Renderer {
         if (FAILED(hr)) return hr;
         hr = context->QueryInterface(IID_PPV_ARGS(&videoContext));
         if (FAILED(hr)) return hr;
-        if (pixelFormat == VideoPixelFormat::P010 &&
-            hdrInputMetadataAvailable) {
+        const bool hdr10Requested = pixelFormat == VideoPixelFormat::P010 &&
+                                    hdrInputMetadataAvailable;
+        rgb24Input = pixelFormat == VideoPixelFormat::Rgb24;
+        rgbInput = rgb24Input || pixelFormat == VideoPixelFormat::Rgb32;
+        if (rgbInput) {
+            const UINT transfer = rgbMetadata.present ? rgbMetadata.transferFunction : 0;
+            const UINT primaries = rgbMetadata.present ? rgbMetadata.primaries : 0;
+            if ((transfer != 0 && transfer != 4 && transfer != 5 && transfer != 7) ||
+                (primaries != 0 && primaries != 2)) {
+                fwprintf(stderr, L"[video] unsupported RGB transfer/primaries (%u/%u); SDR RGB cannot represent this tuple.\n", transfer, primaries);
+                return DXGI_ERROR_UNSUPPORTED;
+            }
+            rgbInputColorSpace = color.range == llcv::video_color::Range::Full
+                ? DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 : DXGI_COLOR_SPACE_RGB_STUDIO_G22_NONE_P709;
+        }
+        // RGB bottom-up orientation needs VideoProcessorSetStreamMirror
+        // (ID3D11VideoContext1), independent of HDR10's own reason for it.
+        if (hdr10Requested || rgbInput) {
             hr = context->QueryInterface(IID_PPV_ARGS(&videoContext1));
             if (FAILED(hr)) {
-                fwprintf(stderr,
-                         L"[hdr] ID3D11VideoContext1 unavailable; HDR10 path rejected.\n");
+                fwprintf(stderr, hdr10Requested
+                    ? L"[hdr] ID3D11VideoContext1 unavailable; HDR10 path rejected.\n"
+                    : L"[video] ID3D11VideoContext1 unavailable; RGB input rejected.\n");
                 return hr;
             }
-            hdrOutput = true;
+            if (hdr10Requested) hdrOutput = true;
         }
+        rgbFullRange = color.range == llcv::video_color::Range::Full;
+        lastTopDown = topDown;
 
         IDXGIDevice* dxgiDevice = nullptr;
         IDXGIAdapter* adapter = nullptr;
@@ -2767,6 +2848,11 @@ struct DirectD3D11Renderer {
         SafeRelease(dxgiDevice1);
 
         inputFormat = PixelFormatDxgi(pixelFormat);
+        if (inputFormat == DXGI_FORMAT_UNKNOWN) {
+            fwprintf(stderr, L"[video] unsupported capture pixel format; refusing to "
+                              L"default the GPU input texture to NV12.\n");
+            return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+        }
         uyvyInput = pixelFormat == VideoPixelFormat::Uyvy;
         if (uyvyInput) {
             hr = uyvyRepacker.Initialize(device);
@@ -2774,6 +2860,10 @@ struct DirectD3D11Renderer {
                 LogHr(L"UYVY GPU conversion support", hr);
                 return llcv::video::kUyvyConversionUnsupported;
             }
+        }
+        if (rgb24Input) {
+            hr = rgb24Repacker.Initialize(device);
+            if (FAILED(hr)) return llcv::video::kRgb24ConversionUnsupported;
         }
         D3D11_TEXTURE2D_DESC textureDesc{};
         textureDesc.Width = static_cast<UINT>(width);
@@ -2783,7 +2873,7 @@ struct DirectD3D11Renderer {
         textureDesc.Format = inputFormat;
         textureDesc.SampleDesc.Count = 1;
         textureDesc.Usage = D3D11_USAGE_DEFAULT;
-        if (uyvyInput) textureDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        if (uyvyInput || rgb24Input) textureDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
 #ifdef LLCV_HDR_SCRGB_PROTOTYPE
         if (scrgbOutput) textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 #endif
@@ -2794,6 +2884,13 @@ struct DirectD3D11Renderer {
                 if (!uyvyInput) return hr;
                 LogHr(L"UYVY upload texture", hr);
                 return llcv::video::kUyvyConversionUnsupported;
+            }
+            if (rgb24Input) {
+                hr = rgb24Repacker.CreateOutputView(nv12Textures[i], &rgb24Views[i]);
+                if (SUCCEEDED(hr)) hr = rgb24Repacker.CreateRawTexture(
+                    static_cast<UINT>(width), static_cast<UINT>(height),
+                    &rgb24UploadTextures[i], &rgb24UploadViews[i]);
+                if (FAILED(hr)) return llcv::video::kRgb24ConversionUnsupported;
             }
             if (uyvyInput) {
                 hr = uyvyRepacker.CreateView(nv12Textures[i], &uyvyViews[i]);
@@ -3183,6 +3280,38 @@ struct DirectD3D11Renderer {
                 return FAILED(hr) ? hr : DXGI_ERROR_UNSUPPORTED;
             }
         }
+        if (rgbInput) {
+            // RGB as a Video Processor input is less commonly supported than
+            // YUV; confirm the exact input/output format+colorspace pair the
+            // SDR branch below will configure, instead of discovering a Blt
+            // failure per frame later.
+            ID3D11VideoProcessorEnumerator1* enumerator1 = nullptr;
+            hr = enumerator->QueryInterface(IID_PPV_ARGS(&enumerator1));
+            BOOL supported = FALSE;
+            if (SUCCEEDED(hr)) hr = enumerator1->CheckVideoProcessorFormatConversion(
+                inputFormat, rgbInputColorSpace, backBufferFormat,
+                DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, &supported);
+            SafeRelease(enumerator1);
+            if (FAILED(hr) || !supported) {
+                fwprintf(stderr, L"[video] exact RGB -> RGB8 conversion unsupported (input color space %u, 0x%08X).\n",
+                         static_cast<unsigned>(rgbInputColorSpace), static_cast<unsigned>(hr));
+                return FAILED(hr) ? hr : DXGI_ERROR_UNSUPPORTED;
+            }
+            const bool bottomUp = !lastTopDown;
+            D3D11_VIDEO_PROCESSOR_CAPS vpCaps{};
+            hr = enumerator->GetVideoProcessorCaps(&vpCaps);
+            if (FAILED(hr)) return hr;
+            if (bottomUp && (vpCaps.FeatureCaps & D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_MIRROR) == 0) {
+                fwprintf(stderr, L"[video] bottom-up RGB input needs Video Processor mirror "
+                                  L"support, which this driver/GPU does not advertise; refusing "
+                                  L"to render the frame upside down.\n");
+                return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+            }
+            if (!videoContext1) return E_NOINTERFACE;
+            // Source clipping is supplied in the underlying texture coordinates.
+            videoContext1->VideoProcessorSetStreamMirror(
+                processor, 0, bottomUp, FALSE, bottomUp);
+        }
         // Keep driver-selected image enhancements out of both SDR and HDR.
         // Only the user's explicit scaling filter may alter edge sharpness.
         videoContext->VideoProcessorSetStreamAutoProcessingMode(processor, 0, FALSE);
@@ -3289,8 +3418,9 @@ struct DirectD3D11Renderer {
                 hdrInputColorSpace == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020);
         } else {
 #endif
+        const RECT storageSourceRect = VideoSourceRectForStorage(sourceRect, height, rgbInput && !lastTopDown);
         videoContext->VideoProcessorSetStreamSourceRect(processor, 0, TRUE,
-                                                        &sourceRect);
+                                                        &storageSourceRect);
         const bool scaled = videoRect.right - videoRect.left != width ||
                             videoRect.bottom - videoRect.top != height;
 #ifdef LLCV_VSR_FEATURE
@@ -3361,6 +3491,9 @@ struct DirectD3D11Renderer {
                 processor, 0, hdrInputColorSpace);
             videoContext1->VideoProcessorSetOutputColorSpace1(
                 processor, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+        } else if (rgbInput) {
+            videoContext1->VideoProcessorSetStreamColorSpace1(processor, 0, rgbInputColorSpace);
+            videoContext1->VideoProcessorSetOutputColorSpace1(processor, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
         } else {
             D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputColor{};
             inputColor.YCbCr_Matrix =
@@ -3392,18 +3525,21 @@ struct DirectD3D11Renderer {
         // synchronize reuse; a three-surface ring is not a completion fence.
         activeUploadSurface = nextUploadSurface;
         nextUploadSurface = (nextUploadSurface + 1) % kUploadSurfaceCount;
-        ID3D11Texture2D* target = uyvyInput
-            ? uyvyUploadTextures[activeUploadSurface] : nv12Textures[activeUploadSurface];
+        ID3D11Texture2D* target = uyvyInput ? uyvyUploadTextures[activeUploadSurface]
+            : rgb24Input ? rgb24UploadTextures[activeUploadSurface] : nv12Textures[activeUploadSurface];
         if (context1) {
             context1->UpdateSubresource1(target, 0, nullptr, pixels, stride, 0,
                                          D3D11_COPY_DISCARD);
         } else {
             context->UpdateSubresource(target, 0, nullptr, pixels, stride, 0);
         }
-        // Only UYVY uses this one-pass GPU conversion. The existing ring size,
+        // UYVY and RGB24 each use one format-specific GPU conversion. The existing ring size,
         // raw capture sample, and all other formats remain unchanged.
         if (uyvyInput)
             uyvyRepacker.Dispatch(context, uyvyUploadViews[activeUploadSurface], uyvyViews[activeUploadSurface],
+                static_cast<UINT>(captureWidth), static_cast<UINT>(captureHeight));
+        if (rgb24Input)
+            rgb24Repacker.Dispatch(context, rgb24UploadViews[activeUploadSurface], rgb24Views[activeUploadSurface],
                 static_cast<UINT>(captureWidth), static_cast<UINT>(captureHeight));
 #ifdef LLCV_VSR_EXPERIMENT
         vsrTiming.AddUpload(std::chrono::duration<double,std::milli>(
@@ -4407,10 +4543,10 @@ static HRESULT ValidateCaptureLayout(const wchar_t* stage, const AM_MEDIA_TYPE* 
     fwprintf(stderr, L"[video-layout] %s parsed=%d actual=%s %dx%d duration=%lld bytes=%lu expected=%s %dx%d\n",
         stage, parsed ? 1 : 0, PixelFormatName(actualFormat), actualWidth, actualHeight,
         duration, actualBytes, PixelFormatName(format), width, height);
-    return llcv::video::ValidateVideoLayout(media, width, height, format, bytes, stride, fps);
+    return llcv::video::ValidateVideoLayout(media, width, height, format, bytes, stride, fps, LogModuleMessage);
 }
 
-static bool UnifiedCaptureRenderLoop(HWND host) {
+static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false) {
     const auto& preset = CurrentCapturePreset();
     g_hdrFailureDetail.store(nullptr, std::memory_order_release);
     g_captureFailureHr.store(S_OK, std::memory_order_release);
@@ -4527,7 +4663,8 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         const bool colorMetadataRelevant =
             configuredFormat == VideoPixelFormat::P010 || compressedVideo ||
             configuredFormat == VideoPixelFormat::Nv12 || configuredFormat == VideoPixelFormat::Yuy2 ||
-            configuredFormat == VideoPixelFormat::Uyvy;
+            configuredFormat == VideoPixelFormat::Uyvy || configuredFormat == VideoPixelFormat::Rgb32 ||
+            configuredFormat == VideoPixelFormat::Rgb24;
         bool directShowColorMetadataDetected = colorMetadataRelevant &&
             ResolveInitialVideoColorMetadata(videoPin, activeVideoType,
                 configuredFormat, preset.width, preset.height, configuredFps,
@@ -4548,7 +4685,9 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         llcv::video_color::Configuration sdrColor{};
         const bool rawSdr = configuredFormat == VideoPixelFormat::Nv12 ||
                             configuredFormat == VideoPixelFormat::Yuy2 ||
-                            configuredFormat == VideoPixelFormat::Uyvy;
+                            configuredFormat == VideoPixelFormat::Uyvy ||
+                            configuredFormat == VideoPixelFormat::Rgb32 ||
+                            configuredFormat == VideoPixelFormat::Rgb24;
         if (rawSdr) {
             sdrColor = ResolveRawSdrVideoColor(configuredFormat, preset.width,
                 preset.height, directShowColorInfo);
@@ -4568,7 +4707,8 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         initializationStage = L"initialize D3D11 video renderer";
         // P010 color is decided from the final connected type below. Do not
         // create a speculative HDR/SDR swapchain before negotiation completes.
-        if (configuredFormat != VideoPixelFormat::P010)
+        if (configuredFormat != VideoPixelFormat::P010 && configuredFormat != VideoPixelFormat::Rgb24 &&
+            configuredFormat != VideoPixelFormat::Rgb32)
             hr = renderer.initialize(host, preset.width, preset.height,
                                      configuredFps, rendererInputFormat,
                                      hdrInputMetadataAvailable, sdrColor, hdrColorSpace);
@@ -4617,8 +4757,11 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
         // Optional vendor control must not make unsupported devices fail to
         // start. Do not restore at shutdown: that could overwrite another
         // application's setting. SDR graph starts explicitly request SDR.
-        llcv::capture::ConfigureHardwareToneMapping(
-            capture, g_activeCaptureDeviceName, configuredFormat, LogModuleMessage, selectedVideoDevicePath);
+        if (!llcv::settings::RunHardwareToneMapping(smokeVideoOverride, [&] {
+            llcv::capture::ConfigureHardwareToneMapping(
+                capture, g_activeCaptureDeviceName, configuredFormat, LogModuleMessage, selectedVideoDevicePath);
+        }))
+            fwprintf(stderr, L"[capture-hdr] skipped hardware tone-mapping control for isolated smoke video overrides; no device protocol call.\n");
         if (FAILED(hr = graph->ConnectDirect(videoPin, grabberIn,
                                              nullptr))) break;
         // Preserve connection-only hints even if a driver omits them after
@@ -4654,14 +4797,18 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                 &connectedLayout, configuredFps, directShowColorInfo, sampleFormat))
             hr = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
         if (SUCCEEDED(hr) && rawSdr) {
-            LogDirectShowColorMetadata(L"raw SDR effective metadata", directShowColorInfo);
+            const bool rgb = configuredFormat == VideoPixelFormat::Rgb24 || configuredFormat == VideoPixelFormat::Rgb32;
+            if (!rgb) LogDirectShowColorMetadata(L"raw SDR effective metadata", directShowColorInfo);
             sdrColor = ResolveRawSdrVideoColor(configuredFormat, preset.width,
                 preset.height, directShowColorInfo);
-            fwprintf(stderr, L"[video-color] raw SDR: %s / %s (matrix: %s; range: %s)\n",
-                llcv::video_color::MatrixName(sdrColor.matrix),
-                llcv::video_color::RangeName(sdrColor.range),
-                llcv::video_color::SourceName(sdrColor.matrixSource),
-                llcv::video_color::SourceName(sdrColor.rangeSource));
+            if (rgb)
+                fwprintf(stderr, L"[video-color] RGB metadata: present=%u primaries=%u transfer=%u nominal-range=%u; selected range=%s (source: %s); YUV matrix/chroma not applicable\n",
+                    directShowColorInfo.present ? 1u : 0u, directShowColorInfo.primaries, directShowColorInfo.transferFunction,
+                    directShowColorInfo.nominalRange, llcv::video_color::RangeName(sdrColor.range), llcv::video_color::SourceName(sdrColor.rangeSource));
+            else
+                fwprintf(stderr, L"[video-color] raw SDR: %s / %s (matrix: %s; range: %s)\n",
+                    llcv::video_color::MatrixName(sdrColor.matrix), llcv::video_color::RangeName(sdrColor.range),
+                    llcv::video_color::SourceName(sdrColor.matrixSource), llcv::video_color::SourceName(sdrColor.rangeSource));
         }
         if (SUCCEEDED(hr) && compressedVideo) {
             // Drivers may publish color only after connection. Rebuild from
@@ -4698,9 +4845,11 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             hdrColorSpace = input.colorSpace;
         }
         if (configuredFps != previousFps || configuredFormat == VideoPixelFormat::P010 ||
-            ((rawSdr || compressedVideo) && !(sdrColor == renderer.sdrColor))) {
+            ((rawSdr || compressedVideo) && !(sdrColor == renderer.sdrColor)) ||
+            configuredFormat == VideoPixelFormat::Rgb32 || configuredFormat == VideoPixelFormat::Rgb24) {
             hr = renderer.initialize(host, preset.width, preset.height, configuredFps,
-                                     rendererInputFormat, hdrInputMetadataAvailable, sdrColor, hdrColorSpace);
+                                     rendererInputFormat, hdrInputMetadataAvailable, sdrColor, hdrColorSpace,
+                                     sampleFormat.topDown, directShowColorInfo);
             if (FAILED(hr)) break;
         }
         g_videoConfiguredFps.store(configuredFps, std::memory_order_release);
@@ -4715,13 +4864,21 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
             llcv::capture::VideoSampleTelemetry{&g_osdTrackingStartMs, &g_videoCapturedFrames,
               &g_videoReplacedFrames});
         auto& latest = *resources.latestVideoSample;
-        const auto screenshotFormat = rendererInputFormat == VideoPixelFormat::P010
-            ? llcv::screenshot::Format::P010 : rendererInputFormat == VideoPixelFormat::Uyvy
-            ? llcv::screenshot::Format::Uyvy : rendererInputFormat == VideoPixelFormat::Yuy2
-            ? llcv::screenshot::Format::Yuy2 : llcv::screenshot::Format::Nv12;
+        llcv::screenshot::Format screenshotFormat = llcv::screenshot::Format::Unknown;
+        switch (rendererInputFormat) {
+        case VideoPixelFormat::Nv12: screenshotFormat = llcv::screenshot::Format::Nv12; break;
+        case VideoPixelFormat::Yuy2: screenshotFormat = llcv::screenshot::Format::Yuy2; break;
+        case VideoPixelFormat::Uyvy: screenshotFormat = llcv::screenshot::Format::Uyvy; break;
+        case VideoPixelFormat::P010: screenshotFormat = llcv::screenshot::Format::P010; break;
+        case VideoPixelFormat::Rgb24: screenshotFormat = llcv::screenshot::Format::Rgb24; break;
+        case VideoPixelFormat::Rgb32: screenshotFormat = llcv::screenshot::Format::Rgb32; break;
+        default: break;
+        }
+        const bool screenshotTopDown = rendererInputFormat == VideoPixelFormat::Rgb24 ||
+            rendererInputFormat == VideoPixelFormat::Rgb32 ? sampleFormat.topDown : true;
         if (!g_screenshots.Start(preset.width, preset.height, screenshotFormat,
-                                llcv::screenshot::DefaultDirectory()))
-            fwprintf(stderr, L"[screenshot] unavailable: buffer/worker/Pictures folder initialization failed.\n");
+                                llcv::screenshot::DefaultDirectory(), screenshotTopDown))
+            fwprintf(stderr, L"[screenshot] unavailable: unsupported format or buffer/worker/Pictures folder initialization failed.\n");
         callback = new llcv::capture::VideoSampleGrabberCallback(&latest, nullptr, sampleFormat);
         hr = grabber->SetCallback(callback, 0);
         if (FAILED(hr)) break;
@@ -4904,7 +5061,8 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                 if (retryDelaysMs[attempt]) Sleep(retryDelaysMs[attempt]);
                 const HRESULT recoveryHr = renderer.initialize(
                     host, preset.width, preset.height, configuredFps,
-                    rendererInputFormat, hdrInputMetadataAvailable, sdrColor, hdrColorSpace);
+                    rendererInputFormat, hdrInputMetadataAvailable, sdrColor, hdrColorSpace,
+                    sampleFormat.topDown, directShowColorInfo);
                 if (SUCCEEDED(recoveryHr)) {
                     const bool recoveredTearing = renderer.allowTearing &&
                         g_settings.presentationMode ==
@@ -5069,7 +5227,8 @@ static bool UnifiedCaptureRenderLoop(HWND host) {
                     g_screenshots.Submit({static_cast<unsigned>(preset.width),
                         static_cast<unsigned>(preset.height), screenshotFormat, sdrColor,
                         screenshotFormat == llcv::screenshot::Format::P010 &&
-                        hdrColorSpace == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020},
+                        hdrColorSpace == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020,
+                        screenshotTopDown},
                         sampleData, static_cast<std::size_t>(std::max(0L, videoSample->GetActualDataLength())), stride);
                 } else if (SUCCEEDED(hr)) {
                     hr = E_POINTER;
@@ -6168,6 +6327,8 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
         for (const auto format : {VideoPixelFormat::Nv12,
                                   VideoPixelFormat::Yuy2,
                                   VideoPixelFormat::Uyvy,
+                                  VideoPixelFormat::Rgb24,
+                                  VideoPixelFormat::Rgb32,
                                   VideoPixelFormat::P010,
                                   VideoPixelFormat::Mjpeg}) {
             std::vector<int> frameRates;
@@ -6327,6 +6488,8 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
     for (const auto format : {VideoPixelFormat::Nv12,
                               VideoPixelFormat::Yuy2,
                               VideoPixelFormat::Uyvy,
+                              VideoPixelFormat::Rgb24,
+                              VideoPixelFormat::Rgb32,
                               VideoPixelFormat::P010,
                               VideoPixelFormat::Mjpeg}) {
         // Visibility follows the device capability report. Auto-selection
@@ -6343,6 +6506,10 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
                 ? L"YUY2 8-bit 4:2:2"
                 : format == VideoPixelFormat::Uyvy
                     ? L"UYVY / HDYC 8-bit 4:2:2"
+                : format == VideoPixelFormat::Rgb24
+                    ? L"RGB24 8-bit BGR"
+                : format == VideoPixelFormat::Rgb32
+                    ? L"XRGB (RGB32) 8-bit BGRX"
                 : format == VideoPixelFormat::P010
                     ? UI_TEXT(L"P010 10-bit HDR10")
                     : UI_TEXT(L"MJPEG (압축 호환)");
@@ -8437,6 +8604,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         g_activePixelFormat.load(std::memory_order_acquire));
     const bool compressedVideo = IsCompressedVideoFormat(activeFormat);
     const bool p010Video = activeFormat == VideoPixelFormat::P010;
+    const bool rgbVideo = activeFormat == VideoPixelFormat::Rgb24 || activeFormat == VideoPixelFormat::Rgb32;
     const bool hdrVideo = p010Video &&
         g_hdrOutputActive.load(std::memory_order_acquire);
     const auto activeColorMatrix = static_cast<llcv::video_color::Matrix>(
@@ -8447,7 +8615,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
         g_activeVideoColorMatrixSource.load(std::memory_order_acquire));
     const auto activeColorRangeSource = static_cast<llcv::video_color::Source>(
         g_activeVideoColorRangeSource.load(std::memory_order_acquire));
-    const wchar_t* chromaText = compressedVideo
+    const wchar_t* chromaText = rgbVideo ? (IsEnglishUi() ? L"RGB (no YUV chroma)" : L"RGB (YUV 색차 없음)") : compressedVideo
                                     ? L"decode→4:2:0"
                                     : (activeFormat == VideoPixelFormat::Yuy2 || activeFormat == VideoPixelFormat::Uyvy)
                                           ? L"4:2:2"
@@ -8477,7 +8645,10 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
                                                   activeColorRangeSource));
     }
     const int hdrDisplay = g_hdrDisplayState.load(std::memory_order_acquire);
-    const wchar_t* qualityText = hdrVideo
+    wchar_t rgbQualityText[128]{};
+    if (rgbVideo) swprintf_s(rgbQualityText, IsEnglishUi() ? L"BT.709/sRGB SDR · %s · D3D11 VP" : L"BT.709/sRGB SDR · %s · D3D11 VP",
+        llcv::video_color::RangeName(activeColorRange));
+    const wchar_t* qualityText = rgbVideo ? rgbQualityText : hdrVideo
         ? (hdrDisplay == 1 ? L"BT.2020 · PQ · HDR10 · Display HDR"
            : hdrDisplay == 0 ? (IsEnglishUi() ? L"BT.2020 · PQ · Display SDR (enable Windows HDR)"
                                              : L"BT.2020 · PQ · 화면 SDR (Windows HDR 켜기)")
@@ -10094,7 +10265,19 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         return 2;
     }
 #endif
+    // Validate before loading a profile: override-only invocations must not
+    // accidentally become smoke runs through substring matching.
+    int smokeArgc = 0;
+    LPWSTR* smokeArgv = CommandLineToArgvW(GetCommandLineW(), &smokeArgc);
+    if (!smokeArgv) return 2;
+    std::vector<std::wstring> smokeArgs;
+    for (int i=1; i<smokeArgc; ++i) smokeArgs.emplace_back(smokeArgv[i]);
+    LocalFree(smokeArgv);
+    llcv::settings::AppSettings smokeValidation{};
+    if (!llcv::settings::ApplySmokeVideoOptions(smokeArgs, smokeValidation)) return 2;
     LoadSettings();
+    bool smokeVideoOverride = false;
+    if (!llcv::settings::ApplySmokeVideoOptions(smokeArgs, g_settings, &smokeVideoOverride)) return 2;
 #ifdef LLCV_UPSCALING_TELEMETRY
     // Only the separately named diagnostic viewer defines this flag. Its
     // TestProfile boundary prevents reading/migrating/writing real settings.
@@ -10469,7 +10652,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     std::thread renderThread(AudioRenderThread);
     std::atomic<bool> smokeCaptureFailed{false};
     g_videoOutputThreadActive.store(!g_settings.audioOnly, std::memory_order_release);
-    std::thread unifiedCaptureThread([hwnd, smokeTest, &smokeCaptureFailed]() {
+    std::thread unifiedCaptureThread([hwnd, smokeTest, smokeVideoOverride, &smokeCaptureFailed]() {
         struct OutputCompletion {
             HWND hwnd;
             ~OutputCompletion() {
@@ -10480,7 +10663,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         } completion{hwnd};
         const bool initialized = g_settings.audioOnly
             ? AudioOnlyCaptureLoop()
-            : UnifiedCaptureRenderLoop(g_videoHost);
+            : UnifiedCaptureRenderLoop(g_videoHost, smokeVideoOverride);
         if (initialized && g_captureGraphCompleted.load(std::memory_order_acquire) && g_running.load()) {
             // EOS is a normal end, not a disconnected device or startup error.
             // Both loops have already released their power request and graph.
@@ -10600,6 +10783,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                     wcscpy_s(message, IsEnglishUi()
                         ? L"This GPU or driver does not support UYVY/HDYC conversion.\n\nSelect NV12 or YUY2 if the capture device offers it, or update the graphics driver. UYVY requires integer texture reads, a YUY2 write view, and YUY2 video processing."
                         : L"현재 GPU 또는 드라이버에서 UYVY/HDYC 변환을 지원하지 않습니다.\n\n캡처 장치가 제공한다면 NV12 또는 YUY2를 선택하거나 그래픽 드라이버를 업데이트해 주세요. UYVY에는 정수 텍스처 읽기, YUY2 쓰기 뷰와 비디오 처리 지원이 필요합니다.");
+                } else if ((failure == DXGI_ERROR_UNSUPPORTED || failure == E_NOINTERFACE ||
+                            failure == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) || failure == llcv::video::kRgb24ConversionUnsupported) &&
+                           (static_cast<VideoPixelFormat>(g_activePixelFormat.load()) == VideoPixelFormat::Rgb24 ||
+                            static_cast<VideoPixelFormat>(g_activePixelFormat.load()) == VideoPixelFormat::Rgb32)) {
+                    wcscpy_s(message, IsEnglishUi()
+                        ? L"RGB input is unsupported by this GPU/driver or color metadata. RGB24 and XRGB (RGB32) require SDR BT.709/sRGB (or unspecified) primaries and transfer; PQ, HLG and BT.2020 are unsupported. Check the diagnostic log for the rejected capability or metadata."
+                        : L"이 GPU/드라이버 또는 색상 메타데이터는 RGB 입력을 지원하지 않습니다. RGB24와 XRGB (RGB32)는 SDR BT.709/sRGB (또는 미지정) 색역과 전달 함수를 사용합니다. PQ, HLG, BT.2020은 지원하지 않습니다. 거부된 기능 또는 메타데이터는 진단 로그를 확인하세요.");
                 } else if (failure == DXGI_ERROR_UNSUPPORTED &&
                     static_cast<VideoPixelFormat>(g_activePixelFormat.load()) == VideoPixelFormat::P010) {
                     const wchar_t* detail = g_hdrFailureDetail.load(std::memory_order_acquire);

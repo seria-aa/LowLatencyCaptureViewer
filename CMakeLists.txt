@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 2.1.8 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 2.1.9 LANGUAGES CXX)
 
 include(cmake/MsvcDependencies.cmake)
 
@@ -49,7 +49,7 @@ add_executable(LowLatencyCaptureViewer
 
 option(LLCV_UPSCALING_DIAGNOSTIC "Build separate, profile-isolated overflow diagnostic tools (not for release)" OFF)
 include(cmake/Upscaling.cmake)
-target_link_libraries(LowLatencyCaptureViewer PRIVATE llcv_upscaling llcv_uyvy)
+target_link_libraries(LowLatencyCaptureViewer PRIVATE llcv_upscaling llcv_uyvy llcv_rgb24)
 
 target_include_directories(LowLatencyCaptureViewer PRIVATE
     src
@@ -285,7 +285,7 @@ if(BUILD_TESTING)
     set_target_properties(RecordingSettingsTests PROPERTIES WIN32_EXECUTABLE FALSE)
     target_compile_options(RecordingSettingsTests PRIVATE /W4 /EHsc /utf-8)
     add_test(NAME RecordingSettingsTests COMMAND RecordingSettingsTests)
-    set_tests_properties(RecordingSettingsTests PROPERTIES TIMEOUT 45)
+    set_tests_properties(RecordingSettingsTests PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
     add_executable(RecordingShortcutTests tests/RecordingShortcutTests.cpp
         src/settings/SettingsStore.cpp src/ui/SettingsView.cpp src/ui/PresentationModeUi.cpp
         src/ui/SettingsDialogControls.cpp src/ui/UiText.cpp
@@ -296,7 +296,7 @@ if(BUILD_TESTING)
     target_compile_options(RecordingShortcutTests PRIVATE /W4 /EHsc /utf-8)
     set_target_properties(RecordingShortcutTests PROPERTIES WIN32_EXECUTABLE FALSE)
     add_test(NAME RecordingShortcutTests COMMAND RecordingShortcutTests)
-    set_tests_properties(RecordingShortcutTests PROPERTIES TIMEOUT 60)
+    set_tests_properties(RecordingShortcutTests PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
     add_executable(RecordingSafetyPolicyTests tests/RecordingSafetyPolicyTests.cpp)
     target_include_directories(RecordingSafetyPolicyTests PRIVATE src)
     target_compile_definitions(RecordingSafetyPolicyTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -411,11 +411,11 @@ if (BUILD_TESTING)
     target_compile_options(RecordingHelpTests PRIVATE /W4 /EHsc /utf-8)
     set_target_properties(RecordingHelpTests PROPERTIES WIN32_EXECUTABLE FALSE)
     add_test(NAME RecordingHelpTests COMMAND RecordingHelpTests)
-    set_tests_properties(RecordingHelpTests PROPERTIES TIMEOUT 120)
+    set_tests_properties(RecordingHelpTests PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
     add_test(NAME ViewerHelpImeTests COMMAND ViewerHelpTests --with-ime)
     # Each stress test opens/closes 320 native help windows. Preserve the full
     # coverage while allowing headroom alongside CPU-heavy parallel replays.
-    set_tests_properties(ViewerHelpTests ViewerHelpImeTests PROPERTIES TIMEOUT 120)
+    set_tests_properties(ViewerHelpTests ViewerHelpImeTests PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
     add_executable(ScreenshotTests tests/ScreenshotTests.cpp tests/HdrScreenshotReference.cpp
         src/screenshot/ScreenshotPixels.cpp src/screenshot/ScreenshotService.cpp)
     target_include_directories(ScreenshotTests PRIVATE src)
@@ -538,7 +538,9 @@ if (BUILD_TESTING)
     set_tests_properties(SettingsModeCacheTests PROPERTIES TIMEOUT 15)
     # Native control creation is substantially slower than pure geometry tests,
     # especially when other replay tests run concurrently on CI.
-    set_tests_properties(SettingsViewTests PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+    # Full language/DPI/option matrix takes ~150s even on the previous release.
+    # Keep every assertion; allow slower CI hosts to complete the same matrix.
+    set_tests_properties(SettingsViewTests PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
     add_executable(SettingsThemeTests tests/SettingsThemeTests.cpp
         src/ui/SettingsTheme.cpp src/ui/SettingsView.cpp src/ui/PresentationModeUi.cpp
         src/ui/SettingsDialogControls.cpp src/ui/UiText.cpp)
@@ -554,7 +556,7 @@ if (BUILD_TESTING)
     # Hidden native fixture clicks can take 2 s each on the test host.
     # Keep all 32 lifecycle checks; allow the
     # measured ~70 s run instead of mistaking that finite work for a deadlock.
-    set_tests_properties(SettingsThemeTests PROPERTIES TIMEOUT 120)
+    set_tests_properties(SettingsThemeTests PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
     # Local visual/keyboard QA with synthetic devices; never installed and
     # never reads or saves a user's settings or opens capture/audio hardware.
     get_target_property(settings_preview_sources SettingsThemeTests SOURCES)
@@ -628,6 +630,8 @@ if (BUILD_TESTING)
     set_property(SOURCE tests/CmaaNisTests.cpp APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
     add_test(NAME CmaaNisRegression COMMAND CmaaNisTests)
     add_test(NAME CmaaNisHdr COMMAND CmaaNisTests --hdr)
+    add_test(NAME CmaaNisRgb COMMAND CmaaNisTests --rgb)
+    set_tests_properties(CmaaNisRgb PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE LABELS GPU)
     set_tests_properties(CmaaNisRegression CmaaNisHdr PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
     add_executable(UpscalingSafetyTests tests/UpscalingSafetyTests.cpp)
     target_include_directories(UpscalingSafetyTests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/upscaling")
@@ -638,6 +642,14 @@ if (BUILD_TESTING)
     add_test(NAME UpscalingSafetyHardware COMMAND UpscalingSafetyTests)
     add_test(NAME UpscalingSafetyWarp COMMAND UpscalingSafetyTests --warp)
     set_tests_properties(UpscalingSafetyHardware UpscalingSafetyWarp PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS GPU)
+    add_executable(Rgb24RepackerTests tests/Rgb24RepackerTests.cpp)
+    target_compile_definitions(Rgb24RepackerTests PRIVATE NOMINMAX)
+    target_compile_options(Rgb24RepackerTests PRIVATE /W4 /EHsc /permissive- /utf-8)
+    target_link_libraries(Rgb24RepackerTests PRIVATE llcv_rgb24 d3d11)
+    set_target_properties(Rgb24RepackerTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_test(NAME Rgb24RepackerHardware COMMAND Rgb24RepackerTests)
+    add_test(NAME Rgb24RepackerWarp COMMAND Rgb24RepackerTests --warp)
+    set_tests_properties(Rgb24RepackerHardware Rgb24RepackerWarp PROPERTIES TIMEOUT 90 LABELS GPU)
     add_executable(UyvyRepackerTests tests/UyvyRepackerTests.cpp)
     target_compile_definitions(UyvyRepackerTests PRIVATE NOMINMAX)
     target_compile_options(UyvyRepackerTests PRIVATE /W4 /EHsc /permissive- /utf-8)
@@ -785,9 +797,12 @@ if (BUILD_TESTING)
     add_test(NAME HdrVsrPipelineTests COMMAND HdrPipelineTests --vsr-hdr)
     set_tests_properties(HdrVsrPipelineTests PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77 LABELS GPU)
     add_test(NAME SdrPipelineTests COMMAND HdrPipelineTests --sdr-only)
+    add_test(NAME Rgb32PipelineTests COMMAND HdrPipelineTests --rgb32)
+    add_test(NAME Rgb24PipelineTests COMMAND HdrPipelineTests --rgb24)
     add_test(NAME OverlayUiTests COMMAND HdrPipelineTests --osd-ui)
     set_tests_properties(OverlayUiTests PROPERTIES TIMEOUT 60 LABELS GPU)
     set_tests_properties(SdrPipelineTests PROPERTIES TIMEOUT 90 LABELS GPU)
+    set_tests_properties(Rgb32PipelineTests Rgb24PipelineTests PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77 LABELS GPU)
     set_tests_properties(HdrPipelineTests PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77 LABELS GPU)
 
     add_executable(MonitorMoveTests tests/MonitorMoveTests.cpp
@@ -1070,6 +1085,27 @@ target_compile_options(LLCV_RecordingStorage PRIVATE /W4 /EHsc /permissive- /utf
 target_link_libraries(LLCV_RecordingStorage PUBLIC ole32 mfplat mfuuid)
 include(cmake/RecordingFFmpeg.cmake)
 if(BUILD_TESTING)
+    add_executable(RgbRecordingConverterTests tests/RgbRecordingConverterTests.cpp)
+    target_include_directories(RgbRecordingConverterTests PRIVATE src)
+    target_compile_definitions(RgbRecordingConverterTests PRIVATE NOMINMAX)
+    target_compile_options(RgbRecordingConverterTests PRIVATE /W4 /EHsc /utf-8)
+    target_link_libraries(RgbRecordingConverterTests PRIVATE mfplat mfuuid ole32)
+    set_target_properties(RgbRecordingConverterTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_test(NAME RgbRecordingConverterTests COMMAND RgbRecordingConverterTests)
+    add_executable(RgbRecordingPolicyTests tests/RgbRecordingPolicyTests.cpp)
+    target_include_directories(RgbRecordingPolicyTests PRIVATE src)
+    target_compile_definitions(RgbRecordingPolicyTests PRIVATE NOMINMAX)
+    if(MSVC)
+        target_compile_options(RgbRecordingPolicyTests PRIVATE /W4 /EHsc /utf-8)
+    endif()
+    set_target_properties(RgbRecordingPolicyTests PROPERTIES WIN32_EXECUTABLE FALSE)
+    add_test(NAME RgbRecordingPolicyTests COMMAND RgbRecordingPolicyTests)
+    if(LLCV_RECORDING)
+    foreach(rgb_case rgb24 rgb32 rgb24-pause rgb32-split rgb24-scale rgb32-hevc rgb24-color rgb32-color rgb24-color-scale rgb32-color-scale)
+        add_test(NAME Recording_${rgb_case} COMMAND RecordingTests --${rgb_case})
+        set_tests_properties(Recording_${rgb_case} PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+    endforeach()
+    endif()
     add_executable(RecordingStorageTests tests/RecordingStorageTests.cpp)
     target_link_libraries(RecordingStorageTests PRIVATE LLCV_RecordingStorage)
     target_compile_definitions(RecordingStorageTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -1187,6 +1223,8 @@ if(BUILD_TESTING AND LLCV_RECORDING_FFMPEG_ROOT)
     find_program(LLCV_TEST_FFMPEG NAMES ffmpeg DOC "FFmpeg executable for independent recording regression tests")
     find_program(LLCV_TEST_FFPROBE NAMES ffprobe DOC "FFprobe executable for independent recording regression tests")
     if(Python3_Interpreter_FOUND AND LLCV_TEST_FFMPEG AND LLCV_TEST_FFPROBE)
+        add_test(NAME RecordingSegmentRecoveryPolicyTests COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/VerifyRecordingSegmentsTests.py")
         foreach(codec av1 hevc)
             add_test(NAME RecordingSegments_${codec}_Crash COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/Verify-RecordingSegments.py"
@@ -1465,7 +1503,8 @@ install(DIRECTORY docs DESTINATION .
         PATTERN "SPATIAL_UPSCALING_FHD_RECOMPARISON.md" EXCLUDE
         PATTERN "UPSCALING_BOUNDARY_SAFETY.md" EXCLUDE
         PATTERN "UPSCALING_OVERFLOW_DIAGNOSTIC.md" EXCLUDE
-        PATTERN "UYVY_HDYC_SUPPORT.md" EXCLUDE)
+        PATTERN "UYVY_HDYC_SUPPORT.md" EXCLUDE
+        PATTERN "RGB_CAPTURE_SUPPORT.md" EXCLUDE)
 
 if(BUILD_TESTING AND LLCV_RECORDING)
     add_executable(TestProfileTests tests/TestProfileTests.cpp src/settings/SettingsStore.cpp src/recording/RecordingOptions.cpp)

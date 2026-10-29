@@ -4,7 +4,7 @@
 
 [README](../README.ko.md) · [English](INDEX.md)
 
-현재 사용 가이드는 **LLCV 2.1.8** 기준입니다. 평소 사용에는 아래 가이드를 참고하세요.
+현재 사용 가이드는 **LLCV 2.1.9** 기준입니다. 평소 사용에는 아래 가이드를 참고하세요.
 과거 기록에 적힌 기능·기본값·테스트 결과는 해당 버전과 시험 환경을 기준으로 합니다.
 사용 가이드와 필요한 이미지는 배포본에 포함합니다. 개발·검증 기록은 GitHub 링크로 제공하며 인터넷 연결이 필요합니다.
 
@@ -27,6 +27,7 @@
 
 ## 릴리스 노트
 
+- [v2.1.9](release-notes-v2.1.9.md)
 - [v2.1.8](release-notes-v2.1.8.md)
 - [v2.1.7](release-notes-v2.1.7.md)
 - [v2.1.6](release-notes-v2.1.6.md)
@@ -107,6 +108,8 @@
 - [v2.0.0 release-readiness audit](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/tests/RELEASE_V2_0_0_AUDIT.md)
 - [v2.0.1 release-readiness audit](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/tests/RELEASE_V2_0_1_AUDIT.md)
 - [v2.0.2 release-readiness audit](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/tests/RELEASE_V2_0_2_AUDIT.md)
+- [v2.1.9 릴리스 준비·검증 범위](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/tests/RELEASE_V2_1_9_AUDIT.md)
+- [RGB 입력·녹화 구현 및 검증](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/docs/RGB_CAPTURE_SUPPORT.md)
 - [v2.1.8 릴리스 준비·검증 범위](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/tests/RELEASE_V2_1_8_AUDIT.md)
 - [업스케일링 경계 안전성 검증](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/docs/UPSCALING_BOUNDARY_SAFETY.md)
 - [설정과 분리된 오버플로 진단](https://github.com/seria-aa/LowLatencyCaptureViewer/blob/main/docs/UPSCALING_OVERFLOW_DIAGNOSTIC.md)

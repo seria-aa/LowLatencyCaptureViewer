@@ -123,6 +123,8 @@ const wchar_t* PixelFormatSettingName(VideoPixelFormat format) {
     case VideoPixelFormat::Mjpeg: return L"MJPEG";
     case VideoPixelFormat::P010: return L"P010";
     case VideoPixelFormat::Uyvy: return L"UYVY";
+    case VideoPixelFormat::Rgb24: return L"RGB24";
+    case VideoPixelFormat::Rgb32: return L"RGB32";
     default: return L"Auto";
     }
 }
@@ -357,6 +359,10 @@ LoadResult LoadFromIni(const std::wstring& path) {
         settings.pixelFormat = VideoPixelFormat::Mjpeg;
     } else if (_wcsicmp(pixelFormat.c_str(), L"P010") == 0) {
         settings.pixelFormat = VideoPixelFormat::P010;
+    } else if (_wcsicmp(pixelFormat.c_str(), L"RGB24") == 0) {
+        settings.pixelFormat = VideoPixelFormat::Rgb24;
+    } else if (_wcsicmp(pixelFormat.c_str(), L"RGB32") == 0 || _wcsicmp(pixelFormat.c_str(), L"XRGB") == 0) {
+        settings.pixelFormat = VideoPixelFormat::Rgb32;
     } else if (_wcsicmp(pixelFormat.c_str(), L"UYVY") == 0 ||
                _wcsicmp(pixelFormat.c_str(), L"HDYC") == 0) {
         settings.pixelFormat = VideoPixelFormat::Uyvy;

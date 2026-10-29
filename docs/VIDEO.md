@@ -49,12 +49,31 @@ resolution is saved and does not change when the settings or viewer window is
 moved to another monitor.
 
 Auto pixel format prefers uncompressed NV12, followed by YUY2, then UYVY/HDYC. Every NV12,
-YUY2, UYVY/HDYC, P010, and MJPEG format reported by the device at the selected resolution
+YUY2, UYVY/HDYC, P010, MJPEG, RGB24 and XRGB (RGB32) format reported by the device at the selected resolution
 is listed regardless of performance. **MJPEG (compressed
 compatibility)** is never chosen by Auto and must be selected explicitly.
 
 H.264/AVC and MPEG-4 are not supported. Their inter-frame references and decoder
 reordering make a consistently low-latency path difficult to guarantee.
+
+<br>
+
+## RGB24 and XRGB (RGB32)
+
+Manually select RGB SDR when the device advertises it at the chosen resolution/FPS.
+Auto retains NV12 → YUY2 → UYVY/HDYC priority.
+RGB24 stores BGR bytes; XRGB stores BGRX and ignores X.
+Playback, source screenshots and recording honor orientation and the SDR range setting.
+
+RGB24 is GPU-repacked for display; XRGB feeds the existing video processor directly.
+NVIDIA VSR can be selected, mutually exclusive with CMAA2→NIS. Effects can differ by
+input format, and accepted requests do not certify enhancement activation.
+Source PNGs exclude VSR and OSD.
+
+Recording converts RGB on its worker to BT.709 Limited NV12 (4:2:0).
+See [recording safeguards](RECORDING.md) for headroom checks and memory limits.
+RGB capture/recording is SDR-only, not an HDR-console capture workaround.
+NV12 remains the recommended general low-latency input.
 
 <br>
 
@@ -67,7 +86,7 @@ Explicit device color metadata and the user's SDR range setting remain effective
 UYVY/HDYC recording is not supported: select NV12, YUY2 or MJPEG to record.
 This uses DirectShow, not the separate Blackmagic DeckLink SDK; a device name
 appearing in the list does not guarantee a compatible mode at every resolution.
-XRGB/RGB32 and v210 inputs remain unsupported.
+v210 (10-bit 4:2:2) input is not supported.
 
 **NV12 is the recommended low-latency format.** It transfers 12 bits per pixel,
 compared with 16 bits per pixel for YUY2, during the system-memory-to-D3D11

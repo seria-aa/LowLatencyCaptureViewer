@@ -7,11 +7,11 @@
 [1. Versioning](#1-versioning) · [2. Build and verify](#2-build-and-verify) · [3. Package](#3-package) · [4. Publish](#4-publish)
 
 Use this checklist to keep versioning, builds, packages, and GitHub releases
-consistent. The `agent/release-v2.1.8` branch below is an example name, not a
+consistent. The `agent/release-v2.1.9` branch below is an example name, not a
 confirmation that the branch exists. Before publication, confirm the actual
 release branch and update the commands to match.
-All executable examples below are for **v2.1.8**, using the compact build-folder
-name `build-v2180-release`. For another version, update the version, build
+All executable examples below are for **v2.1.9**, using the compact build-folder
+name `build-v2190-release`. For another version, update the version, build
 folder, and output paths together; do not substitute a dotted version into
 the build-folder name and leave the packaging defaults unchanged.
 
@@ -19,7 +19,7 @@ the build-folder name and leave the packaging defaults unchanged.
 
 ## 1. Versioning
 
-Use `v2.1.8` for the Git tag and app version label. Resource and installer
+Use `v2.1.9` for the Git tag and app version label. Resource and installer
 version fields use the numeric version without `v`. Keep these locations aligned:
 
 - `project(... VERSION ...)` in `CMakeLists.txt`
@@ -29,14 +29,14 @@ version fields use the numeric version without `v`. Keep these locations aligned
   `installer/LowLatencyCaptureViewer.iss`
 - default build/output paths in `tools/package-v1.ps1`
 - current-version headers in `BUILD_INFO.txt`, `DEPENDENCIES.txt`, and `실행안내.txt`
-- `docs/release-notes-v2.1.8.md`
+- `docs/release-notes-v2.1.9.md`
 - current version/changes in both READMEs and guides, settings example images and captions
 
 Search for stale active version strings after editing. Historical release
 notes and changelog entries keep their original version numbers.
 
 ```powershell
-rg -n "2\.1\.7|build-v2170-release" CMakeLists.txt src installer tools DEPENDENCIES.txt 실행안내.txt
+rg -n "2\.1\.8|build-v2180-release" CMakeLists.txt src installer tools DEPENDENCIES.txt 실행안내.txt
 ```
 
 <br>
@@ -54,7 +54,7 @@ diagnostic build directory must not be reused. Verification is recorded in
 
 Use newly built isolated-profile test/private-preview executables for validation.
 Launching the regular app without diagnostic arguments still uses actual user settings.
-See `tests/RELEASE_V2_1_8_AUDIT.md` for the current validation scope and
+See `tests/RELEASE_V2_1_9_AUDIT.md` for the current validation scope and
 `tests/PROFILE_ISOLATION.md` for the isolation policy.
 
 Use an x64 Visual Studio developer PowerShell at the repository root. Set the
@@ -64,9 +64,9 @@ check the diff.
 ```powershell
 chcp.com 65001 > $null
 .\tools\Build-RecordingFFmpeg.ps1
-cmake -S . -B build-v2180-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC=OFF -DLLCV_RECORDING_FFMPEG_ROOT="$PWD/outputs/dependencies/recording-ffmpeg/install"
-cmake --build build-v2180-release
-ctest --test-dir build-v2180-release --output-on-failure
+cmake -S . -B build-v2190-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC=OFF -DLLCV_RECORDING_FFMPEG_ROOT="$PWD/outputs/dependencies/recording-ffmpeg/install"
+cmake --build build-v2190-release
+ctest --test-dir build-v2190-release --output-on-failure
 git diff --check
 ```
 
@@ -84,22 +84,22 @@ long-duration playback.
 Build exactly these two release assets:
 
 ```text
-LowLatencyCaptureViewer_v2.1.8_Setup.exe
-LowLatencyCaptureViewer_v2.1.8_x64.zip
+LowLatencyCaptureViewer_v2.1.9_Setup.exe
+LowLatencyCaptureViewer_v2.1.9_x64.zip
 ```
 
 ```powershell
 chcp.com 65001 > $null
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
-  -Version 2.1.8 -BuildDir ..\build-v2180-release -OutputDir outputs\v2.1.8
+  -Version 2.1.9 -BuildDir ..\build-v2190-release -OutputDir outputs\v2.1.9
 & "C:\Program Files\Inno Setup 7\ISCC.exe" `
-  "--define=BuildDir=..\build-v2180-release" ".\installer\LowLatencyCaptureViewer.iss"
+  "--define=BuildDir=..\build-v2190-release" ".\installer\LowLatencyCaptureViewer.iss"
 ```
 
 Do not ship `settings.ini`, `%LOCALAPPDATA%` logs, `build-*` directories, PDB
 files, ILK files, or test executables. Verify the executable inside the ZIP and
-the installer version before uploading: v2.1.8 uses a numeric file version of
-`2.1.8` or `2.1.8.0`, not the previous release's executable under a new ZIP name.
+the installer version before uploading: v2.1.9 uses a numeric file version of
+`2.1.9` or `2.1.9.0`, not the previous release's executable under a new ZIP name.
 
 Keep upscaling experiment reports, comparison images, shader sources and manual test tools out of
 user packages. Production NIS/CMAA2 shaders are embedded; their notices must still be shipped.
@@ -120,7 +120,7 @@ and common accidental build/settings files.
 ```powershell
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $releaseArchive = [IO.Compression.ZipFile]::OpenRead(
-  (Resolve-Path 'outputs\v2.1.8\LowLatencyCaptureViewer_v2.1.8_x64.zip').Path)
+  (Resolve-Path 'outputs\v2.1.9\LowLatencyCaptureViewer_v2.1.9_x64.zip').Path)
 try {
   foreach ($required in @('LowLatencyCaptureViewer.exe', 'LICENSE',
       'ASIO-SDK-LICENSE.txt', 'ASIO-HOST-LICENSE.txt', 'PRETENDARD-LICENSE.txt',
@@ -155,21 +155,21 @@ Review the worktree and stage only confirmed files before committing.
 ```powershell
 git status --short
 git diff --cached --check
-git commit -m "Prepare v2.1.8 release"
-git push origin agent/release-v2.1.8
+git commit -m "Prepare v2.1.9 release"
+git push origin agent/release-v2.1.9
 ```
 
 Publish from the branch HEAD using the matching release-notes file. Add
-`--prerelease` only when a beta is intended; **v2.1.8 is a regular release**.
+`--prerelease` only when a beta is intended; **v2.1.9 is a regular release**.
 
 ```powershell
-gh release create v2.1.8 `
-  "outputs\v2.1.8\LowLatencyCaptureViewer_v2.1.8_Setup.exe" `
-  "outputs\v2.1.8\LowLatencyCaptureViewer_v2.1.8_x64.zip" `
+gh release create v2.1.9 `
+  "outputs\v2.1.9\LowLatencyCaptureViewer_v2.1.9_Setup.exe" `
+  "outputs\v2.1.9\LowLatencyCaptureViewer_v2.1.9_x64.zip" `
   --repo seria-aa/LowLatencyCaptureViewer `
-  --target agent/release-v2.1.8 `
-  --title "LLCV v2.1.8" `
-  --notes-file ".\docs\release-notes-v2.1.8.md"
+  --target agent/release-v2.1.9 `
+  --title "LLCV v2.1.9" `
+  --notes-file ".\docs\release-notes-v2.1.9.md"
 ```
 
 Never overwrite published tags or assets. Fix a published-release issue in the

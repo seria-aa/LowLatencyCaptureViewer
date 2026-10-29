@@ -5,10 +5,12 @@
 
 namespace llcv::recording {
 // Playback and source screenshots support packed UYVY/HDYC, but recording
-// currently accepts only NV12/YUY2/MJPEG. Keep this separate from malformed
+// currently rejects UYVY/HDYC. Keep this separate from malformed
 // media types so the UI can explain the supported alternative before startup.
 inline constexpr HRESULT UnsupportedUyvyRecording =
     MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x401);
+inline constexpr HRESULT RgbRecordingTooSlow =
+    MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x403);
 enum class Phase { Idle, Starting, Recording, Finalizing, Saved, Failed };
 enum class Failure {
     None, DiskFull, WriteFailed, EncoderOverload, EncoderFailed,
@@ -26,6 +28,8 @@ struct Snapshot {
     // Worker-side low-space safety check; not a recording-time estimate.
     uint64_t freeBytes=0;
     bool freeBytesKnown=false;
+    double rgbConversionMs=0,rgbBudgetMs=0;
+    uint64_t rgbBufferBytes=0;
     std::wstring path;
 };
 }

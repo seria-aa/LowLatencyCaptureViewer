@@ -1028,7 +1028,8 @@ const wchar_t* SettingsHelpText(SettingsHelpTopic topic, bool english) {
         case SettingsHelpTopic::SdrRange:
             return L"SDR color range\n\n"
                    L"Auto keeps the existing behavior: follow color metadata, or use Limited for NV12/YUY2 "
-                   L"and Full for MJPEG when range metadata is missing.\n\n"
+                   L"and Full for MJPEG, RGB24 and XRGB (RGB32) when range metadata is missing. "
+                   L"RGB requires SDR BT.709/sRGB or unspecified metadata; PQ, HLG and BT.2020 are unsupported. RGB supports screenshots, NVIDIA VSR requests, and SDR recording (worker conversion to BT.709 Limited NV12). Driver acceptance does not confirm VSR activation.\n\n"
                    L"Select Limited or Full only to correct misreported input levels. This changes input "
                    L"interpretation, not the HDMI output of your console. Playback, screenshots and recordings "
                    L"use the same range. P010/HDR is unaffected. No frame queue or processing pass is added.\n\n"
@@ -1092,7 +1093,8 @@ const wchar_t* SettingsHelpText(SettingsHelpTopic topic, bool english) {
     case SettingsHelpTopic::SdrRange:
         return L"SDR 색 범위 안내\n\n"
                L"자동은 기존 동작을 유지합니다. 색 범위 메타데이터를 따르고, 정보가 없으면 NV12/YUY2는 "
-               L"Limited, MJPEG는 Full로 해석합니다.\n\n"
+               L"Limited, MJPEG·RGB24·XRGB (RGB32)는 Full로 해석합니다. "
+               L"RGB는 SDR BT.709/sRGB 또는 미지정 메타데이터가 필요하며 PQ·HLG·BT.2020은 지원하지 않습니다. RGB 스크린샷·NVIDIA VSR 요청·SDR 녹화를 지원합니다. 녹화는 작업 스레드에서 BT.709 Limited NV12로 변환하며, VSR 요청 수락이 실제 활성화를 보장하지는 않습니다.\n\n"
                L"입력의 색 범위 정보가 잘못된 경우에만 Limited 또는 Full을 선택하세요. 콘솔의 HDMI "
                L"출력을 바꾸는 설정은 아닙니다. 재생·스크린샷·녹화에 같은 범위를 적용하며, P010/HDR에는 "
                L"적용하지 않습니다. 프레임 큐나 처리 단계를 추가하지 않습니다.\n\n"

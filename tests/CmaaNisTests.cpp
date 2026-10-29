@@ -231,6 +231,41 @@ static int Difference(const std::vector<BYTE>& a,const std::vector<BYTE>& b,bool
     }
     return result;
 }
+static void RgbRegression() {
+    constexpr UINT w=320,h=180;
+    HWND hwnd=Window(480,270);
+    g_settings.presentationMode=PresentationMode::VSync;
+    for (bool pattern : {false,true}) {
+        std::vector<BYTE> outputs[2][2];
+        for (int f=0;f<2;++f) {
+            const UINT bpp=f==0?3u:4u, stride=w*bpp;
+            std::vector<BYTE> raw(size_t(stride)*h);
+            for (UINT y=0;y<h;++y) for(UINT x=0;x<w;++x) {
+                auto* p=raw.data()+size_t(y)*stride+x*bpp;
+                const bool region=pattern && (x>60+y/4) && y<120;
+                p[0]=region?180:48; p[1]=region?70:100; p[2]=region?210:140;
+                if(bpp==4) p[3]=BYTE(x+y);
+            }
+            const auto source=raw;
+            llcv::video_color::Configuration color{};color.range=llcv::video_color::Range::Full;
+            g_cmaaNisRequest=-1; DirectD3D11Renderer r;
+            Check(r.initialize(hwnd,w,h,60,f==0?VideoPixelFormat::Rgb24:VideoPixelFormat::Rgb32,false,color),"RGB upscale initialize");
+            Require(!r.cmaaNisPipeline.Enabled(),"RGB upscale OFF");
+            Render(r,raw,stride); outputs[f][0]=Read(r);
+            g_cmaaNisRequest=15;Check(r.configureVideoOutput(w,h),"RGB upscale enable");
+            Require(r.cmaaNisPipeline.Enabled(),"RGB production upscale ON");
+            Render(r,raw,stride);outputs[f][1]=Read(r);
+            Require(raw==source,"RGB source preserved during upscaling");
+            if(!pattern) Require(Difference(outputs[f][0],outputs[f][1])<=2,"RGB flat color remains stable");
+            g_cmaaNisRequest=-1; Check(r.configureVideoOutput(w,h),"RGB upscale disable");
+            Render(r,raw,stride);Require(Read(r)==outputs[f][0],"RGB OFF restores output");
+        }
+        for(int enabled=0;enabled<2;++enabled)
+            Require(Difference(outputs[0][enabled],outputs[1][enabled])<=2,"RGB24/RGB32 equivalent final output");
+    }
+    DestroyWindow(hwnd);g_cmaaNisRequest=-1;
+    std::puts("PASS: RGB24/RGB32 production upscale ON/OFF, flat/asymmetric frames, source preserved");
+}
 static void Regression() {
     {
         const auto settings=g_settings;const int request=g_cmaaNisRequest.load();
@@ -645,6 +680,7 @@ int main(int argc,char** argv) {
     else if(argc>=4 && std::string(argv[1])=="--reference")ApprovedReference(argv[2],argv[3]);
     else if(argc>=3 && std::string(argv[1])=="--benchmark")BenchmarkProduction(argv[2]);
     else if(argc>=2 && std::string(argv[1])=="--hdr")HdrBypassRegression();
+    else if(argc>=2 && std::string(argv[1])=="--rgb")RgbRegression();
 #ifdef LLCV_RECORDING
     else if(argc>=3 && std::string(argv[1])=="--recording")RecordingIntegration(argv[2]);
 #endif

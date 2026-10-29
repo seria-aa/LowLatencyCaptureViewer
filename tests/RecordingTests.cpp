@@ -112,13 +112,24 @@ static void TestRecordingColor(bool scale,llcv::settings::VideoPixelFormat forma
     using namespace llcv;
     const bool mjpeg=format==settings::VideoPixelFormat::Mjpeg;
     const bool yuy2=format==settings::VideoPixelFormat::Yuy2;
-    const char* input=mjpeg?"MJPEG":yuy2?"YUY2":"NV12";
+    const bool rgb24=format==settings::VideoPixelFormat::Rgb24;
+    const bool rgb=rgb24 || format==settings::VideoPixelFormat::Rgb32;
+    const char* input=rgb24?"RGB24":rgb?"RGB32":mjpeg?"MJPEG":yuy2?"YUY2":"NV12";
     const unsigned width=scale?1280:640,height=scale?960:480;
     const unsigned outputWidth=scale?960:width,outputHeight=scale?720:height;
-    const unsigned inputStride=mjpeg?0:width*(yuy2?2:1)+32;
+    const unsigned inputStride=mjpeg?0:width*(rgb?(rgb24?3:4):(yuy2?2:1))+32;
     std::vector<BYTE> frame;
     ColorPatches reference{};
-    if(mjpeg){
+    if(rgb){
+        constexpr BYTE bgr[][3]={{0,0,0},{255,255,255},{32,64,192},{32,192,64},
+            {192,32,64},{48,160,192},{192,160,48},{160,48,192}};
+        const unsigned step=rgb24?3:4;
+        frame.assign(static_cast<size_t>(inputStride)*height,0xff);
+        for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x){
+            auto* p=frame.data()+static_cast<size_t>(y)*inputStride+x*step;
+            memcpy(p,bgr[x*8/width],3);if(step==4)p[3]=static_cast<BYTE>(x+y);
+        }
+    }else if(mjpeg){
         frame=JpegFrame(width,height,false,false,true);
         // Compare with the actual decoded capture bytes, not ideal RGB values:
         // the override chooses interpretation; it does not recolor JPEG pixels.
@@ -164,6 +175,15 @@ static void TestRecordingColor(bool scale,llcv::settings::VideoPixelFormat forma
         {video_color::MatrixOverride::Bt709,video_color::RangeOverride::Full,1,1},
         {video_color::MatrixOverride::Bt709,video_color::RangeOverride::Limited,1,2}};
     for(const auto& interpretation:interpretations){
+        if(rgb && interpretation.matrix!=1)continue; // RGB has no YUV matrix override.
+        if(rgb)for(unsigned bar=0;bar<reference.size();++bar){
+            const auto* p=frame.data()+((2*bar+1)*width/16)*(rgb24?3:4);
+            const auto channel=[&](int c){return interpretation.range==1?double(p[c]):std::clamp((p[c]-16)*255.0/219,0.0,255.0);};
+            const double r=channel(2),g=channel(1),b=channel(0),y=.2126*r+.7152*g+.0722*b;
+            reference[bar]={16+y*219/255,
+                128+(b-y)/(2*(1-.0722))*224/255,
+                128+(r-y)/(2*(1-.2126))*224/255};
+        }
         video::VideoSampleFormat v{};v.valid=true;v.width=width;v.height=height;v.fps=30;
         v.format=format;v.bytes=static_cast<DWORD>(frame.size());v.stride=inputStride;
         capture_audio::Format a{};a.channels=2;a.containerBits=a.validBits=16;a.blockAlign=4;
@@ -220,8 +240,8 @@ static void TestRecordingColor(bool scale,llcv::settings::VideoPixelFormat forma
         UINT32 matrix=0,range=0;native->GetUINT32(MF_MT_YUV_MATRIX,&matrix);native->GetUINT32(MF_MT_VIDEO_NOMINAL_RANGE,&range);
         printf("%s color %s requested matrix/range=%u/%u saved=%u/%u\n",input,scale?"scaled":"native",
             interpretation.matrix,interpretation.range,matrix,range);
-        Expect(matrix==interpretation.matrix,"saved matrix matches the selected interpretation");
-        Expect(range==interpretation.range,"saved range matches the selected interpretation");
+        Expect(matrix==(rgb?1:interpretation.matrix),"saved matrix matches the selected interpretation/conversion");
+        Expect(range==(rgb?2:interpretation.range),"saved range matches the selected interpretation/conversion");
         ComPtr<IMFMediaType> type;Check(MFCreateMediaType(&type));
         Check(type->SetGUID(MF_MT_MAJOR_TYPE,MFMediaType_Video));Check(type->SetGUID(MF_MT_SUBTYPE,MFVideoFormat_NV12));
         Check(reader->SetCurrentMediaType(stream,nullptr,type.Get()));
@@ -462,6 +482,11 @@ int wmain(int argc, wchar_t** argv) {
             AudioPacketBounds(recorder,v,a);MFShutdown();CoUninitialize();return failures?1:0;
         }
         const std::wstring mode=argc>1?argv[1]:L"";
+        if(mode==L"--rgb24-color" || mode==L"--rgb32-color" || mode==L"--rgb24-color-scale" || mode==L"--rgb32-color-scale"){
+            TestRecordingColor(mode.ends_with(L"-scale"),mode.starts_with(L"--rgb24")
+                ?llcv::settings::VideoPixelFormat::Rgb24:llcv::settings::VideoPixelFormat::Rgb32);
+            MFShutdown();CoUninitialize();return failures?1:0;
+        }
         if(mode==L"--mjpeg-color" || mode==L"--mjpeg-color-scale"){
             TestRecordingColor(mode==L"--mjpeg-color-scale",llcv::settings::VideoPixelFormat::Mjpeg);
             MFShutdown();CoUninitialize();return failures?1:0;
@@ -473,18 +498,20 @@ int wmain(int argc, wchar_t** argv) {
             MFShutdown();CoUninitialize();return failures?1:0;
         }
         const bool mjpeg=mode.starts_with(L"--mjpeg");
+        const bool rgb24=mode.starts_with(L"--rgb24"),rgb32=mode.starts_with(L"--rgb32");
+        const bool rgb=rgb24 || rgb32;
         const bool mjpegHd=mode==L"--mjpeg-hd";
         const bool invalidMjpeg=mode==L"--mjpeg-invalid";
         const bool arrival=mode==L"--arrival" || mode==L"--hevc-arrival" || mode==L"--mjpeg-arrival";
         const bool limited=mode==L"--limited" || mode==L"--mjpeg-limited";
-        const bool split=mode==L"--split-pause" || mode==L"--gain-split" || mode==L"--mjpeg-split";
+        const bool split=mode==L"--split-pause" || mode==L"--gain-split" || mode==L"--mjpeg-split" || mode==L"--rgb32-split";
         const bool gain=argc>1 && (std::wstring(argv[1])==L"--gain"||std::wstring(argv[1])==L"--gain-split");
         const bool mute=argc>1 && std::wstring(argv[1])==L"--mute";
         const bool unaligned=argc>1 && std::wstring(argv[1])==L"--pause-unaligned";
         const bool largeAudio=mode==L"--large-audio" || mode==L"--large-audio-pause";
-        const bool pause=mode==L"--pause" || mode==L"--mjpeg-pause" || mode==L"--large-audio-pause" || split || unaligned;
-        const bool scale=mode==L"--scale" || mode==L"--mjpeg-scale";
-        const bool hevc=mode==L"--hevc" || mode==L"--hevc-arrival" || mode==L"--mjpeg-hevc";
+        const bool pause=mode==L"--pause" || mode==L"--mjpeg-pause" || mode==L"--large-audio-pause" || mode==L"--rgb24-pause" || split || unaligned;
+        const bool scale=mode==L"--scale" || mode==L"--mjpeg-scale" || mode==L"--rgb24-scale";
+        const bool hevc=mode==L"--hevc" || mode==L"--hevc-arrival" || mode==L"--mjpeg-hevc" || mode==L"--rgb32-hevc";
         const bool quality=argc>1 && (std::wstring(argv[1])==L"--quality"||std::wstring(argv[1])==L"--quality-yuy2");
         const bool padded=argc>1 && std::wstring(argv[1])==L"--padded";
         const bool yuy2=argc>1 && (std::wstring(argv[1])==L"--yuy2"||std::wstring(argv[1])==L"--quality-yuy2");
@@ -505,6 +532,10 @@ int wmain(int argc, wchar_t** argv) {
         testOptions.audioVolumePercent=mute?0:gain?50:100;
         if(split){testOptions.splitMode=llcv::recording::SplitMode::Time;testOptions.splitSeconds=2;}
         if(scale){v.width=v.stride=1280;v.height=960;testOptions.maxHeight=720;}
+        if(rgb){
+            v.format=rgb24?llcv::settings::VideoPixelFormat::Rgb24:llcv::settings::VideoPixelFormat::Rgb32;
+            v.stride=v.width*(rgb24?3:4)+32;v.topDown=rgb24;
+        }
         testOptions.rateControl=(quality||hevc)?llcv::recording::RateControl::Quality:llcv::recording::RateControl::Bitrate;
         if(limited){v.fps=60;testOptions.maxFps=30;testOptions.videoMbps=4;testOptions.audioKbps=128;}
         if(hevc){
@@ -530,13 +561,14 @@ int wmain(int argc, wchar_t** argv) {
             v.format=llcv::settings::VideoPixelFormat::Mjpeg;v.stride=0;
             v.bytes=static_cast<DWORD>((std::max)(darkJpeg.size(),brightJpeg.size()));
         }
-        const auto inputColor=llcv::video_color::Resolve(mjpeg,v.width,v.height,{},{});
+        auto inputColor=llcv::video_color::Resolve(mjpeg,v.width,v.height,{},{});
+        if(rgb)inputColor.range=llcv::video_color::Range::Full;
         recorder.Configure(v,a,inputColor,arrival,testOptions);
         Expect(recorder.Start(path.wstring()),"start");
         for(int i=0;i<1000&&!recorder.Recording()&&recorder.Busy();++i) Sleep(10);
         Expect(recorder.Recording(),"encoder ready");
         ComPtr<IMemAllocator> allocator;Check(CoCreateInstance(CLSID_MemoryAllocator,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&allocator)));
-        const long frameBytes=mjpeg?static_cast<long>(v.bytes):static_cast<long>(v.stride*(yuy2?v.height:v.height*3/2));
+        const long frameBytes=mjpeg?static_cast<long>(v.bytes):static_cast<long>(v.stride*((yuy2 || rgb)?v.height:v.height*3/2));
         ALLOCATOR_PROPERTIES requested{2,frameBytes,1,0},actual{};Check(allocator->SetProperties(&requested,&actual));Check(allocator->Commit());
         if(invalidMjpeg){
             auto bad=Sample(allocator.Get(),frameBytes,0,10000000/v.fps);BYTE* data=nullptr;Check(bad->GetPointer(&data));
@@ -582,9 +614,10 @@ int wmain(int argc, wchar_t** argv) {
                         std::memcpy(d,jpeg.data(),jpeg.size());Check(s->SetActualDataLength(static_cast<long>(jpeg.size())));
                     }else{
                     memset(d,0xff,frameBytes); // Padding must not enter encoded rows.
-                    for(int row=0;row<(yuy2?v.height:v.height*3/2);++row){
+                    for(int row=0;row<((yuy2 || rgb)?v.height:v.height*3/2);++row){
                         auto* line=d+row*v.stride;
-                        if(yuy2)for(int x=0;x<v.width;++x){line[x*2]=pulse?220:16;line[x*2+1]=128;}
+                        if(rgb)for(int x=0;x<v.width;++x){auto* px=line+x*(rgb24?3:4);px[0]=px[1]=px[2]=pulse?255:0;if(rgb32)px[3]=static_cast<BYTE>(x);}
+                        else if(yuy2)for(int x=0;x<v.width;++x){line[x*2]=pulse?220:16;line[x*2+1]=128;}
                         else memset(line,row<v.height?(pulse?220:16):128,v.width);
                     }
                     }

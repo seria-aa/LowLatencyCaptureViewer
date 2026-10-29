@@ -16,10 +16,8 @@ Get one of the files from the [latest release](https://github.com/seria-aa/LowLa
   shortcut is created automatically; the desktop shortcut is optional.
 - **x64.zip — portable:** extract it, then run `LowLatencyCaptureViewer.exe`.
 
-**2.1.8:** fixes upscaling edge artifacts and adds UYVY/HDYC playback and source screenshots.
-UYVY/HDYC recording is not supported.
-Settings are shown once after each update, even when Start directly is enabled.
-[Recording guide](RECORDING.md) · [2.1.8 release notes](release-notes-v2.1.8.md)
+**2.1.9:** adds RGB24/XRGB SDR playback, source screenshots, VSR requests and recording, with conversion-headroom checks and bounded RGB recording buffers.
+[Recording guide](RECORDING.md) · [2.1.9 release notes](release-notes-v2.1.9.md)
 **40 fps capture**, added in [2.0.4](release-notes-v2.0.4.md),
 remains off by default; enable it under **Video → More beside Frame rate** only when needed.
 Sleep prevention and earlier settings improvements are covered in the
@@ -428,7 +426,7 @@ dismiss it. The Exit key here closes only the help window, not the viewer.
 | Exclusive shows retry required | Check the device connection and whether another app is using it, then select **Recheck all devices**. Use WASAPI Shared to resume playback without an Exclusive check |
 | Playback stops with a device-error message | Check connections and other capture apps, then confirm the device in settings and start again. Devices are not repeatedly reconnected automatically |
 | Settings could not be saved | Check write access, free space, and file locks at the path shown. Previous settings are preserved; changes that failed to save may not survive the next launch |
-| VSR appears to have no effect | Check NV12/YUY2/MJPEG SDR or P010 HDR10 input, a supported NVIDIA rendering GPU/driver, native-size or larger output, the Tab state, and NVIDIA's active indicator; a successful request alone does not confirm activation |
+| VSR appears to have no effect | Check NV12/YUY2/UYVY/MJPEG/RGB SDR or P010 HDR10 input, a supported NVIDIA rendering GPU/driver, native-size or larger output, the Tab state, and NVIDIA's active indicator; a successful request alone does not confirm activation |
 | Need more evidence | Enable logging in Guide & logs, reproduce the issue, then send the newest `.log` file from **Open log folder** together with screenshots of settings and Tab diagnostics |
 
 Settings and optional logs are stored in `%LOCALAPPDATA%\LowLatencyCaptureViewer`.

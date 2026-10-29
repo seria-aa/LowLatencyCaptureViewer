@@ -8,10 +8,15 @@
 namespace llcv::screenshot {
 namespace {
 unsigned RowBytes(const Description& d) noexcept {
-    return d.width * (d.format == Format::Nv12 ? 1u : 2u);
+    switch (d.format) {
+    case Format::Nv12: return d.width;
+    case Format::Rgb24: return d.width * 3u;
+    case Format::Rgb32: return d.width * 4u;
+    default: return d.width * 2u;
+    }
 }
 unsigned Rows(const Description& d) noexcept {
-    return d.format == Format::Yuy2 || d.format == Format::Uyvy ? d.height : d.height + d.height / 2;
+    return d.format == Format::Nv12 || d.format == Format::P010 ? d.height + d.height / 2 : d.height;
 }
 float Word(const std::uint8_t* p) noexcept {
     return static_cast<float>((unsigned(p[0]) | (unsigned(p[1]) << 8)) >> 6);
@@ -82,9 +87,11 @@ std::uint8_t Byte(float v) noexcept {
 
 std::size_t PackedSize(const Description& d) noexcept {
     if (!d.width || !d.height || d.width > 3840 || d.height > 2160 ||
-        (d.width & 1) || (d.height & 1) ||
+        ((d.format != Format::Rgb24 && d.format != Format::Rgb32) &&
+         ((d.width & 1) || (d.height & 1))) ||
         (d.format != Format::Nv12 && d.format != Format::Yuy2 &&
-         d.format != Format::P010 && d.format != Format::Uyvy))
+         d.format != Format::P010 && d.format != Format::Uyvy &&
+         d.format != Format::Rgb24 && d.format != Format::Rgb32))
         return 0;
     return std::size_t(RowBytes(d)) * Rows(d);
 }
@@ -95,7 +102,7 @@ bool CopyFrame(const Description& d, const std::uint8_t* source,
     const auto size = PackedSize(d);
     if (!size || !source || destination.size() < size || stride < RowBytes(d)) return false;
     const auto rows = Rows(d);
-    if (std::size_t(stride) > (std::numeric_limits<std::size_t>::max() - RowBytes(d)) / (rows - 1)) return false;
+    if (rows > 1 && std::size_t(stride) > (std::numeric_limits<std::size_t>::max() - RowBytes(d)) / (rows - 1)) return false;
     const auto required = std::size_t(stride)*(rows-1) + RowBytes(d);
     if (length < required) return false;
     if (stride == RowBytes(d)) std::memcpy(destination.data(), source, size);
@@ -112,6 +119,23 @@ bool ConvertRows(const Description& d, std::span<const std::uint8_t> packed,
     if (!size || packed.size() < size || firstRow > d.height ||
         rowCount > d.height-firstRow || bgra.size() < std::size_t(d.width)*rowCount*4) return false;
     const unsigned rowBytes = RowBytes(d);
+    if (d.format == Format::Rgb24 || d.format == Format::Rgb32) {
+        const unsigned bytesPerPixel = d.format == Format::Rgb24 ? 3u : 4u;
+        const bool full = d.color.range == video_color::Range::Full;
+        for (unsigned y = firstRow; y < firstRow + rowCount; ++y) {
+            const unsigned sourceY = d.topDown ? y : d.height - 1 - y;
+            const auto* row = packed.data() + std::size_t(sourceY) * rowBytes;
+            auto* out = bgra.data() + std::size_t(y - firstRow) * d.width * 4;
+            for (unsigned x = 0; x < d.width; ++x) {
+                for (unsigned c = 0; c < 3; ++c) {
+                    const float value = float(row[x * bytesPerPixel + c]);
+                    out[x * 4 + c] = full ? static_cast<std::uint8_t>(value) : Byte((value - 16.0f) / 219.0f);
+                }
+                out[x * 4 + 3] = 255;
+            }
+        }
+        return true;
+    }
     const bool hdr = d.format == Format::P010;
     const bool planar = d.format != Format::Yuy2 && d.format != Format::Uyvy;
     // UYVY/HDYC retains its original byte order until this existing worker

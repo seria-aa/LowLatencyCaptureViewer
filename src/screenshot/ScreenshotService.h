@@ -35,7 +35,7 @@ public:
     Service& operator=(const Service&) = delete;
     // Start/Stop and Submit belong to the capture thread. Request/TakeResult
     // belong to the UI thread. Stop only after the final Submit has returned.
-    bool Start(unsigned width, unsigned height, Format format, std::wstring directory) noexcept;
+    bool Start(unsigned width, unsigned height, Format format, std::wstring directory, bool topDown = true) noexcept;
     void Stop() noexcept;
     // UI can signal cancellation immediately; joining stays on capture thread.
     void CancelPending() noexcept;

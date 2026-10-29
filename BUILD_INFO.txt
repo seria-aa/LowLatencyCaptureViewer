@@ -1,4 +1,14 @@
-LLCV v2.1.8 x64 (continued from the v0.14.2 rework)
+LLCV v2.1.9 x64 (continued from the v0.14.2 rework)
+
+v2.1.9 RGB input and recording safeguards
+------------------------------------------
+- Adds manually selected RGB24/XRGB SDR playback, source PNGs, VSR requests and recording.
+- Converts recording input to BT.709 Limited NV12 on the worker, with fused downscaling.
+- Checks conversion headroom before file creation without silently lowering selected FPS.
+- Bounds raw/converted RGB frame memory and preserves existing YUV delivery policy.
+- Logs precise RGB layout rejection reasons and strengthens crash-tail verification.
+- Excludes developer-only RGB validation reports from user packages.
+- See tests/RELEASE_V2_1_9_AUDIT.md for validation evidence and hardware coverage.
 
 v2.1.8 Upscaling safety and UYVY/HDYC input
 ------------------------------------------

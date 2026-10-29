@@ -29,7 +29,9 @@ void TestPixelFormatHelpers() {
                   static_cast<int>(VideoPixelFormat::Yuy2) == 2 &&
                   static_cast<int>(VideoPixelFormat::Mjpeg) == 3 &&
                   static_cast<int>(VideoPixelFormat::P010) == 4 &&
-                  static_cast<int>(VideoPixelFormat::Uyvy) == 5);
+                  static_cast<int>(VideoPixelFormat::Uyvy) == 5 &&
+                  static_cast<int>(VideoPixelFormat::Rgb32) == 6 &&
+                  static_cast<int>(VideoPixelFormat::Rgb24) == 7);
     Check(llcv::video::PixelFormatFromSubtype(MEDIASUBTYPE_NV12) ==
               VideoPixelFormat::Nv12,
           "NV12 subtype");
@@ -729,7 +731,7 @@ void TestUnsupportedFormatDiagnostics() {
     pin.modes[0].subtype = MEDIASUBTYPE_NV12;
     pin.modes[0].imageBytes = 1;
     Check(probe().empty() && FAILED(status) && !diagnostics.UnsupportedFormatsOnly() &&
-        selectionLog.find(L"reason=invalid-layout-or-timing subtype=NV12") != std::wstring::npos,
+        selectionLog.find(L"reason=yuv-image-size subtype=NV12") != std::wstring::npos,
         "recognized invalid layouts remain query errors rather than unsupported-only formats");
 
     pin.modes = {{60}, {60}};
@@ -953,6 +955,406 @@ void TestUyvyNegotiationAndColor() {
         "failed negotiation clears both color hints and their subtype provenance");
 }
 
+// RGB32 (BI_RGB, 32bpp BGRX) layout and negotiation contract.
+void TestRgb32LayoutAndOrientation() {
+    using namespace llcv::video;
+    Check(PixelFormatFromSubtype(MEDIASUBTYPE_RGB32) == VideoPixelFormat::Rgb32,
+        "RGB32 subtype maps to the RGB32 pixel format");
+    Check(!IsAutoSelectableVideoFormat(VideoPixelFormat::Rgb32),
+        "RGB32 is not an automatic fallback; NV12 auto-priority is unchanged");
+    Check(!IsCompressedVideoFormat(VideoPixelFormat::Rgb32), "RGB32 is not compressed");
+
+    const auto makeRgb32 = [](AM_MEDIA_TYPE& media, VIDEOINFOHEADER2& info,
+                              int width, LONG biHeight, DWORD sizeImage,
+                              DWORD bitCount = 32, DWORD compression = BI_RGB,
+                              WORD planes = 1, DWORD headerSize = sizeof(BITMAPINFOHEADER)) {
+        info = {};
+        info.AvgTimePerFrame = 166'667;
+        info.bmiHeader.biSize = headerSize;
+        info.bmiHeader.biPlanes = planes;
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = biHeight;
+        info.bmiHeader.biBitCount = static_cast<WORD>(bitCount);
+        info.bmiHeader.biCompression = compression;
+        info.bmiHeader.biSizeImage = sizeImage;
+        media = {};
+        media.majortype = MEDIATYPE_Video; media.subtype = MEDIASUBTYPE_RGB32;
+        media.formattype = FORMAT_VideoInfo2; media.cbFormat = sizeof(info);
+        media.pbFormat = reinterpret_cast<BYTE*>(&info);
+    };
+
+    // Odd width/height are fine for packed single-plane RGB, unlike YUV.
+    {
+        VIDEOINFOHEADER2 info{};
+        AM_MEDIA_TYPE media{};
+        makeRgb32(media, info, 1921, -1081, 0);
+        DWORD bytes = 0; UINT32 stride = 0; int fps = 60;
+        Check(SUCCEEDED(ValidateVideoLayout(&media, 1921, 1081, VideoPixelFormat::Rgb32,
+            bytes, stride, fps)) && bytes == uint64_t(1921) * 1081 * 4 && stride == 1921 * 4,
+            "odd-dimension RGB32 with zero declared size derives exact 4-byte-per-pixel layout");
+
+        info.bmiHeader.biSizeImage = bytes - 1;
+        Check(FAILED(ValidateVideoLayout(&media, 1921, 1081, VideoPixelFormat::Rgb32,
+            bytes, stride, fps)), "RGB32 payload smaller than width*4*height is rejected");
+
+        info.bmiHeader.biSizeImage = (1921 * 4 + 32) * 1081; // padded stride
+        Check(SUCCEEDED(ValidateVideoLayout(&media, 1921, 1081, VideoPixelFormat::Rgb32,
+            bytes, stride, fps)) && stride == 1921 * 4 + 32,
+            "RGB32 row padding beyond the minimum pitch is preserved exactly");
+
+        // A declared size that is not an exact whole number of rows, or
+        // whose resulting pitch is not DWORD-aligned, cannot be a real
+        // per-row stride and must not be silently floor-divided into one.
+        info.bmiHeader.biSizeImage = (1921 * 4) * 1081 + 1;
+        Check(FAILED(ValidateVideoLayout(&media, 1921, 1081, VideoPixelFormat::Rgb32,
+            bytes, stride, fps)), "RGB32 size with a non-zero row remainder is rejected");
+        info.bmiHeader.biSizeImage = (1921 * 4 + 2) * 1081; // pitch not a multiple of 4
+        Check(FAILED(ValidateVideoLayout(&media, 1921, 1081, VideoPixelFormat::Rgb32,
+            bytes, stride, fps)), "RGB32 pitch that is not DWORD-aligned is rejected");
+    }
+
+    // Only plain BI_RGB 32bpp, or BI_BITFIELDS with the standard BGR masks,
+    // is in scope; non-standard masks, truncated mask data, other bit
+    // depths, and malformed header size/plane fields are all rejected
+    // rather than guessing an unverified channel layout.
+    {
+        VIDEOINFOHEADER2 info{};
+        AM_MEDIA_TYPE media{};
+        makeRgb32(media, info, 1920, -1080, 0, 24, BI_RGB);
+        DWORD bytes = 0; UINT32 stride = 0; int fps = 60;
+        Check(FAILED(ValidateVideoLayout(&media, 1920, 1080, VideoPixelFormat::Rgb32,
+            bytes, stride, fps)), "non-32bpp RGB32-labeled layout is rejected");
+        makeRgb32(media, info, 1920, -1080, 0, 32, BI_RGB, /*planes*/2);
+        Check(FAILED(ValidateVideoLayout(&media, 1920, 1080, VideoPixelFormat::Rgb32,
+            bytes, stride, fps)), "biPlanes != 1 is rejected");
+        makeRgb32(media, info, 1920, -1080, 0, 32, BI_RGB, /*planes*/1,
+            sizeof(BITMAPINFOHEADER) - 1);
+        Check(FAILED(ValidateVideoLayout(&media, 1920, 1080, VideoPixelFormat::Rgb32,
+            bytes, stride, fps)), "biSize smaller than BITMAPINFOHEADER is rejected");
+
+        // BI_BITFIELDS: the three R/G/B channel masks live immediately after
+        // the BITMAPINFOHEADER inside the format block.
+        struct BitfieldsLayout { VIDEOINFOHEADER2 header; DWORD masks[3]; };
+        BitfieldsLayout layout{};
+        layout.header.AvgTimePerFrame = 166'667;
+        layout.header.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        layout.header.bmiHeader.biPlanes = 1;
+        layout.header.bmiHeader.biWidth = 1920;
+        layout.header.bmiHeader.biHeight = -1080;
+        layout.header.bmiHeader.biBitCount = 32;
+        layout.header.bmiHeader.biCompression = BI_BITFIELDS;
+        AM_MEDIA_TYPE bitfieldsMedia{};
+        bitfieldsMedia.majortype = MEDIATYPE_Video; bitfieldsMedia.subtype = MEDIASUBTYPE_RGB32;
+        bitfieldsMedia.formattype = FORMAT_VideoInfo2; bitfieldsMedia.cbFormat = sizeof(layout);
+        bitfieldsMedia.pbFormat = reinterpret_cast<BYTE*>(&layout);
+        layout.masks[0] = 0x00FF0000u; layout.masks[1] = 0x0000FF00u; layout.masks[2] = 0x000000FFu;
+        Check(SUCCEEDED(ValidateVideoLayout(&bitfieldsMedia, 1920, 1080, VideoPixelFormat::Rgb32,
+            bytes, stride, fps)) && stride == 1920 * 4,
+            "BI_BITFIELDS with the standard BGR channel masks is accepted");
+        layout.masks[0] = 0x000000FFu; layout.masks[2] = 0x00FF0000u; // swapped R/B
+        Check(FAILED(ValidateVideoLayout(&bitfieldsMedia, 1920, 1080, VideoPixelFormat::Rgb32,
+            bytes, stride, fps)), "BI_BITFIELDS with a non-standard channel order is rejected");
+        layout.masks[0] = 0x00FF0000u; layout.masks[2] = 0x000000FFu;
+        // sizeof(layout) - 1 is not sufficient: BitfieldsLayout has trailing
+        // struct padding (REFERENCE_TIME forces 8-byte alignment) after the
+        // masks, so cbFormat must be cut at the mask boundary itself to
+        // genuinely truncate the mask data rather than just the padding.
+        bitfieldsMedia.cbFormat = static_cast<DWORD>(offsetof(BitfieldsLayout, masks) + 3 * sizeof(DWORD) - 1);
+        Check(FAILED(ValidateVideoLayout(&bitfieldsMedia, 1920, 1080, VideoPixelFormat::Rgb32,
+            bytes, stride, fps)), "BI_BITFIELDS with truncated mask data is rejected");
+    }
+
+    // Orientation: sign of biHeight is preserved end to end, not discarded
+    // by an abs()-only height computation the way plain magnitude is.
+    {
+        VIDEOINFOHEADER2 topDownInfo{};
+        AM_MEDIA_TYPE topDownMedia{};
+        makeRgb32(topDownMedia, topDownInfo, 4, -4, 64);
+        int width = 0, height = 0; REFERENCE_TIME duration = 0; DWORD bytes = 0;
+        VideoPixelFormat format = VideoPixelFormat::Auto; bool topDown = false;
+        Check(VideoFormatDetails(&topDownMedia, width, height, duration, bytes, &format, &topDown) &&
+            height == 4 && topDown, "negative biHeight reports top-down orientation");
+
+        VIDEOINFOHEADER2 bottomUpInfo{};
+        AM_MEDIA_TYPE bottomUpMedia{};
+        makeRgb32(bottomUpMedia, bottomUpInfo, 4, 4, 64);
+        topDown = true;
+        Check(VideoFormatDetails(&bottomUpMedia, width, height, duration, bytes, &format, &topDown) &&
+            height == 4 && !topDown, "positive biHeight reports bottom-up orientation");
+
+        VideoSampleFormat expected{};
+        Check(ReadVideoSampleFormat(&topDownMedia, 60, expected) && expected.topDown,
+            "connected RGB32 sample format records top-down orientation");
+        Check(!MatchesVideoSampleFormat(&bottomUpMedia, expected),
+            "a same-size orientation flip on reconnect is rejected, not silently accepted");
+
+        VideoSampleFormat expectedBottomUp{};
+        Check(ReadVideoSampleFormat(&bottomUpMedia, 60, expectedBottomUp) && !expectedBottomUp.topDown,
+            "connected RGB32 sample format records bottom-up orientation");
+        Check(MatchesVideoSampleFormat(&bottomUpMedia, expectedBottomUp),
+            "an unchanged bottom-up RGB32 reannouncement is accepted");
+    }
+
+    // Regression: YUV orientation is normalized to top-down regardless of
+    // the declared biHeight sign, so a driver flipping the sign alone on
+    // reconnect (no real content change) must still compare as unchanged.
+    {
+        VIDEOINFOHEADER2 info{};
+        info.AvgTimePerFrame = 166'667;
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biWidth = 1920; info.bmiHeader.biHeight = -1080;
+        AM_MEDIA_TYPE media{};
+        media.majortype = MEDIATYPE_Video; media.subtype = MEDIASUBTYPE_NV12;
+        media.formattype = FORMAT_VideoInfo2; media.cbFormat = sizeof(info);
+        media.pbFormat = reinterpret_cast<BYTE*>(&info);
+        VideoSampleFormat expected{};
+        Check(ReadVideoSampleFormat(&media, 60, expected) && expected.topDown,
+            "NV12 orientation normalizes to top-down for a negative biHeight");
+        info.bmiHeader.biHeight = 1080; // sign-only flip, same magnitude
+        Check(MatchesVideoSampleFormat(&media, expected),
+            "a sign-only NV12 biHeight flip is not treated as a format change");
+    }
+
+    // Advertise validated RGB32 capabilities for explicit selection.
+    {
+        FakeVideoPin pin;
+        pin.modes = {{60}};
+        pin.modes[0].subtype = MEDIASUBTYPE_RGB32;
+        pin.modes[0].imageBytes = 1920 * 1080 * 4;
+        pin.modes[0].biBitCount = 32;
+        pin.modes[0].biCompression = BI_RGB;
+        HRESULT status = S_OK;
+        VideoCapabilityDiagnostics diagnostics;
+        const auto formats = ProbePixelFormats(&pin, 1920, 1080, &status, nullptr, &diagnostics);
+        Check(SUCCEEDED(status) && std::any_of(formats.begin(), formats.end(), [](const auto& item) { return item.format == VideoPixelFormat::Rgb32 && item.selectedFps == 60; }),
+            "RGB32 advertised at its supported frame rate");
+    }
+}
+
+// RGB24 capture contract (BI_RGB only, 24bpp BGR, DWORD-aligned stride).
+// Real GC573 hardware advertises this (never RGB32): FORMAT_VideoInfo,
+// positive (bottom-up) biHeight, BI_RGB, biPlanes=1, biBitCount=24,
+// biSize=sizeof(BITMAPINFOHEADER).
+void TestRgb24LayoutAndOrientation() {
+    using namespace llcv::video;
+    Check(PixelFormatFromSubtype(MEDIASUBTYPE_RGB24) == VideoPixelFormat::Rgb24,
+        "RGB24 subtype maps to the RGB24 pixel format");
+    Check(!IsAutoSelectableVideoFormat(VideoPixelFormat::Rgb24),
+        "RGB24 is not an automatic fallback; NV12 auto-priority is unchanged");
+    Check(!IsCompressedVideoFormat(VideoPixelFormat::Rgb24), "RGB24 is not compressed");
+
+    const auto makeRgb24 = [](AM_MEDIA_TYPE& media, VIDEOINFOHEADER& info,
+                              int width, LONG biHeight, DWORD sizeImage,
+                              DWORD compression = BI_RGB, WORD planes = 1,
+                              DWORD headerSize = sizeof(BITMAPINFOHEADER)) {
+        info = {};
+        info.AvgTimePerFrame = 166'667;
+        info.bmiHeader.biSize = headerSize;
+        info.bmiHeader.biPlanes = planes;
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = biHeight;
+        info.bmiHeader.biBitCount = 24;
+        info.bmiHeader.biCompression = compression;
+        info.bmiHeader.biSizeImage = sizeImage;
+        media = {};
+        media.majortype = MEDIATYPE_Video; media.subtype = MEDIASUBTYPE_RGB24;
+        // GC573 advertises RGB24 via the legacy FORMAT_VideoInfo, not
+        // FORMAT_VideoInfo2; the parser must handle both for RGB formats.
+        media.formattype = FORMAT_VideoInfo; media.cbFormat = sizeof(info);
+        media.pbFormat = reinterpret_cast<BYTE*>(&info);
+    };
+
+    // Exact real-device fixtures: bottom-up (positive biHeight), stride
+    // already DWORD-aligned at these specific widths (no padding needed).
+    {
+        struct Fixture { int width, height; DWORD stride, sizeImage; };
+        for (const auto& fixture : {Fixture{1920, 1080, 5760, 6220800},
+                                     Fixture{2560, 1440, 7680, 11059200},
+                                     Fixture{3840, 2160, 11520, 24883200}}) {
+            VIDEOINFOHEADER info{};
+            AM_MEDIA_TYPE media{};
+            makeRgb24(media, info, fixture.width, fixture.height, fixture.sizeImage);
+            DWORD bytes = 0; UINT32 stride = 0; int fps = 60;
+            Check(SUCCEEDED(ValidateVideoLayout(&media, fixture.width, fixture.height,
+                VideoPixelFormat::Rgb24, bytes, stride, fps)) &&
+                bytes == fixture.sizeImage && stride == fixture.stride,
+                "GC573 RGB24 fixture validates with its exact advertised stride/size");
+        }
+    }
+
+    // DWORD-aligned stride for an arbitrary (non-fixture) odd width: 3
+    // bytes/pixel must round up to the next multiple of 4.
+    {
+        VIDEOINFOHEADER info{};
+        AM_MEDIA_TYPE media{};
+        makeRgb24(media, info, 1921, 1081, 0); // width*3=5763 -> aligned 5764
+        DWORD bytes = 0; UINT32 stride = 0; int fps = 60;
+        Check(SUCCEEDED(ValidateVideoLayout(&media, 1921, 1081, VideoPixelFormat::Rgb24,
+            bytes, stride, fps)) && stride == 5764 && bytes == uint64_t(5764) * 1081,
+            "odd-width RGB24 with zero declared size derives the DWORD-aligned stride");
+
+        info.bmiHeader.biSizeImage = bytes - 1;
+        Check(FAILED(ValidateVideoLayout(&media, 1921, 1081, VideoPixelFormat::Rgb24,
+            bytes, stride, fps)), "RGB24 payload smaller than the aligned stride*height is rejected");
+
+        info.bmiHeader.biSizeImage = (5764 + 32) * 1081; // extra row padding
+        Check(SUCCEEDED(ValidateVideoLayout(&media, 1921, 1081, VideoPixelFormat::Rgb24,
+            bytes, stride, fps)) && stride == 5764 + 32,
+            "RGB24 row padding beyond the minimum aligned pitch is preserved exactly");
+
+        info.bmiHeader.biSizeImage = (5764) * 1081 + 1; // non-zero row remainder
+        Check(FAILED(ValidateVideoLayout(&media, 1921, 1081, VideoPixelFormat::Rgb24,
+            bytes, stride, fps)), "RGB24 size with a non-zero row remainder is rejected");
+
+        info.bmiHeader.biSizeImage = (5764 + 2) * 1081; // pitch not DWORD-aligned
+        Check(FAILED(ValidateVideoLayout(&media, 1921, 1081, VideoPixelFormat::Rgb24,
+            bytes, stride, fps)), "RGB24 pitch that is not DWORD-aligned is rejected");
+    }
+
+    // RGB24 has no verified bitfield-mask contract: BI_BITFIELDS is always
+    // rejected (unlike RGB32, which accepts the standard BGR masks), along
+    // with other bit depths, biPlanes != 1 and a truncated biSize.
+    {
+        VIDEOINFOHEADER info{};
+        AM_MEDIA_TYPE media{};
+        DWORD bytes = 0; UINT32 stride = 0; int fps = 60;
+        makeRgb24(media, info, 1920, 1080, 0, BI_BITFIELDS);
+        Check(FAILED(ValidateVideoLayout(&media, 1920, 1080, VideoPixelFormat::Rgb24,
+            bytes, stride, fps)), "BI_BITFIELDS is never accepted for RGB24");
+        makeRgb24(media, info, 1920, 1080, 0, BI_RGB, /*planes*/2);
+        Check(FAILED(ValidateVideoLayout(&media, 1920, 1080, VideoPixelFormat::Rgb24,
+            bytes, stride, fps)), "RGB24 biPlanes != 1 is rejected");
+        makeRgb24(media, info, 1920, 1080, 0, BI_RGB, /*planes*/1, sizeof(BITMAPINFOHEADER) - 1);
+        Check(FAILED(ValidateVideoLayout(&media, 1920, 1080, VideoPixelFormat::Rgb24,
+            bytes, stride, fps)), "RGB24 biSize smaller than BITMAPINFOHEADER is rejected");
+    }
+
+    // Orientation: GC573's real convention is bottom-up (positive biHeight);
+    // the sign must be preserved end to end and a silent flip rejected.
+    {
+        VIDEOINFOHEADER bottomUpInfo{};
+        AM_MEDIA_TYPE bottomUpMedia{};
+        makeRgb24(bottomUpMedia, bottomUpInfo, 4, 4, 0); // width*3=12, already aligned
+        int width = 0, height = 0; REFERENCE_TIME duration = 0; DWORD bytes = 0;
+        VideoPixelFormat format = VideoPixelFormat::Auto; bool topDown = true;
+        Check(VideoFormatDetails(&bottomUpMedia, width, height, duration, bytes, &format, &topDown) &&
+            height == 4 && !topDown, "positive biHeight reports bottom-up orientation for RGB24");
+
+        VIDEOINFOHEADER topDownInfo{};
+        AM_MEDIA_TYPE topDownMedia{};
+        makeRgb24(topDownMedia, topDownInfo, 4, -4, 0);
+        topDown = false;
+        Check(VideoFormatDetails(&topDownMedia, width, height, duration, bytes, &format, &topDown) &&
+            height == 4 && topDown, "negative biHeight reports top-down orientation for RGB24");
+
+        VideoSampleFormat expected{};
+        Check(ReadVideoSampleFormat(&bottomUpMedia, 60, expected) && !expected.topDown,
+            "connected RGB24 sample format records bottom-up orientation");
+        Check(!MatchesVideoSampleFormat(&topDownMedia, expected),
+            "a same-size RGB24 orientation flip on reconnect is rejected, not silently accepted");
+        Check(MatchesVideoSampleFormat(&bottomUpMedia, expected),
+            "an unchanged bottom-up RGB24 reannouncement is accepted");
+    }
+
+    // Dynamic type safety: switching between RGB24 and RGB32 at the same
+    // resolution must be rejected as a format change, not silently accepted
+    // as "still RGB". MatchesVideoSampleFormat compares format directly, so
+    // this also exercises that the two enum values never alias each other.
+    {
+        VIDEOINFOHEADER rgb24Info{};
+        AM_MEDIA_TYPE rgb24Media{};
+        makeRgb24(rgb24Media, rgb24Info, 4, 4, 0);
+        VideoSampleFormat expected{};
+        Check(ReadVideoSampleFormat(&rgb24Media, 60, expected), "RGB24 connected signature");
+
+        VIDEOINFOHEADER2 rgb32Info{};
+        rgb32Info.AvgTimePerFrame = 166'667;
+        rgb32Info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        rgb32Info.bmiHeader.biPlanes = 1;
+        rgb32Info.bmiHeader.biWidth = 4; rgb32Info.bmiHeader.biHeight = 4;
+        rgb32Info.bmiHeader.biBitCount = 32; rgb32Info.bmiHeader.biCompression = BI_RGB;
+        AM_MEDIA_TYPE rgb32Media{};
+        rgb32Media.majortype = MEDIATYPE_Video; rgb32Media.subtype = MEDIASUBTYPE_RGB32;
+        rgb32Media.formattype = FORMAT_VideoInfo2; rgb32Media.cbFormat = sizeof(rgb32Info);
+        rgb32Media.pbFormat = reinterpret_cast<BYTE*>(&rgb32Info);
+        Check(!MatchesVideoSampleFormat(&rgb32Media, expected),
+            "a silent RGB24 -> RGB32 subtype switch at the same size is rejected");
+    }
+
+    // Advertise validated RGB24 capabilities for explicit selection.
+    {
+        FakeVideoPin pin;
+        pin.modes = {{60}};
+        pin.modes[0].subtype = MEDIASUBTYPE_RGB24;
+        pin.modes[0].imageBytes = 5760 * 1080;
+        pin.modes[0].biBitCount = 24;
+        pin.modes[0].biCompression = BI_RGB;
+        HRESULT status = S_OK;
+        VideoCapabilityDiagnostics diagnostics;
+        const auto formats = ProbePixelFormats(&pin, 1920, 1080, &status, nullptr, &diagnostics);
+        Check(SUCCEEDED(status) && std::any_of(formats.begin(), formats.end(), [](const auto& item) { return item.format == VideoPixelFormat::Rgb24 && item.selectedFps == 60; }),
+            "RGB24 advertised at its supported frame rate");
+    }
+}
+
+void TestRgbRejectionDiagnostics() {
+    using namespace llcv::video;
+    struct Layout { VIDEOINFOHEADER2 info; DWORD masks[3]; } layout{};
+    AM_MEDIA_TYPE media{};
+    media.majortype = MEDIATYPE_Video; media.formattype = FORMAT_VideoInfo2;
+    media.pbFormat = reinterpret_cast<BYTE*>(&layout);
+    for (const auto format : {VideoPixelFormat::Rgb24, VideoPixelFormat::Rgb32}) {
+        const auto reset = [&] {
+            layout = {}; media.cbFormat = sizeof(layout);
+            media.subtype = format == VideoPixelFormat::Rgb24 ? MEDIASUBTYPE_RGB24 : MEDIASUBTYPE_RGB32;
+            layout.info.AvgTimePerFrame = 166667;
+            auto& b = layout.info.bmiHeader;
+            b.biSize = sizeof(BITMAPINFOHEADER); b.biWidth = 4; b.biHeight = -4;
+            b.biBitCount = format == VideoPixelFormat::Rgb24 ? 24 : 32; b.biPlanes = 1;
+        };
+        const auto reject = [&](const wchar_t* reason) {
+            DWORD bytes = 123; UINT32 stride = 456; int fps = 60;
+            selectionLog.clear();
+            Check(FAILED(ValidateVideoLayout(&media, 4, 4, format, bytes, stride, fps, SelectionLog)) &&
+                bytes == 123 && stride == 456 && fps == 60, "rejection leaves caller outputs unchanged");
+            Check(selectionLog.find(std::wstring(L"reason=") + reason) != std::wstring::npos &&
+                selectionLog.find(L"formatBytes=") != std::wstring::npos &&
+                selectionLog.find(L"biSize=") != std::wstring::npos &&
+                selectionLog.find(L"bpp=") != std::wstring::npos &&
+                selectionLog.find(L"compression=") != std::wstring::npos &&
+                selectionLog.find(L"imageBytes=") != std::wstring::npos,
+                "invalid RGB layout includes specific reason and bounded header details");
+        };
+        for (DWORD size : {DWORD(sizeof(BITMAPV4HEADER)), DWORD(sizeof(BITMAPV5HEADER)), 0xfffffffful}) {
+            reset(); layout.info.bmiHeader.biSize = size; reject(L"rgb-header-size");
+        }
+        reset(); layout.info.bmiHeader.biBitCount = 16; reject(L"rgb-bit-depth");
+        reset(); layout.info.bmiHeader.biPlanes = 2; reject(L"rgb-plane-count");
+        reset(); layout.info.bmiHeader.biCompression = BI_RLE8; reject(L"rgb-compression");
+        reset(); layout.info.bmiHeader.biSizeImage = 1; reject(L"rgb-image-size");
+        reset(); layout.info.bmiHeader.biSizeImage = 1001; reject(L"rgb-row-remainder");
+        reset(); layout.info.bmiHeader.biSizeImage = 72; reject(L"rgb-row-alignment");
+        reset(); layout.info.bmiHeader.biCompression = BI_BITFIELDS;
+        if (format == VideoPixelFormat::Rgb32) {
+            layout.masks[0] = 0xff; layout.masks[1] = 0xff00; layout.masks[2] = 0xff0000;
+            reject(L"rgb-channel-masks");
+            Check(selectionLog.find(L"masks=present:000000FF/0000FF00/00FF0000") != std::wstring::npos,
+                "nonstandard RGB masks are logged verbatim");
+            media.cbFormat = sizeof(VIDEOINFOHEADER2) + 11; reject(L"rgb-masks-truncated");
+            Check(selectionLog.find(L"masks=unavailable") != std::wstring::npos,
+                "truncated masks are never read for logging");
+        } else reject(L"rgb-compression");
+        reset(); media.cbFormat = 1; reject(L"geometry-format-or-timing");
+    }
+    FakeVideoPin pin; pin.modes = {{60}};
+    pin.modes[0].subtype = MEDIASUBTYPE_RGB32; pin.modes[0].biBitCount = 24;
+    selectionLog.clear(); HRESULT status = S_OK;
+    Check(ProbePixelFormats(&pin, 1920, 1080, &status, SelectionLog).empty() && FAILED(status) &&
+        selectionLog.find(L"reason=rgb-bit-depth") != std::wstring::npos,
+        "capability probing forwards detailed RGB rejection diagnostics");
+}
+
 }  // namespace
 
 #include "VideoFaultInjection.inl"
@@ -972,6 +1374,9 @@ int main(int argc, char** argv) {
     TestMalformedCapabilityOwnership();
     TestUnsupportedFormatDiagnostics();
     TestUyvyNegotiationAndColor();
+    TestRgb32LayoutAndOrientation();
+    TestRgb24LayoutAndOrientation();
+    TestRgbRejectionDiagnostics();
     if (failures != 0) {
         std::fprintf(stderr, "%d test(s) failed.\n", failures);
         return 1;

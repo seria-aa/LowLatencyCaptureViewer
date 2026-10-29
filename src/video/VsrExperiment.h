@@ -27,7 +27,8 @@ constexpr bool Eligible(UINT vendor, DXGI_FORMAT format, bool hdr,
     // HDR stays P010 -> RGB10 BT.2020/PQ on the existing HDR10 processor.
     // This is VSR for native HDR, NOT RTX Video HDR (SDR-to-HDR conversion).
     const bool supportedRoute = hdr ? format == DXGI_FORMAT_P010
-                                    : (format == DXGI_FORMAT_NV12 || format == DXGI_FORMAT_YUY2);
+                                    : (format == DXGI_FORMAT_NV12 || format == DXGI_FORMAT_YUY2 ||
+                                       format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_B8G8R8X8_UNORM);
     return vendor == 0x10de && supportedRoute &&
         width > 0 && height > 0 && outputWidth >= width && outputHeight >= height;
 }

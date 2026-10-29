@@ -147,6 +147,44 @@ void Pixels() {
         Check(std::abs(int(Convert(d,Neutral(d,code))[0])-expected)<=1,"PQ LUT + tonemap within one 8-bit code of oracle");
     }
 }
+void RgbPixels() {
+    for (auto format : {Format::Rgb24, Format::Rgb32})
+    for (bool topDown : {true, false})
+    for (auto range : {llcv::video_color::Range::Full, llcv::video_color::Range::Limited}) {
+        Description d{3,3,format}; d.topDown=topDown; d.color.range=range;
+        const unsigned bpp=format==Format::Rgb24 ? 3u : 4u, row=d.width*bpp, stride=(row+3)&~3u;
+        const size_t required=size_t(stride)*(d.height-1)+row;
+        GuardedBuffer source(required,true); std::fill(source.Bytes().begin(),source.Bytes().end(),0xed);
+        for (unsigned y=0;y<d.height;++y) for (unsigned x=0;x<d.width;++x) {
+            auto* px=source.Bytes().data()+size_t(y)*stride+x*bpp;
+            px[0]=static_cast<std::uint8_t>(x*91+y*17); px[1]=static_cast<std::uint8_t>(16+x*50+y*30);
+            px[2]=static_cast<std::uint8_t>(235-x*31-y*19); if (bpp==4) px[3]=static_cast<std::uint8_t>(x*63+y*29);
+        }
+        Check(PackedSize(d)==size_t(row)*d.height,"RGB odd dimensions packed size");
+        std::vector<std::uint8_t> packed(PackedSize(d));
+        Check(!CopyFrame(d,source.Bytes().data(),required-1,stride,packed),"RGB truncated final row rejected");
+        Check(!CopyFrame(d,source.Bytes().data(),required,row-1,packed),"RGB short stride rejected");
+        Check(CopyFrame(d,source.Bytes().data(),required,stride,packed),"RGB padded guarded copy");
+        for (unsigned y=0;y<d.height;++y) Check(std::memcmp(packed.data()+size_t(y)*row,source.Bytes().data()+size_t(y)*stride,row)==0,"RGB copy preserves source row order");
+        const auto bgra=Convert(d,packed);
+        const auto expand=[&](unsigned c) { return range==llcv::video_color::Range::Full ? int(c) : std::clamp(int(std::lround((int(c)-16)*255.0/219.0)),0,255); };
+        for (unsigned y=0;y<d.height;++y) for (unsigned x=0;x<d.width;++x) {
+            const unsigned sy=topDown?y:d.height-1-y;
+            const auto* px=source.Bytes().data()+size_t(sy)*stride+x*bpp;
+            for (unsigned c=0;c<3;++c) Check(bgra[(size_t(y)*d.width+x)*4+c]==expand(px[c]),"RGB range and orientation");
+            Check(bgra[(size_t(y)*d.width+x)*4+3]==255,"RGB opaque alpha ignores X");
+        }
+        std::vector<std::uint8_t> chunks(bgra.size());
+        for (unsigned y=0;y<d.height;++y) Check(ConvertRows(d,packed,y,1,std::span(chunks).subspan(size_t(y)*d.width*4,d.width*4)),"RGB row conversion");
+        Check(chunks==bgra,"RGB chunked orientation");
+        d.color.matrix=llcv::video_color::Matrix::Bt601;
+        Check(Convert(d,packed)==bgra,"RGB ignores YUV matrix");
+    }
+    Description single{1,1,Format::Rgb24};
+    const std::uint8_t one[]{1,2,3}; std::vector<std::uint8_t> packed(3);
+    Check(CopyFrame(single,one,3,3,packed),"single row copy avoids zero divisor");
+    Check(!PackedSize({UINT_MAX,UINT_MAX,Format::Rgb32}),"RGB oversized dimensions rejected");
+}
 void UyvyPixels() {
     for (unsigned width : {2u,6u,32u}) for (unsigned height : {2u,6u,18u}) {
         Description yuy2{width,height,Format::Yuy2};
@@ -244,6 +282,25 @@ void Native(const std::wstring& dir) {
         const auto result=Await(service);
         Check(result.fileResult==S_OK && result.toneMapped,"colored HDR worker completion");
         Check(ReadPng(result.path,32,18)==expected,"colored HDR PNG pixel-exact with resolved siting");
+        service.Stop();
+    }
+    for (auto format : {Format::Rgb24,Format::Rgb32}) for (bool topDown : {true,false}) {
+        Description rgb{3,3,format}; rgb.topDown=topDown; rgb.color.range=llcv::video_color::Range::Full;
+        const unsigned bpp=format==Format::Rgb24?3u:4u, stride=(rgb.width*bpp+3)&~3u;
+        std::vector<std::uint8_t> input(size_t(stride)*rgb.height,0xee), packed(PackedSize(rgb));
+        for (unsigned y=0;y<rgb.height;++y) for (unsigned x=0;x<rgb.width;++x) {
+            auto* px=input.data()+size_t(y)*stride+x*bpp; px[0]=BYTE(10+y*40); px[1]=BYTE(20+x*30); px[2]=BYTE(30+y*20); if(bpp==4) px[3]=BYTE(x+y);
+        }
+        Check(CopyFrame(rgb,input.data(),input.size(),stride,packed),"RGB worker expected copy");
+        const auto expected=Convert(rgb,packed);
+        Check(service.Start(rgb.width,rgb.height,format,dir,topDown) && service.Request(false),"RGB worker start");
+        auto wrong=rgb; wrong.topDown=!topDown;
+        service.Submit(wrong,input.data(),input.size(),stride);
+        Check(!service.Request(false),"RGB mismatched orientation cannot consume request");
+        service.Submit(rgb,input.data(),input.size(),stride);
+        std::fill(input.begin(),input.end(),0xdd);
+        const auto result=Await(service);
+        Check(result.fileResult==S_OK && !result.toneMapped && ReadPng(result.path,rgb.width,rgb.height)==expected,"RGB worker PNG matches immutable snapshot");
         service.Stop();
     }
     for (auto format : {Format::Nv12,Format::Yuy2,Format::P010,Format::Uyvy}) {
@@ -371,7 +428,7 @@ int wmain(int argc, wchar_t** argv) {
     wchar_t id[40]{}; StringFromGUID2(guid,id,40);
     const auto dir=std::wstring(temp)+L"llcv-screenshot-test-"+id;
     Check(std::filesystem::create_directory(dir),"isolated test folder");
-    Pixels(); GuardPages(); UyvyPixels(); HdrScreenshotReferenceTests(); Native(dir); ConcurrentLifecycle(dir);
+    Pixels(); GuardPages(); RgbPixels(); UyvyPixels(); HdrScreenshotReferenceTests(); Native(dir); ConcurrentLifecycle(dir);
     if (argc>1 && std::wcscmp(argv[1],L"--clipboard")==0) Clipboard();
     if (argc>1 && std::wcscmp(argv[1],L"--benchmark")==0) Benchmark(dir);
     // Only exact files produced in this unique test folder are removed.

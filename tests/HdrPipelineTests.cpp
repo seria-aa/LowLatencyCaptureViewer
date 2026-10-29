@@ -428,6 +428,178 @@ static int TestRawSdr() {
     return 0;
 }
 
+// RGB32/BGRX stage-2 GPU fidelity: asymmetric per-channel pattern (not just
+// luma), top-down vs bottom-up orientation (VideoProcessorSetStreamMirror),
+// Full vs Limited RGB range, the garbage X byte never leaking into the
+// output, and a resize + repeated draw. Skips cleanly (77) if the driver
+// does not advertise RGB32 Video Processor input or mirror support, since
+// this is a synthetic GPU/policy test independent of any real capture
+// device's advertised formats (GC573 does not advertise RGB32 at all).
+static int TestRawSdrRgb32(bool rgb24 = false) {
+    const auto format = rgb24 ? VideoPixelFormat::Rgb24 : VideoPixelFormat::Rgb32;
+    const UINT bytesPerPixel = rgb24 ? 3u : 4u;
+    Check(CoInitializeEx(nullptr, COINIT_MULTITHREADED), "RGB COM");
+    constexpr UINT width = 255, height = 128;
+    HWND hwnd = CreateWindowExW(0, L"STATIC", L"Hidden RGB32 fidelity test", WS_POPUP,
+        0, 0, width, height, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    Require(hwnd != nullptr, "RGB hidden window");
+    g_settings.pixelPerfect = false;
+    g_settings.scalingMode = ScalingMode::Sharp;
+    g_settings.presentationMode = PresentationMode::VSync;
+    g_osdVisible = false; g_audioOsdVisible = false; g_volumeHudUntilMs = 0;
+    bool anySkipped = false, anyRun = false;
+    {
+        DirectShowColorMetadata metadata{};
+        metadata.present = true; metadata.nominalRange = 2;
+        g_settings.sdrRangeOverride = llcv::video_color::RangeOverride::Auto;
+        Require(ResolveRawSdrVideoColor(format, width, height, {}).range == llcv::video_color::Range::Full, "RGB default full");
+        Require(ResolveRawSdrVideoColor(format, width, height, metadata).range == llcv::video_color::Range::Limited, "RGB metadata range");
+        g_settings.sdrRangeOverride = llcv::video_color::RangeOverride::Full;
+        Require(ResolveRawSdrVideoColor(format, width, height, metadata).range == llcv::video_color::Range::Full, "RGB override range");
+        g_settings.sdrRangeOverride = llcv::video_color::RangeOverride::Auto;
+        DirectD3D11Renderer reject;
+        for (UINT transfer : {15u, 16u}) {
+            metadata.transferFunction = transfer;
+            Require(reject.initialize(hwnd, width, height, 60, format, false, {},
+                DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020, true, metadata) == DXGI_ERROR_UNSUPPORTED,
+                "RGB PQ/HLG explicitly rejected without YUV matrix");
+        }
+        metadata.transferFunction = 4; metadata.primaries = 9;
+        Require(reject.initialize(hwnd, width, height, 60, format, false, {},
+            DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020, true, metadata) == DXGI_ERROR_UNSUPPORTED,
+            "RGB BT2020 primaries rejected even for SDR transfer");
+    }
+    {
+        DirectD3D11Renderer r;
+        for (bool fullRange : {true, false})
+        for (bool topDown : {true, false}) {
+            llcv::video_color::Configuration color{};
+            color.range = fullRange ? llcv::video_color::Range::Full : llcv::video_color::Range::Limited;
+            const HRESULT hr = r.initialize(hwnd, width, height, 60, format,
+                false, color, DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020, topDown);
+            if (hr == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) || hr == DXGI_ERROR_UNSUPPORTED ||
+                hr == E_NOINTERFACE) {
+                std::printf("SKIP: GPU RGB Video Processor input/mirror unsupported (full=%d topDown=%d) 0x%08X\n",
+                    fullRange, topDown, static_cast<unsigned>(hr));
+                anySkipped = true;
+                continue;
+            }
+            Check(hr, "RGB initialize");
+            anyRun = true;
+            Require(r.rgbInput && r.lastTopDown == topDown, "RGB renderer state matches request");
+            DXGI_COLOR_SPACE_TYPE streamSpace{}, outputSpace{};
+            r.videoContext1->VideoProcessorGetStreamColorSpace1(r.processor, 0, &streamSpace);
+            r.videoContext1->VideoProcessorGetOutputColorSpace1(r.processor, &outputSpace);
+            Require(streamSpace == (fullRange ? DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 : DXGI_COLOR_SPACE_RGB_STUDIO_G22_NONE_P709), "RGB queried tuple applied to stream");
+            Require(outputSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, "RGB queried tuple applied to output");
+
+            // Pattern is defined in buffer-row space: blue ramps with column,
+            // green ramps with buffer row, red alternates, and the X byte is
+            // deliberately non-constant garbage that must never be sampled.
+            const UINT pitch = (width * bytesPerPixel + 3) & ~3u;
+            std::vector<BYTE> pixels(static_cast<size_t>(pitch) * height);
+            for (UINT y = 0; y < height; ++y) for (UINT x = 0; x < width; ++x) {
+                BYTE* p = &pixels[y * pitch + x * bytesPerPixel];
+                p[0] = static_cast<BYTE>((x * 255) / (width - 1));   // B
+                p[1] = static_cast<BYTE>((y * 255) / (height - 1));  // G
+                p[2] = static_cast<BYTE>(((x + y) % 2) ? 200 : 40);  // R
+                if (!rgb24) p[3] = static_cast<BYTE>((x * 37 + y) & 0xff);       // garbage X
+            }
+            r.upload(pixels.data(), pitch);
+            D3D11_VIDEO_PROCESSOR_STREAM stream{};
+            stream.Enable = TRUE; stream.pInputSurface = r.inputViews[r.activeUploadSurface];
+            Check(r.videoContext->VideoProcessorBlt(r.processor, r.outputView, 0, 1, &stream), "RGB blit");
+
+            const auto expand = [&](double value) {
+                return fullRange ? value : std::clamp((value - 16.0) * 255 / 219, 0.0, 255.0);
+            };
+            llcv::screenshot::Description screenshot{width, height,
+                rgb24 ? llcv::screenshot::Format::Rgb24 : llcv::screenshot::Format::Rgb32};
+            screenshot.color = color; screenshot.topDown = topDown;
+            std::vector<BYTE> packed(llcv::screenshot::PackedSize(screenshot));
+            std::vector<BYTE> screenshotPixels(size_t(width)*height*4);
+            Require(llcv::screenshot::CopyFrame(screenshot, pixels.data(), pixels.size(), pitch, packed), "RGB screenshot copy");
+            Require(llcv::screenshot::ConvertRows(screenshot, packed, 0, height, screenshotPixels), "RGB screenshot conversion");
+            for (UINT bufferRow : {0u, height - 1}) for (UINT x : {0u, width / 2, width - 1}) {
+                // A bottom-up DIB's buffer row 0 is the image's bottom; the
+                // renderer's mirror corrects this on the GPU without any CPU
+                // reordering, so buffer row and screen row diverge exactly
+                // when topDown is false.
+                const UINT screenY = topDown ? bufferRow : (height - 1 - bufferRow);
+                const double expectedBlue = expand((x * 255.0) / (width - 1));
+                const double expectedGreen = expand((bufferRow * 255.0) / (height - 1));
+                const double expectedRed = expand(((x + bufferRow) % 2) ? 200.0 : 40.0);
+                const auto actual = Read(r, x, screenY);
+                const BYTE* screenshotPixel = screenshotPixels.data() + (size_t(screenY)*width+x)*4;
+                Near(actual[0], screenshotPixel[2], 3, "GPU matches screenshot red");
+                Near(actual[1], screenshotPixel[1], 3, "GPU matches screenshot green");
+                Near(actual[2], screenshotPixel[0], 3, "GPU matches screenshot blue");
+                Require(screenshotPixel[3] == 255, "screenshot alpha opaque");
+                Near(actual[0], expectedRed, 3, "RGB red channel (orientation/range aware)");
+                Near(actual[1], expectedGreen, 3, "RGB green channel (orientation/range aware)");
+                Near(actual[2], expectedBlue, 3, "RGB blue channel (orientation/range aware)");
+            }
+            RequireCleanGpu(r);
+
+            Check(r.resizeOutput(hwnd), "RGB output resize");
+            Require(r.lastTopDown == topDown, "RGB orientation survives output resize");
+            // Crop in post-mirror image coordinates, using an asymmetric image.
+            for (UINT y = 0; y < height; ++y) for (UINT x = 0; x < width; ++x) {
+                BYTE* p = &pixels[y * pitch + x * bytesPerPixel];
+                const UINT screenY = topDown ? y : height - 1 - y;
+                p[0] = screenY < height / 2 ? 50 : 180;
+                p[1] = x < width / 2 ? 80 : 200;
+                p[2] = screenY < height / 2 ? 120 : 220;
+                if (!rgb24) p[3] = 0;
+            }
+            r.upload(pixels.data(), pitch);
+            RECT crop{16, 8, LONG(width / 2 - 16), LONG(height / 2 - 8)};
+            const RECT storageCrop = VideoSourceRectForStorage(crop, height, !topDown);
+            r.videoContext->VideoProcessorSetStreamSourceRect(r.processor, 0, TRUE, &storageCrop);
+            stream.pInputSurface = r.inputViews[r.activeUploadSurface];
+            for (int draw = 0; draw < 2; ++draw)
+                Check(r.videoContext->VideoProcessorBlt(r.processor, r.outputView, 0, 1, &stream), "RGB crop repeated blit");
+            const auto cropped = Read(r, width / 2, height / 2);
+            Near(cropped[0], expand(120), 3, "RGB crop red");
+            Near(cropped[1], expand(80), 3, "RGB crop green");
+            Near(cropped[2], expand(50), 3, "RGB crop blue");
+            RequireCleanGpu(r);
+
+            // Resize + repeated draw: reinitialize smaller with the same
+            // orientation/range and confirm the pipeline still produces the
+            // correct sample without leaking GPU warnings.
+            Check(r.initialize(hwnd, width / 2, height / 2, 60, format,
+                false, color, DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020, topDown),
+                "RGB resize");
+            const UINT smallPitch = ((width / 2) * bytesPerPixel + 3) & ~3u;
+            std::vector<BYTE> smallPixels(static_cast<size_t>(smallPitch) * (height / 2));
+            for (auto& byteValue : smallPixels) byteValue = 0;
+            for (UINT y = 0; y < height / 2; ++y) for (UINT x = 0; x < width / 2; ++x) {
+                BYTE* p = &smallPixels[y * smallPitch + x * bytesPerPixel];
+                p[0] = 30; p[1] = 20; p[2] = 10; if (!rgb24) p[3] = 0xAA;
+            }
+            r.upload(smallPixels.data(), smallPitch);
+            D3D11_VIDEO_PROCESSOR_STREAM smallStream{};
+            smallStream.Enable = TRUE; smallStream.pInputSurface = r.inputViews[r.activeUploadSurface];
+            Check(r.videoContext->VideoProcessorBlt(r.processor, r.outputView, 0, 1, &smallStream),
+                "RGB resized blit");
+            const UINT cy = topDown ? 0u : (height / 2 - 1);
+            const auto resizedActual = Read(r, 0, cy);
+            Near(resizedActual[0], expand(10), 3, "RGB resize preserves red");
+            Near(resizedActual[1], expand(20), 3, "RGB resize preserves green");
+            Near(resizedActual[2], expand(30), 3, "RGB resize preserves blue");
+            RequireCleanGpu(r);
+            std::printf("RGB fullRange=%d topDown=%d: pixel/orientation/resize fidelity passed\n",
+                fullRange, topDown);
+        }
+    }
+    DestroyWindow(hwnd); CoUninitialize();
+    if (!anyRun) { std::puts("SKIP: GPU RGB Video Processor path unsupported in this environment"); return 77; }
+    std::printf("RGB fidelity tests %s; no capture device used.\n",
+        anySkipped ? "passed for supported combinations (some skipped)" : "passed for all combinations");
+    return 0;
+}
+
 static void SaveOverlayPreview(DirectD3D11Renderer& renderer, ID3D11Texture2D* texture,
                                const std::filesystem::path& path) {
     if (path.empty()) return;
@@ -1002,6 +1174,8 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--vsr-hdr") return TestHdrVsr();
     if (argc >= 2 && std::string(argv[1]) == "--osd-ui") return TestOverlayUi(argc >= 3 ? argv[2] : nullptr);
     if (argc == 2 && std::string(argv[1]) == "--sdr-only") return TestRawSdr();
+    if (argc == 2 && std::string(argv[1]) == "--rgb32") return TestRawSdrRgb32();
+    if (argc == 2 && std::string(argv[1]) == "--rgb24") return TestRawSdrRgb32(true);
     Check(CoInitializeEx(nullptr, COINIT_MULTITHREADED), "COM");
     HWND hwnd = CreateWindowExW(0, L"STATIC", L"HDR pixel test", WS_POPUP,
         0, 0, 800, 500, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
