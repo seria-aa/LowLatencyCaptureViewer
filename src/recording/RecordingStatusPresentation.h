@@ -50,6 +50,15 @@ inline View Build(const Snapshot& snapshot,bool english) {
     }
     result.canOpenVideo=!snapshot.busy && snapshot.playable && !snapshot.path.empty();
     result.canOpenFolder=!snapshot.busy && !snapshot.path.empty();
+    if(snapshot.phase==Phase::Failed && snapshot.result==RgbRecordingTooSlow && !snapshot.busy){
+        result.title=english?L"Adjust recording settings":L"녹화 설정 조정 필요";
+        wchar_t message[512]{};
+        swprintf_s(message,english?
+            L"RGB conversion %.1f ms / frame budget %.1f ms.\r\nLower recording resolution or FPS and retry.\r\nNo recording file created. Playback continues.":
+            L"RGB 변환 %.1fms / 프레임 예산 %.1fms.\r\n녹화 해상도·프레임 상한을 낮춰주세요.\r\n파일을 만들지 않았습니다. 재생은 계속됩니다.",
+            snapshot.rgbConversionMs,snapshot.rgbBudgetMs);
+        result.description=message;result.canOpenVideo=result.canOpenFolder=false;return result;
+    }
     if(snapshot.phase==Phase::Failed && snapshot.failure==Failure::InvalidInput &&
        snapshot.result==UnsupportedUyvyRecording && !snapshot.busy && !snapshot.playable) {
         result.title=english?L"Recording unavailable":L"녹화할 수 없음";

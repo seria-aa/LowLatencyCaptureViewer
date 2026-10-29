@@ -175,6 +175,47 @@ int main() {
         Expect(!recorder.Start(uyvyExisting.wstring()) && SentinelPreserved(uyvyExisting),
             "UYVY rejection never touches an existing target");
 
+        for(auto format:{llcv::settings::VideoPixelFormat::Rgb24,llcv::settings::VideoPixelFormat::Rgb32}) {
+            auto rgb=video;rgb.format=format;rgb.stride=1;
+            const auto rgbFile=temporary.Path(L"invalid-rgb.mp4");
+            recorder.Configure(rgb,audio,{},false,options);
+            Expect(!recorder.Start(rgbFile.wstring()),"malformed RGB stride rejected before startup");
+            Expect(!std::filesystem::exists(rgbFile) &&
+                !llcv::recording::RecorderTestAccess::HasWorker(recorder),"invalid RGB creates no file or worker");
+        }
+
+        // Exercise the real pre-file admission path, not just its policy helper.
+        // Faster hosts may legitimately admit it; never hard-code a CPU speed.
+        {
+            auto rgb = video; rgb.format = llcv::settings::VideoPixelFormat::Rgb32;
+            rgb.width = 3840; rgb.height = 2160; rgb.stride = 3840 * 4; rgb.fps = 60;
+            auto native = options; native.maxHeight = 0; native.maxFps = 60;
+            const auto file = temporary.Path(L"rgb-native-admission.mp4");
+            recorder.Configure(rgb, audio, {}, false, native);
+            Expect(recorder.Start(file.wstring()), "valid RGB admission runs asynchronously");
+            Expect(WaitFor([&] { return recorder.Recording() || !recorder.Busy(); }),
+                "RGB preflight resolves without blocking indefinitely");
+            state = recorder.GetSnapshot();
+            Expect(state.rgbConversionMs > 0 && std::abs(state.rgbBudgetMs - 1000.0 / 60) < 1e-6 &&
+                state.rgbBufferBytes == uint64_t(3840) * 2160 * (4 * 4 + 3 * 16 / 2),
+                "worker publishes selected FPS budget and bounded real 4K frame pools");
+            std::printf("RGB native admission: recording=%u result=%08X convert=%.3f ms budget=%.3f ms pools=%.2f MiB file=%u\n",
+                recorder.Recording() ? 1u : 0u, unsigned(state.result), state.rgbConversionMs,
+                state.rgbBudgetMs, state.rgbBufferBytes / 1048576.0, std::filesystem::exists(file) ? 1u : 0u);
+            if (recorder.Recording()) {
+                Expect(state.rgbConversionMs <= state.rgbBudgetMs * .75,
+                    "an admitted host has measured headroom without lowering selected FPS");
+                recorder.Stop(); WaitIdle(recorder);
+            } else {
+                Expect(state.phase == Phase::Failed && state.result == llcv::recording::RgbRecordingTooSlow &&
+                    !state.playable && !std::filesystem::exists(file),
+                    "slow RGB admission fails before any recording file is created");
+                for (bool english : {false, true})
+                    Expect(!presentation::Build(state, english).canOpenVideo,
+                        "real rejected preflight never enables a nonexistent video");
+            }
+        }
+
         const auto occupiedFolder = temporary.Path(L"not-a-folder");
         Sentinel(occupiedFolder);
         recorder.Configure(video, audio, {}, false, options);

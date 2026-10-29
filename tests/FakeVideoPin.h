@@ -21,6 +21,10 @@ public:
         REFERENCE_TIME minimumInterval = 0;
         REFERENCE_TIME maximumInterval = 0;
         DWORD controlFlags = 0;
+        // Only meaningful for RGB subtypes; unused (zero) by every existing
+        // YUV/MJPEG test mode.
+        WORD biBitCount = 0;
+        DWORD biCompression = 0;
     };
     std::vector<Mode> modes;
     std::vector<int> attemptedRates;
@@ -75,8 +79,11 @@ public:
         info->AvgTimePerFrame = mode.fps ? 10'000'000 / mode.fps : 0;
         info->dwControlFlags = mode.controlFlags;
         info->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info->bmiHeader.biPlanes = 1;
         info->bmiHeader.biWidth = mode.width;
         info->bmiHeader.biHeight = mode.height;
+        info->bmiHeader.biBitCount = mode.biBitCount;
+        info->bmiHeader.biCompression = mode.biCompression;
         info->bmiHeader.biSizeImage = mode.imageBytes >= 0
             ? mode.imageBytes : static_cast<DWORD>(int64_t(mode.width) * mode.height * 3 / 2);
         media->majortype = MEDIATYPE_Video;

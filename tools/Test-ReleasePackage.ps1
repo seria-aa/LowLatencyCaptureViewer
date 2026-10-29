@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$PackageRoot,
-    [string]$Version = "2.1.8"
+    [string]$Version = "2.1.9"
 )
 $ErrorActionPreference = "Stop"
 $package = (Resolve-Path -LiteralPath $PackageRoot).Path

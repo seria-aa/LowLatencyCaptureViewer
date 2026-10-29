@@ -13,6 +13,57 @@ def run(command):
     return result.stdout
 
 
+def initialization_state(path):
+    """Exclude only a recognizable incomplete init prefix, never arbitrary damage."""
+    length = path.stat().st_size
+    if not length:
+        return "incomplete"
+    with path.open("rb") as stream:
+        offset = 0
+        have_ftyp = False
+        while offset + 8 <= length:
+            stream.seek(offset)
+            header = stream.read(8)
+            size = int.from_bytes(header[:4], "big")
+            kind = header[4:]
+            allowed = kind == b"ftyp" if offset == 0 else have_ftyp and kind in (b"free", b"skip", b"moov")
+            header_size = 8
+            if size == 1:
+                if offset + 16 > length:
+                    return "incomplete" if allowed else "invalid"
+                size = int.from_bytes(stream.read(8), "big")
+                header_size = 16
+            if size < header_size or (kind == b"ftyp" and size < header_size + 8):
+                return "invalid"
+            if offset + size > length:
+                return "incomplete" if allowed else "invalid"
+            if kind == b"moov":
+                # All initialized files must still pass ffprobe and full decoding.
+                return "initialized"
+            if not allowed:
+                return "invalid"
+            if kind == b"ftyp":
+                have_ftyp = True
+            offset += size
+    return "incomplete" if offset == length and have_ftyp else "invalid"
+
+
+def initialized(path):
+    return initialization_state(path) == "initialized"
+
+
+def recoverable_segments(paths, crash):
+    """Never skip an interior file, a finalized file, or an initialized corrupt tail."""
+    paths = sorted(paths)
+    states = {path: initialization_state(path) for path in paths}
+    assert "invalid" not in states.values(), "malformed or ambiguous initialization cannot be excluded"
+    uninitialized = [path for path in paths if states[path] == "incomplete"]
+    if uninitialized:
+        assert crash and uninitialized == paths[-1:], "only an uninitialized crash tail may be excluded"
+        return paths[:-1], paths[-1].name
+    return paths, None
+
+
 def verify(args, root):
     command = [args.test_exe, "--fixture", args.fixture, "--split-" + args.mode]
     if args.crash:
@@ -25,7 +76,8 @@ def verify(args, root):
     manifest = json.loads(manifest_path.read_text())
     positions = {"video": 0, "audio": 0}
     reports = []
-    for path in sorted(manifest_path.parent.glob("complete-*.mp4")):
+    paths, incomplete_tail = recoverable_segments(manifest_path.parent.glob("complete-*.mp4"), args.crash)
+    for path in paths:
         probe = json.loads(run([args.ffprobe, "-v", "error", "-show_packets", "-show_streams", "-of", "json", str(path)]))
         streams = {s["index"]: s["codec_type"] for s in probe["streams"]}
         tracks = {kind: [p for p in probe["packets"] if streams[p["stream_index"]] == kind] for kind in positions}
@@ -58,7 +110,8 @@ def verify(args, root):
         assert abs(tails[0] - tails[1]) < 0.15, "recovered audio/video tails"
     else:
         assert all(positions[k] == len(manifest[k]) for k in positions), "missing or duplicated boundary packets"
-    report = {"passed": True, "segments": reports, "total_packets": positions}
+    report = {"passed": True, "segments": reports, "total_packets": positions,
+              "uninitialized_crash_tail": incomplete_tail}
     (root / "segment-verification.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report))
 

@@ -169,10 +169,11 @@ HRESULT PublishClipboard(std::span<const std::uint8_t> bgra, unsigned width,
 }
 
 Service::~Service() { Stop(); }
-bool Service::Start(unsigned width, unsigned height, Format format, std::wstring directory) noexcept {
+bool Service::Start(unsigned width, unsigned height, Format format, std::wstring directory, bool topDown) noexcept {
     Stop();
     try {
         desc_={width,height,format};
+        desc_.topDown=topDown;
         const auto size=PackedSize(desc_);
         if (!size || directory.empty()) return false;
         raw_.resize(size); // Pre-touch before streaming, not on a screenshot frame.
@@ -212,7 +213,7 @@ void Service::Submit(const Description& desc, const std::uint8_t* data,
     if (state_.load(std::memory_order_relaxed)!=expected ||
         !state_.compare_exchange_strong(expected,State::Copying,std::memory_order_acquire)) return;
     const auto begin=std::chrono::steady_clock::now();
-    if (desc.width!=desc_.width || desc.height!=desc_.height || desc.format!=desc_.format ||
+    if (desc.width!=desc_.width || desc.height!=desc_.height || desc.format!=desc_.format || desc.topDown!=desc_.topDown ||
         !CopyFrame(desc,data,length,stride,raw_)) {
         state_.store(State::Requested,std::memory_order_release);
         return;

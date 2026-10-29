@@ -17,7 +17,7 @@ try {
         throw "Missing release notes for $Version."
     }
     foreach ($name in @('UPSCALING_BOUNDARY_SAFETY.md', 'UPSCALING_OVERFLOW_DIAGNOSTIC.md',
-            'UYVY_HDYC_SUPPORT.md')) {
+            'UYVY_HDYC_SUPPORT.md', 'RGB_CAPTURE_SUPPORT.md')) {
         if (Test-Path -LiteralPath (Join-Path $stage "docs/$name")) {
             throw "Development-only document included in release: $name"
         }

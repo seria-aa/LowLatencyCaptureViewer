@@ -22,6 +22,19 @@ static void Check(HRESULT hr, const char* label) {
 static void TestPolicy() {
     using namespace llcv::vsr;
     Require(Eligible(0x10de, DXGI_FORMAT_NV12, false, 1280,720,1920,1080), "720p to 1080p eligible");
+    Require(Eligible(0x10de, DXGI_FORMAT_R8G8B8A8_UNORM, false, 1280,720,1920,1080) &&
+            Eligible(0x10de, DXGI_FORMAT_B8G8R8X8_UNORM, false, 1280,720,1920,1080) &&
+            !Eligible(0x10de, DXGI_FORMAT_R8G8B8A8_UNORM, false, 1280,720,640,360),
+            "native RGB can request VSR without allowing downscale");
+    const auto previousFormat = g_activePixelFormat.load();
+    for (auto format : {VideoPixelFormat::Rgb24, VideoPixelFormat::Rgb32}) {
+        g_activePixelFormat.store(static_cast<int>(format));
+        const auto text=BuildRuntimeOsdText(1280,720);
+        Require(text.find(IsEnglishUi()?L"RGB (no YUV chroma)":L"RGB (YUV 색차 없음)")!=std::wstring::npos && text.find(L"8-bit")!=std::wstring::npos &&
+                text.find(L"VSR 미지원")==std::wstring::npos &&
+                text.find(L"VSR unavailable")==std::wstring::npos, "RGB OSD reports native color without obsolete VSR limitation");
+    }
+    g_activePixelFormat.store(previousFormat);
     const auto savedSettings = g_settings;
     const UINT savedVendor = g_vsrGpuVendor.load();
     g_settings.preferredUpscaler=llcv::settings::UpscalingMethod::NvidiaVsr;
@@ -970,6 +983,42 @@ static void TestSettingsModeFlow() {
     Require(modeQueryCalls == 3 && state.pixelFormats.front().selectedFps == 144,
         "unavailable VSR preserves the capture field even with a stale check");
     state.videoModeCache.reset();
+    state.appliedVideoModeKey = {};
+    state.videoModeCache = std::make_unique<llcv::settings_ui::SettingsModeCache<SettingsVideoModes>>(
+        [](const auto&) { SettingsVideoModes modes; modes.status=S_OK;
+            modes.formats={{VideoPixelFormat::Nv12,60},{VideoPixelFormat::Rgb24,60},{VideoPixelFormat::Rgb24,30}}; return modes; },
+        [window] { PostMessageW(window,WM_SETTINGS_VIDEO_MODES_READY,0,0); });
+    PopulatePixelFormatCombo(&state); complete();
+    LRESULT rgb24Index=CB_ERR, rgb32Index=CB_ERR;
+    for (LRESULT i=0;i<SendMessageW(state.pixelFormatCombo,CB_GETCOUNT,0,0);++i) {
+        const auto item=SendMessageW(state.pixelFormatCombo,CB_GETITEMDATA,i,0);
+        if(item==static_cast<LRESULT>(VideoPixelFormat::Rgb24)) rgb24Index=i;
+        if(item==static_cast<LRESULT>(VideoPixelFormat::Rgb32)) rgb32Index=i;
+    }
+    Require(rgb24Index!=CB_ERR && rgb32Index==CB_ERR,"combo exposes only device-advertised RGB formats");
+    SendMessageW(state.pixelFormatCombo,CB_SETCURSEL,rgb24Index,0);
+    PopulateFrameRateCombo(&state);UpdateVideoCapabilityStatus(&state);
+    Require(rateRows(30)==1 && rateRows(60)==1 && rateRows(144)==0,"RGB frame rates follow selected native format");
+    wchar_t capability[512]{};GetWindowTextW(state.videoCapabilityStatus,capability,512);
+    Require(wcsstr(capability,L"RGB24")!=nullptr && wcsstr(capability,L"RGB32")==nullptr,"RGB diagnostics reflect advertised formats");
+    state.videoModeCache.reset();
+    state.appliedVideoModeKey = {};
+    SendMessageW(state.pixelFormatCombo,CB_SETCURSEL,0,0);
+    state.videoModeCache = std::make_unique<llcv::settings_ui::SettingsModeCache<SettingsVideoModes>>(
+        [](const auto&) { SettingsVideoModes modes; modes.status=S_OK;
+            modes.formats={{VideoPixelFormat::Nv12,60},{VideoPixelFormat::Rgb32,120}}; return modes; },
+        [window] { PostMessageW(window,WM_SETTINGS_VIDEO_MODES_READY,0,0); });
+    PopulatePixelFormatCombo(&state);complete();
+    rgb24Index=rgb32Index=CB_ERR;
+    for(LRESULT i=0;i<SendMessageW(state.pixelFormatCombo,CB_GETCOUNT,0,0);++i) {
+        const auto item=SendMessageW(state.pixelFormatCombo,CB_GETITEMDATA,i,0);
+        if(item==static_cast<LRESULT>(VideoPixelFormat::Rgb24))rgb24Index=i;
+        if(item==static_cast<LRESULT>(VideoPixelFormat::Rgb32))rgb32Index=i;
+    }
+    Require(rgb24Index==CB_ERR && rgb32Index!=CB_ERR,"XRGB appears only when advertised");
+    SendMessageW(state.pixelFormatCombo,CB_SETCURSEL,rgb32Index,0);PopulateFrameRateCombo(&state);
+    Require(rateRows(120)==1 && rateRows(60)==0,"XRGB frame rates follow selected format");
+    state.videoModeCache.reset();
     state.inventoryCache.reset();
     state.captureAudioProbeCache.reset();
     DestroyWindow(window);
@@ -1042,12 +1091,14 @@ static void TestNativeControls(HWND window, int width, int height, const std::ve
 }
 
 static void TestLiveToggle(HWND window, int width, int height, const std::vector<BYTE>& pixels,
-                           VideoPixelFormat format = VideoPixelFormat::Nv12) {
+                           VideoPixelFormat format = VideoPixelFormat::Nv12, bool fullRange = false) {
     g_settings.cmaaNisEnabled=false;
     g_settings.preferredUpscaler=llcv::settings::UpscalingMethod::NvidiaVsr;
     g_vsrMode.store(llcv::vsr::Mode::Disabled);
     DirectD3D11Renderer renderer;
-    Check(renderer.initialize(window,width,height,60,format), "toggle renderer init");
+    llcv::video_color::Configuration color{};
+    if(fullRange)color.range=llcv::video_color::Range::Full;
+    Check(renderer.initialize(window,width,height,60,format,false,color), "toggle renderer init");
     for (UINT slot=0;slot<DirectD3D11Renderer::kUploadSurfaceCount;++slot)
         Require((renderer.uyvyUploadTextures[slot]!=nullptr)==(format==VideoPixelFormat::Uyvy) &&
                 (renderer.uyvyUploadViews[slot]!=nullptr)==(format==VideoPixelFormat::Uyvy) &&
@@ -1061,7 +1112,8 @@ static void TestLiveToggle(HWND window, int width, int height, const std::vector
     const auto originalRendererGeneration = renderer.outputConfigurationGeneration;
     auto renderHash = [&] {
         const bool packed422=format==VideoPixelFormat::Yuy2 || format==VideoPixelFormat::Uyvy;
-        renderer.upload(pixels.data(), static_cast<UINT32>(width*(packed422 ? 2 : 1)));
+          const int step=format==VideoPixelFormat::Rgb24?3:format==VideoPixelFormat::Rgb32?4:packed422?2:1;
+          renderer.upload(pixels.data(), static_cast<UINT32>(width*step));
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE; stream.pInputSurface = renderer.inputViews[renderer.activeUploadSurface];
         Check(renderer.videoContext->VideoProcessorBlt(renderer.processor,renderer.outputView,0,1,&stream),
@@ -1636,6 +1688,15 @@ int main(int argc, char** argv) {
         TestLiveToggle(window,width,height,yuyPixels,VideoPixelFormat::Yuy2);
         for(size_t i=0;i<yuyPixels.size();i+=2)std::swap(yuyPixels[i],yuyPixels[i+1]);
         TestLiveToggle(window,width,height,yuyPixels,VideoPixelFormat::Uyvy);
+        for(auto format:{VideoPixelFormat::Rgb24,VideoPixelFormat::Rgb32}){
+            const int step=format==VideoPixelFormat::Rgb24?3:4;
+            std::vector<BYTE> rgbPixels(static_cast<size_t>(width)*height*step,255);
+            for(int y=0;y<height;++y)for(int x=0;x<width;++x){
+                auto* p=rgbPixels.data()+(static_cast<size_t>(y)*width+x)*step;
+                p[0]=p[1]=p[2]=pixels[static_cast<size_t>(y)*width+x];
+            }
+            for(bool full:{false,true})TestLiveToggle(window,width,height,rgbPixels,format,full);
+        }
         TestCenteredPixelPerfect(window);
         TestSplitResolutionRenderer(window);
     }

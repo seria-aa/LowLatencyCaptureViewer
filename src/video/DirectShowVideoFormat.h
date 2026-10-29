@@ -42,10 +42,17 @@ bool IsCompressedVideoFormat(VideoPixelFormat format);
 bool IsAutoSelectableVideoFormat(VideoPixelFormat format);
 VideoPixelFormat PixelFormatFromSubtype(const GUID& subtype);
 
+// topDown reports the DIB row direction, but only RGB24/RGB32 genuinely vary: their
+// biHeight sign is taken as-is. YUV/MJPEG orientation is normalized to true
+// regardless of the declared sign, since DirectShow YUV capture is top-down
+// in practice and some drivers do not encode the sign meaningfully for it;
+// this keeps YUV dynamic-type comparisons unaffected. Callers that do not
+// consume orientation can omit it.
 bool VideoFormatDetails(const AM_MEDIA_TYPE* mediaType, int& width,
                         int& height, REFERENCE_TIME& frameDuration,
                         DWORD& imageBytes,
-                        VideoPixelFormat* pixelFormat = nullptr);
+                        VideoPixelFormat* pixelFormat = nullptr,
+                        bool* topDown = nullptr);
 bool ExtractDirectShowColorMetadata(
     const AM_MEDIA_TYPE* mediaType, CaptureColorMetadata& metadata);
 void MergeDirectShowColorMetadata(
@@ -85,9 +92,11 @@ std::vector<PixelFormatSupport> ProbePixelFormats(
 
 // Startup-only validation. Outputs change only after a complete valid layout.
 // fps supplies the negotiated fallback when the media type omits frame timing.
+// Optional failure diagnostics include a stable reason and bounded header details.
 HRESULT ValidateVideoLayout(const AM_MEDIA_TYPE* mediaType,
     int expectedWidth, int expectedHeight, VideoPixelFormat expectedFormat,
-    DWORD& imageBytes, UINT32& stride, int& fps);
+    DWORD& imageBytes, UINT32& stride, int& fps,
+    LogCallback logCallback = nullptr);
 
 // Immutable, normalized description of the connected sample format. Compared
 // only when a sample actually carries a dynamic media type, never per pixel.
@@ -100,6 +109,11 @@ struct VideoSampleFormat {
     RECT source{}, target{};
     DWORD aspectX = 0, aspectY = 0;
     CaptureColorMetadata color{};
+    // DIB row direction at connection time. Default matches the top-down
+    // convention assumed everywhere before RGB support existed; YUV capture
+    // is effectively always top-down in practice so this preserves prior
+    // behavior for those formats. See VideoFormatDetails for the source bit.
+    bool topDown = true;
 };
 bool ReadVideoSampleFormat(const AM_MEDIA_TYPE* mediaType, int fallbackFps,
                            VideoSampleFormat& result);

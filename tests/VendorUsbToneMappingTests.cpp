@@ -73,6 +73,11 @@ static void TestUvc() {
     FakeUvc good;
     Check(good.Run().status==ToneMappingStatus::Applied && good.sets==1 && good.payload[17]==0,"UVC P010 OFF");
     Check(good.Run(Format::Nv12).status==ToneMappingStatus::Applied && good.sets==2 && good.payload[17]==1,"UVC SDR ON");
+    for (auto rgb : {Format::Rgb24,Format::Rgb32}) {
+        FakeUvc fixture;
+        Check(fixture.Run(rgb).status==ToneMappingStatus::NotApplicable && fixture.sets==0 && fixture.gets==0,
+            "RGB leaves vendor hardware tone mapping untouched");
+    }
     for (auto bytes : {0ul,17ul,18ul,19ul,20ul,21ul,0xfffffffful}) {
         FakeUvc f; f.returnedBytes=bytes;
         const auto r=f.Run();

@@ -1,4 +1,5 @@
 #include "settings/TestProfile.h"
+#include "settings/SmokeVideoOptions.h"
 #include "settings/SettingsStore.h"
 #include "recording/RecordingOptions.h"
 #include <cstdio>
@@ -11,6 +12,41 @@ int main(){
         Check(test_profile::DiagnosticArgument(arg),"normal executable diagnostic arguments isolate profiles");
     for(const auto* arg:{L"",L"--settings-tab",L"--recording",L"C:\\smoke-test\\viewer.exe"})
         Check(!test_profile::DiagnosticArgument(arg),"ordinary runs retain established profile behavior");
+    {
+        settings::AppSettings fixture{};
+        for (const auto& args : std::vector<std::vector<std::wstring>>{
+            {L"--smoke-test",L"--smoke-test-video-format",L"rgb24"},
+            {L"--smoke-test",L"--smoke-test-video-format",L"nv12"},
+            {L"--smoke-test",L"--smoke-test-video-format",L"rgb32"},
+            {L"--smoke-test",L"--smoke-test-resolution",L"2560x1440"},
+            {L"--smoke-test",L"--smoke-test-fps",L"60"}}) {
+            bool skip=false; int calls=0;
+            Check(settings::ApplySmokeVideoOptions(args,fixture,&skip) && skip,"valid smoke video override closes gate");
+            Check(!settings::RunHardwareToneMapping(skip,[&] { ++calls; }) && calls==0,"smoke gate never calls vendor function");
+        }
+        for (const auto& args : std::vector<std::vector<std::wstring>>{{},{L"--smoke-test"},{L"--smoke-test-audio-only"}}) {
+            bool skip=true; int calls=0;
+            Check(settings::ApplySmokeVideoOptions(args,fixture,&skip) && !skip,"ordinary and other diagnostic modes retain policy");
+            Check(settings::RunHardwareToneMapping(skip,[&] { ++calls; }) && calls==1,"ordinary vendor callback runs once");
+        }
+        bool failedOverride=true;
+        Check(!settings::ApplySmokeVideoOptions({L"--smoke-test-video-format",L"nv12"},fixture,&failedOverride) && !failedOverride,
+            "invalid options do not publish the override flag");
+        fixture.capture40Fps=true;
+        Check(settings::ApplySmokeVideoOptions({L"--smoke-test",L"--smoke-test-video-format",L"rgb24",L"--smoke-test-resolution",L"2560x1440",L"--smoke-test-fps",L"60"},fixture),"valid bounded smoke options");
+        Check(fixture.pixelFormat==settings::VideoPixelFormat::Rgb24 && fixture.capturePreset==settings::VideoPreset::R2560x1440 && fixture.videoFrameRate==60 && !fixture.capture40Fps,"smoke options apply exact session values");
+        for (const auto& value : {L"rgb32",L"nv12"}) Check(settings::ApplySmokeVideoOptions({L"--smoke-test",L"--smoke-test-video-format",value},fixture),"supported smoke format");
+        Check(!settings::ApplySmokeVideoOptions({L"--smoke-test-video-format",L"rgb24"},fixture),"override alone is not a smoke test");
+        for (const auto& args : std::vector<std::vector<std::wstring>>{
+            {L"--smoke-test",L"--smoke-test-video-format",L"yuy2"},
+            {L"--smoke-test",L"--smoke-test-resolution",L"1x1"},
+            {L"--smoke-test",L"--smoke-test-fps",L"0"},
+            {L"--smoke-test",L"--smoke-test-fps",L"241"},
+            {L"--smoke-test",L"--smoke-test-fps",L"60x"},
+            {L"--smoke-test",L"--smoke-test-fps"},
+            {L"--smoke-test",L"--smoke-test-fps",L"60",L"--smoke-test-fps",L"30"}})
+            Check(!settings::ApplySmokeVideoOptions(args,fixture),"malformed smoke options rejected");
+    }
     const auto folder=test_profile::Directory();
     Check(GetFileAttributesW(folder.c_str())!=INVALID_FILE_ATTRIBUTES,"unique temporary root exists");
     Check(!test_profile::Protected(folder+L"\\settings.ini"),"isolated profile permitted");

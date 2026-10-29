@@ -3,6 +3,7 @@
 #include "recording/RecordingContainer.h"
 #include "recording/RecordingTimeline.h"
 #include "recording/RecordingScaler.h"
+#include "recording/RgbRecordingConverter.h"
 #include "recording/RecordingPauseTimeline.h"
 #include "recording/RecordingStorage.h"
 #include "recording/RecordingAudioGain.h"
@@ -111,13 +112,21 @@ bool Recorder::Start(const std::wstring& path,const Options* options) {
         // Never feed UYVY bytes into the existing YUY2 recording path.
         Fail(UnsupportedUyvyRecording,Operation::Input);phase_=Phase::Failed;return false;
     }
+    const bool rgb24=video_.format==settings::VideoPixelFormat::Rgb24;
+    const bool rgb=rgb24 || video_.format==settings::VideoPixelFormat::Rgb32;
     const bool nv12=video_.format==settings::VideoPixelFormat::Nv12;
     const bool yuy2=video_.format==settings::VideoPixelFormat::Yuy2;
     const bool mjpeg=video_.format==settings::VideoPixelFormat::Mjpeg;
-    if (!Valid(options_) || !video_.valid || (!nv12 && !yuy2 && !mjpeg) || video_.color.hdr10() ||
+    if(rgb && video_.color.present &&
+       ((video_.color.primaries && video_.color.primaries!=2) ||
+        (video_.color.transferFunction && video_.color.transferFunction!=4 &&
+         video_.color.transferFunction!=5 && video_.color.transferFunction!=7))){
+        Fail(MF_E_INVALIDMEDIATYPE,Operation::Input);phase_=Phase::Failed;return false;
+    }
+    if (!Valid(options_) || !video_.valid || (!nv12 && !yuy2 && !mjpeg && !rgb) || video_.color.hdr10() ||
         video_.width<=0 || video_.height<=0 || video_.width>3840 || video_.height>2160 ||
         video_.width%2 || video_.height%2 || video_.fps<=0 || video_.fps>240 ||
-        (!mjpeg && video_.stride<static_cast<UINT32>(video_.width*(yuy2?2:1))) ||
+        (!mjpeg && video_.stride<static_cast<UINT32>(video_.width*(rgb?(rgb24?3:4):(yuy2?2:1)))) ||
         (video_.interlace & 1) || audio_.channels!=2 || audio_.containerBits!=16 ||
         audio_.validBits!=16 ||
         audio_.encoding!=capture_audio::Encoding::IntegerPcm || audio_.blockAlign!=4) {
@@ -266,7 +275,9 @@ void Recorder::Push(bool video, IMediaSample* sample) noexcept {
         if (video) {
             const bool mjpeg=video_.format==settings::VideoPixelFormat::Mjpeg;
             const bool nv12=video_.format==settings::VideoPixelFormat::Nv12;
-            row=static_cast<size_t>(video_.width)*(nv12?1:2);
+            const bool rgb24=video_.format==settings::VideoPixelFormat::Rgb24;
+            const bool rgb32=video_.format==settings::VideoPixelFormat::Rgb32;
+            row=static_cast<size_t>(video_.width)*(rgb24?3:rgb32?4:nv12?1:2);
             rows=static_cast<size_t>(video_.height)*(nv12?3:2)/2;
             if (!mjpeg && static_cast<size_t>(length)<video_.stride*rows) {
                 fwprintf(stderr,L"[recording] short video %ld < %zu\n",length,video_.stride*rows);
@@ -297,12 +308,20 @@ void Recorder::PrepareQueues() {
     const bool mjpeg=video_.format==settings::VideoPixelFormat::Mjpeg;
     const bool yuy2=video_.format==settings::VideoPixelFormat::Yuy2;
     const size_t frameBytes=static_cast<size_t>(video_.width)*video_.height*(yuy2?2:3)/(yuy2?1:2);
-    const auto policy=RecordingDeliveryPolicy(mjpeg);
+    const bool rgb24=video_.format==settings::VideoPixelFormat::Rgb24;
+    const bool rgb32=video_.format==settings::VideoPixelFormat::Rgb32;
+    const size_t captureBytes=(rgb24 || rgb32)?static_cast<size_t>(video_.width)*video_.height*(rgb24?3:4):frameBytes;
+    auto policy=RecordingDeliveryPolicy(mjpeg);
+    if(rgb24 || rgb32){
+        policy.videoBuffers=RgbBufferCount(captureBytes,kRgbCaptureBudget);
+        if(policy.videoBuffers<4)throw E_OUTOFMEMORY;
+        policy.videoPackets=policy.videoBuffers;
+    }
     videoQueue_.write=0;videoQueue_.read=0;audioQueue_.write=0;audioQueue_.read=0;
     videoQueue_.packets.resize(policy.videoPackets);audioQueue_.packets.resize(policy.audioPackets);
     videoBuffers_.Allocate(policy.videoBuffers,mjpeg
         ? (video_.bytes?video_.bytes:static_cast<DWORD>(video_.width*video_.height*3))
-        : static_cast<DWORD>(frameBytes));
+        : static_cast<DWORD>(captureBytes));
     audioBuffers_.Allocate(policy.audioBuffers,kAudioBufferBytes);
 }
 void Recorder::Run(std::wstring path) {
@@ -313,6 +332,7 @@ void Recorder::Run(std::wstring path) {
     std::shared_ptr<RecordingArchive> archive;
     std::unique_ptr<RecordingTimeline> timeline;
     RecordingScaler scaler;
+    RgbRecordingConverter rgbConverter;
     video::MjpegDecoder mjpegDecoder;
     RecordingBufferPool decodedFrames;
     RecordingPauseTimeline pauseTimeline;
@@ -340,11 +360,41 @@ void Recorder::Run(std::wstring path) {
         // Allocate/free the bounded recording storage only on this worker.
         const bool yuy2=video_.format==settings::VideoPixelFormat::Yuy2;
         const bool mjpeg=video_.format==settings::VideoPixelFormat::Mjpeg;
+        const bool rgb24=video_.format==settings::VideoPixelFormat::Rgb24;
+        const bool rgb=rgb24 || video_.format==settings::VideoPixelFormat::Rgb32;
         const size_t frameBytes=static_cast<size_t>(video_.width)*video_.height*(yuy2?2:3)/(yuy2?1:2);
         PrepareQueues();
         const auto dimensions=OutputSize(options_,video_.width,video_.height);
         const bool scaling=dimensions.width!=video_.width || dimensions.height!=video_.height;
         auto recordingColor=color_;
+        if(rgb){
+            rgbConverter.Configure(video_.width,video_.height,rgb24?3:4,video_.topDown,
+                color_.range==video_color::Range::Limited,dimensions.width,dimensions.height);
+            recordingColor.matrix=video_color::Matrix::Bt709;
+            recordingColor.range=video_color::Range::Limited;
+            // Measure the actual selected conversion/resize route before opening
+            // any output file. No real capture, profile writes or FPS changes.
+            operation=Operation::Input;
+            auto probe=videoBuffers_.Acquire();if(!probe)Check(E_OUTOFMEMORY);
+            BYTE* data=nullptr;Check(probe->Lock(&data,nullptr,nullptr));
+            const DWORD size=static_cast<DWORD>(video_.width*video_.height*(rgb24?3:4));
+            for(DWORD i=0;i<size;++i)data[i]=static_cast<BYTE>(i*37+i/997);
+            Check(probe->Unlock());Check(probe->SetCurrentLength(size));
+            RgbPreflight measured;
+            Check(rgbConverter.Preflight(probe.Get(),OutputFps(options_,video_.fps),stop_,measured));
+            const uint64_t outputBytes=static_cast<uint64_t>(dimensions.width)*dimensions.height*3/2;
+            const uint64_t rawBytes=static_cast<uint64_t>(size)*RgbBufferCount(size,kRgbCaptureBudget);
+            const uint64_t poolBytes=rawBytes+outputBytes*RgbBufferCount(outputBytes,kRgbOutputBudget);
+            {
+                std::lock_guard status(statusMutex_);
+                snapshot_.rgbConversionMs=measured.meanMs;snapshot_.rgbBudgetMs=measured.budgetMs;
+                snapshot_.rgbBufferBytes=poolBytes;
+            }
+            const bool accepted=RgbHasHeadroom(measured);
+            fwprintf(stderr,L"[recording] RGB preflight: convert=%.3f ms max=%.3f ms frame-budget=%.3f ms pools=%.1f MiB accepted=%u\n",
+                measured.meanMs,measured.maximumMs,measured.budgetMs,poolBytes/1048576.0,accepted?1u:0u);
+            if(!accepted)Check(RgbRecordingTooSlow);
+        }
         if(mjpeg){
             operation=Operation::Input;
             AM_MEDIA_TYPE type{};type.formattype=compressedFormatType_;
@@ -357,7 +407,7 @@ void Recorder::Run(std::wstring path) {
             if(!scaling)decodedFrames.Allocate(16,static_cast<DWORD>(frameBytes));
         }
         operation=Operation::Storage;
-        scaler.Configure(!yuy2,video_.width,video_.height,dimensions.width,dimensions.height);
+        scaler.Configure(!yuy2,rgb?dimensions.width:video_.width,rgb?dimensions.height:video_.height,dimensions.width,dimensions.height);
         const UINT32 matrix=recordingColor.matrix==video_color::Matrix::Bt709
             ? MFVideoTransferMatrix_BT709:MFVideoTransferMatrix_BT601;
         const UINT32 range=recordingColor.range==video_color::Range::Full
@@ -512,6 +562,10 @@ void Recorder::Run(std::wstring path) {
                             Check(frame->SetCurrentLength(static_cast<DWORD>(frameBytes)));
                         }
                         Check(scaler.Apply(frame.Get(),&buffer,frameStride));
+                    }else if(rgb){
+                        ComPtr<IMFMediaBuffer> converted;
+                        Check(rgbConverter.Apply(p.buffer.Get(),&converted));
+                        Check(scaler.Apply(converted.Get(),&buffer));
                     }else Check(scaler.Apply(p.buffer.Get(),&buffer));
                 }
                 else if(mapped.skipAudioFrames){
@@ -570,6 +624,7 @@ void Recorder::Run(std::wstring path) {
     std::vector<Packet>().swap(audioQueue_.packets);
     videoBuffers_.Clear();audioBuffers_.Clear();
     scaler.Clear(); // Release MF-backed scaling buffers before the worker's MFShutdown.
+    rgbConverter.Clear();
     decodedFrames.Clear();mjpegDecoder.reset();
     archive.reset(); // Join storage after all split files close, before MFShutdown.
     if (mf) MFShutdown();

@@ -7,7 +7,7 @@
 
 namespace llcv::screenshot {
 
-enum class Format { Nv12, Yuy2, P010, Uyvy };
+enum class Format { Nv12, Yuy2, P010, Uyvy, Rgb24, Rgb32, Unknown };
 struct Description {
     unsigned width = 0, height = 0;
     Format format = Format::Nv12;
@@ -15,9 +15,11 @@ struct Description {
     // Resolved input siting, not the user's Auto selection. P010 is PQ/2020
     // limited only, after the capture path has validated its HDR policy.
     bool topLeftChroma = false;
+    // RGB DIB buffer orientation; packed copies preserve this row order.
+    bool topDown = true;
 };
 
-// Bounded to the viewer's maximum capture resolution; positive top-down stride.
+// Bounded capture size; positive stride, with RGB row order recorded in topDown.
 std::size_t PackedSize(const Description& desc) noexcept;
 bool CopyFrame(const Description& desc, const std::uint8_t* source,
                std::size_t length, unsigned stride,

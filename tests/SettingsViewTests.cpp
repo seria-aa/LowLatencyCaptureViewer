@@ -1405,6 +1405,13 @@ static void TestActualControlCreation() {
                 Check(!state.frameOptionsOpen,"tab switch clears transient flyout state");
                 state.activeTab=SettingsTab::VideoWindow;
             }
+            if (profile == 0 && textDpi == 96) for (auto format : {VideoPixelFormat::Rgb24,VideoPixelFormat::Rgb32}) {
+                UpdateAdvancedControlVisibility(&state,false,format);
+                ExpectVisible(state.sdrRangeCombo,true);
+                ExpectVisible(state.hdrChromaCombo,false);
+                ExpectVisible(state.mjpegColorCombo,false);
+            }
+            if (profile == 0 && textDpi == 96) UpdateAdvancedControlVisibility(&state,false,VideoPixelFormat::P010);
             CheckFontHierarchy(state, textDpi, english);
             CheckFieldMetrics(state, parent, textDpi);
             {
@@ -1723,8 +1730,11 @@ int main(int argc, char** argv) {
           "invalid navigation safely selects video");
     TestTranslationBoundary();
     TestShortcutEditing();
+    std::puts("BEGIN actual control creation"); std::fflush(stdout);
     TestActualControlCreation();
+    std::puts("PASS actual control creation; BEGIN compact work areas"); std::fflush(stdout);
     TestCompactWorkAreas();
+    std::puts("PASS compact work areas; BEGIN layout matrix"); std::fflush(stdout);
     HWND parent = CreateWindowExW(0, L"STATIC", L"Hidden settings view regression",
         WS_POPUP, 0, 0, 2000, 1400, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     Check(parent != nullptr, "create hidden parent");

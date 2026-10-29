@@ -79,6 +79,9 @@ enum class VideoPixelFormat {
     Mjpeg,
     P010,
     Uyvy,
+    // Native DirectShow SDR BGRX and BGR inputs; these are manual choices.
+    Rgb32,
+    Rgb24,
 };
 
 enum class UiLanguage {

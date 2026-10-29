@@ -4,13 +4,25 @@
 
 [README](../README.md) · [Documentation](INDEX.md) · [한국어](RECORDING.ko.md)
 
-Records NV12/YUY2/MJPEG SDR video with 16-bit PCM stereo input to MP4.
+Records NV12/YUY2/MJPEG/RGB SDR video with 16-bit PCM stereo input to MP4.
 MJPEG input is decoded on the recording worker and saved with the selected H.264, HEVC or AV1 encoder.
 MJPEG recording adds decoding work and can increase CPU usage.
 Recordings use the same color interpretation as playback and screenshots. **Video → SDR color range**
 applies to all SDR inputs; **MJPEG matrix** applies only to MJPEG. Both default to Auto.
 HDR, multichannel and audio-only recording are not supported; playback supports more formats.
 UYVY/HDYC also supports playback/screenshots only; attempting to record shows an explanation. Select NV12, YUY2 or MJPEG if your device offers it.
+
+RGB24/XRGB (RGB32) SDR input can also be recorded. The recording worker
+converts it to BT.709 Limited NV12 (4:2:0), fusing downscaling when requested.
+Input range and orientation are honored; playback, original PNGs, VSR and OSD remain separate.
+CPU usage and raw capture copy volume can increase. Lower recording resolution/FPS caps for high-resolution input.
+Before creating an RGB recording file, the worker measures the selected conversion route.
+If it has insufficient frame-time headroom, recording does not start and asks you to lower
+the recording resolution/FPS; your selected FPS is never changed automatically.
+This short check cannot guarantee sustained throughput under changing system load.
+RGB raw and converted frame pools are capped at 128 MiB and 192 MiB respectively
+(up to 16 buffers each). At 4K RGB32, native recording uses about 316 MiB for these pools;
+the default 1080p output uses about 174 MiB. Audio, encoder and GPU allocations are additional.
 
 ![Recording settings example](images/settings-recording-en.png)
 

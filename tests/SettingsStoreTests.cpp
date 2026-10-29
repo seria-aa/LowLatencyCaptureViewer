@@ -391,7 +391,7 @@ void TestCaptureFrameRatePersistence(const std::wstring& path) {
     // removing the override must not destroy the rate restored afterward.
     for (const auto format : {VideoPixelFormat::Auto, VideoPixelFormat::Nv12,
                               VideoPixelFormat::Yuy2, VideoPixelFormat::Mjpeg,
-                              VideoPixelFormat::P010, VideoPixelFormat::Uyvy}) {
+                              VideoPixelFormat::P010, VideoPixelFormat::Uyvy, VideoPixelFormat::Rgb24, VideoPixelFormat::Rgb32}) {
         for (int fps : {0, 30, 60, 120}) {
             AppSettings saved{};
             saved.capturePreset = VideoPreset::R2560x1440;
@@ -421,6 +421,7 @@ void TestCaptureFrameRatePersistence(const std::wstring& path) {
         {L"Auto", VideoPixelFormat::Auto}, {L"NV12", VideoPixelFormat::Nv12},
         {L"YUY2", VideoPixelFormat::Yuy2}, {L"MJPEG", VideoPixelFormat::Mjpeg},
         {L"P010", VideoPixelFormat::P010}, {L"UYVY", VideoPixelFormat::Uyvy},
+        {L"RGB24", VideoPixelFormat::Rgb24}, {L"rgb32", VideoPixelFormat::Rgb32}, {L"XRGB", VideoPixelFormat::Rgb32},
         {L"uyvy", VideoPixelFormat::Uyvy}, {L"HDYC", VideoPixelFormat::Uyvy},
         {L"unsupported", VideoPixelFormat::Auto}, {nullptr, VideoPixelFormat::Auto},
     };

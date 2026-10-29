@@ -106,10 +106,32 @@ void LogQuery(LogCallback log, const wchar_t* stage, int index, HRESULT hr) {
     log(text);
 }
 
+// Shared BITMAPINFOHEADER lookup across the VideoInfo/VideoInfo2/MPEG2Video
+// format blocks. Returns null for an unrecognized or undersized formattype.
+const BITMAPINFOHEADER* ExtractBitmapInfoHeader(const AM_MEDIA_TYPE* mediaType) {
+    if (!mediaType || !mediaType->pbFormat) return nullptr;
+    if (mediaType->formattype == FORMAT_VideoInfo2 &&
+        mediaType->cbFormat >= sizeof(VIDEOINFOHEADER2)) {
+        return &reinterpret_cast<const VIDEOINFOHEADER2*>(mediaType->pbFormat)->bmiHeader;
+    }
+    if (mediaType->formattype == FORMAT_VideoInfo &&
+        mediaType->cbFormat >= sizeof(VIDEOINFOHEADER)) {
+        return &reinterpret_cast<const VIDEOINFOHEADER*>(mediaType->pbFormat)->bmiHeader;
+    }
+    if (mediaType->formattype == FORMAT_MPEG2Video &&
+        mediaType->cbFormat >= FIELD_OFFSET(MPEG2VIDEOINFO, dwSequenceHeader)) {
+        return &reinterpret_cast<const MPEG2VIDEOINFO*>(mediaType->pbFormat)->hdr.bmiHeader;
+    }
+    return nullptr;
+}
+
 // Geometry is useful for diagnostics even when LLCV cannot decode the subtype.
 // Keep header bounds checking shared with the accepted-format path.
+// topDown is the DIB row direction (negative biHeight = top-down); callers
+// that only need magnitude-based geometry are unaffected by its value.
 bool ReadVideoHeader(const AM_MEDIA_TYPE* mediaType, int& width, int& height,
-                     REFERENCE_TIME& frameDuration, DWORD& imageBytes) {
+                     REFERENCE_TIME& frameDuration, DWORD& imageBytes,
+                     bool& topDown) {
     if (!mediaType || !mediaType->pbFormat || mediaType->majortype != MEDIATYPE_Video) return false;
     const BITMAPINFOHEADER* bitmap = nullptr;
     frameDuration = 0;
@@ -133,6 +155,7 @@ bool ReadVideoHeader(const AM_MEDIA_TYPE* mediaType, int& width, int& height,
     width = static_cast<int>(bitmap->biWidth);
     height = std::abs(static_cast<int>(bitmap->biHeight));
     imageBytes = bitmap->biSizeImage;
+    topDown = bitmap->biHeight < 0;
     return width > 0 && height > 0;
 }
 
@@ -161,14 +184,34 @@ void LogRejectedMode(LogCallback log, int index, const AM_MEDIA_TYPE* mediaType,
     int width = 0, height = 0;
     REFERENCE_TIME duration = 0;
     DWORD bytes = 0;
-    const bool header = ReadVideoHeader(mediaType, width, height, duration, bytes);
+    bool topDown = true;
+    const bool header = ReadVideoHeader(mediaType, width, height, duration, bytes, topDown);
     wchar_t guid[40]{};
     StringFromGUID2(mediaType->subtype, guid, static_cast<int>(std::size(guid)));
-    wchar_t text[384]{};
+    const auto* bitmap = ExtractBitmapInfoHeader(mediaType);
+    DWORD masks[3]{};
+    bool haveMasks = false;
+    if (bitmap && bitmap->biCompression == BI_BITFIELDS) {
+        const size_t offset = reinterpret_cast<const BYTE*>(bitmap) - mediaType->pbFormat;
+        // Only the supported base header has trailing masks. Never follow a
+        // driver-supplied biSize pointer outside its validated format block.
+        if (bitmap->biSize == sizeof(BITMAPINFOHEADER) &&
+            offset + sizeof(BITMAPINFOHEADER) + sizeof(masks) <= mediaType->cbFormat) {
+            std::memcpy(masks, reinterpret_cast<const BYTE*>(bitmap) + sizeof(BITMAPINFOHEADER), sizeof(masks));
+            haveMasks = true;
+        }
+    }
+    wchar_t text[768]{};
     swprintf_s(text, L"[video-caps] rejected entry=%d reason=%s subtype=%s guid=%s "
-        L"size=%dx%d duration=%lld (100ns) header=%s\n", index, reason,
+        L"size=%dx%d duration=%lld (100ns) header=%s formatBytes=%lu "
+        L"biSize=%lu bpp=%u planes=%u compression=0x%08lX imageBytes=%lu "
+        L"masks=%s:%08lX/%08lX/%08lX\n", index, reason,
         SubtypeName(mediaType->subtype).c_str(), guid, width, height, duration,
-        header ? L"valid" : L"unavailable");
+        header ? L"valid" : L"unavailable", mediaType->cbFormat,
+        bitmap ? bitmap->biSize : 0ul, bitmap ? unsigned(bitmap->biBitCount) : 0u,
+        bitmap ? unsigned(bitmap->biPlanes) : 0u,
+        bitmap ? bitmap->biCompression : 0ul, bitmap ? bitmap->biSizeImage : 0ul,
+        haveMasks ? L"present" : L"unavailable", masks[0], masks[1], masks[2]);
     log(text);
 }
 
@@ -209,7 +252,9 @@ int PixelFormatRank(VideoPixelFormat format) {
     case VideoPixelFormat::Uyvy: return 2;
     case VideoPixelFormat::P010: return 3;
     case VideoPixelFormat::Mjpeg: return 4;
-    default: return 5;
+    case VideoPixelFormat::Rgb24: return 5;
+    case VideoPixelFormat::Rgb32: return 6;
+    default: return 7;
     }
 }
 
@@ -222,6 +267,8 @@ const wchar_t* PixelFormatName(VideoPixelFormat format) {
     case VideoPixelFormat::Nv12: return L"NV12";
     case VideoPixelFormat::P010: return L"P010";
     case VideoPixelFormat::Uyvy: return L"UYVY";
+    case VideoPixelFormat::Rgb32: return L"XRGB (RGB32)";
+    case VideoPixelFormat::Rgb24: return L"RGB24";
     default: return L"Auto";
     }
 }
@@ -243,22 +290,36 @@ VideoPixelFormat PixelFormatFromSubtype(const GUID& subtype) {
         return VideoPixelFormat::Mjpeg;
     }
     if (subtype == MFVideoFormat_P010) return VideoPixelFormat::P010;
+    if (subtype == MEDIASUBTYPE_RGB32) return VideoPixelFormat::Rgb32;
+    if (subtype == MEDIASUBTYPE_RGB24) return VideoPixelFormat::Rgb24;
     return VideoPixelFormat::Auto;
 }
 
 bool VideoFormatDetails(const AM_MEDIA_TYPE* mediaType, int& width,
                         int& height, REFERENCE_TIME& frameDuration,
-                        DWORD& imageBytes, VideoPixelFormat* pixelFormat) {
+                        DWORD& imageBytes, VideoPixelFormat* pixelFormat,
+                        bool* topDown) {
     if (!mediaType || !mediaType->pbFormat || mediaType->majortype != MEDIATYPE_Video) return false;
     const VideoPixelFormat detected = PixelFormatFromSubtype(mediaType->subtype);
     if (detected == VideoPixelFormat::Auto) return false;
     if (pixelFormat) *pixelFormat = detected;
-    return ReadVideoHeader(mediaType, width, height, frameDuration, imageBytes);
+    bool headerTopDown = true;
+    const bool ok = ReadVideoHeader(mediaType, width, height, frameDuration, imageBytes, headerTopDown);
+    // Only RGB formats track a genuine bottom-up/top-down distinction; YUV/
+    // MJPEG normalize to top-down so a sign-only reannouncement is never
+    // treated as a format change (see MatchesVideoSampleFormat).
+    const bool isRgb = detected == VideoPixelFormat::Rgb32 || detected == VideoPixelFormat::Rgb24;
+    if (ok && topDown) *topDown = isRgb ? headerTopDown : true;
+    return ok;
 }
 
 HRESULT ValidateVideoLayout(const AM_MEDIA_TYPE* mediaType,
     int expectedWidth, int expectedHeight, VideoPixelFormat expectedFormat,
-    DWORD& imageBytes, UINT32& stride, int& fps) {
+    DWORD& imageBytes, UINT32& stride, int& fps, LogCallback logCallback) {
+    const auto reject = [&](const wchar_t* reason) {
+        LogRejectedMode(logCallback, -1, mediaType, reason);
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    };
     int width = 0, height = 0;
     REFERENCE_TIME duration = 0;
     DWORD bytes = 0;
@@ -266,23 +327,69 @@ HRESULT ValidateVideoLayout(const AM_MEDIA_TYPE* mediaType,
     if (!VideoFormatDetails(mediaType, width, height, duration, bytes, &format) ||
         width != expectedWidth || height != expectedHeight || format != expectedFormat ||
         duration < 0 || duration > 10'000'000 || (duration == 0 && fps <= 0))
-        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        return reject(L"geometry-format-or-timing");
     UINT32 rowPitch = 0;
     if (!IsCompressedVideoFormat(format)) {
-        const bool packed422 = format == VideoPixelFormat::Yuy2 || format == VideoPixelFormat::Uyvy;
-        if ((width & 1) || (!packed422 && (height & 1)))
-            return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-        const uint64_t rows = packed422 ? height : uint64_t(height) * 3 / 2;
-        const uint64_t minimumPitch = uint64_t(width) * (format == VideoPixelFormat::Nv12 ? 1 : 2);
-        const uint64_t minimumBytes = rows * minimumPitch;
-        if (minimumBytes > (std::numeric_limits<LONG>::max)() ||
-            (bytes && (bytes < minimumBytes || bytes > static_cast<DWORD>((std::numeric_limits<LONG>::max)()))))
-            return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-        if (!bytes) bytes = static_cast<DWORD>(minimumBytes);
-        const uint64_t pitch = bytes / rows;
-        if (pitch < minimumPitch || (format != VideoPixelFormat::Nv12 && (pitch & 1)))
-            return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-        rowPitch = static_cast<UINT32>(pitch);
+        if (format == VideoPixelFormat::Rgb32 || format == VideoPixelFormat::Rgb24) {
+            // Packed single-plane RGB has no chroma subsampling: unlike YUV,
+            // odd width/height are fine and rows are not a 4:2:0 1.5x count.
+            const bool isRgb32 = format == VideoPixelFormat::Rgb32;
+            const BITMAPINFOHEADER* bitmap = ExtractBitmapInfoHeader(mediaType);
+            if (!bitmap) return reject(L"rgb-missing-bitmap-header");
+            if (bitmap->biSize != sizeof(BITMAPINFOHEADER)) return reject(L"rgb-header-size");
+            if (bitmap->biBitCount != (isRgb32 ? 32 : 24)) return reject(L"rgb-bit-depth");
+            if (bitmap->biPlanes != 1) return reject(L"rgb-plane-count");
+            // RGB32 additionally accepts BI_BITFIELDS with the standard
+            // 0x00FF0000/0x0000FF00/0x000000FF R/G/B masks (same byte order
+            // as BI_RGB); RGB24 has no verified bitfield-mask contract and
+            // always requires plain BI_RGB. Any other mask/compression value
+            // is an unverified channel layout and stays explicitly rejected.
+            if (isRgb32 && bitmap->biCompression == BI_BITFIELDS) {
+                constexpr DWORD kRedMask = 0x00FF0000u, kGreenMask = 0x0000FF00u, kBlueMask = 0x000000FFu;
+                const auto* afterHeader = reinterpret_cast<const BYTE*>(bitmap) + bitmap->biSize;
+                const size_t masksOffset = afterHeader - mediaType->pbFormat;
+                if (masksOffset + 3 * sizeof(DWORD) > mediaType->cbFormat)
+                    return reject(L"rgb-masks-truncated");
+                DWORD masks[3];
+                std::memcpy(masks, afterHeader, sizeof(masks));
+                if (masks[0] != kRedMask || masks[1] != kGreenMask || masks[2] != kBlueMask)
+                    return reject(L"rgb-channel-masks");
+            } else if (bitmap->biCompression != BI_RGB) {
+                return reject(L"rgb-compression");
+            }
+            const uint64_t rows = height;
+            // RGB32's 4 bytes/pixel is always DWORD-aligned already; RGB24's
+            // 3 bytes/pixel must be rounded up to the next DWORD boundary.
+            const uint64_t minimumPitch = isRgb32 ? uint64_t(width) * 4
+                : (uint64_t(width) * 3 + 3) & ~uint64_t(3);
+            const uint64_t minimumBytes = rows * minimumPitch;
+            if (minimumBytes > (std::numeric_limits<LONG>::max)() ||
+                (bytes && (bytes < minimumBytes || bytes > static_cast<DWORD>((std::numeric_limits<LONG>::max)()))))
+                return reject(L"rgb-image-size");
+            if (!bytes) bytes = static_cast<DWORD>(minimumBytes);
+            // biSizeImage must be an exact whole number of DWORD-aligned
+            // rows; a remainder or non-4-byte pitch means the declared size
+            // cannot be a real per-row stride and must not be accepted as one.
+            if (bytes % rows != 0) return reject(L"rgb-row-remainder");
+            const uint64_t pitch = bytes / rows;
+            if (pitch < minimumPitch || (pitch & 3)) return reject(L"rgb-row-alignment");
+            rowPitch = static_cast<UINT32>(pitch);
+        } else {
+            const bool packed422 = format == VideoPixelFormat::Yuy2 || format == VideoPixelFormat::Uyvy;
+            if ((width & 1) || (!packed422 && (height & 1)))
+                return reject(L"yuv-subsampled-dimensions");
+            const uint64_t rows = packed422 ? height : uint64_t(height) * 3 / 2;
+            const uint64_t minimumPitch = uint64_t(width) * (format == VideoPixelFormat::Nv12 ? 1 : 2);
+            const uint64_t minimumBytes = rows * minimumPitch;
+            if (minimumBytes > (std::numeric_limits<LONG>::max)() ||
+                (bytes && (bytes < minimumBytes || bytes > static_cast<DWORD>((std::numeric_limits<LONG>::max)()))))
+                return reject(L"yuv-image-size");
+            if (!bytes) bytes = static_cast<DWORD>(minimumBytes);
+            const uint64_t pitch = bytes / rows;
+            if (pitch < minimumPitch || (format != VideoPixelFormat::Nv12 && (pitch & 1)))
+                return reject(L"yuv-row-alignment");
+            rowPitch = static_cast<UINT32>(pitch);
+        }
     }
     imageBytes = bytes;
     stride = rowPitch;
@@ -333,7 +440,7 @@ bool ReadVideoSampleFormat(const AM_MEDIA_TYPE* mediaType, int fallbackFps,
     VideoSampleFormat next{};
     REFERENCE_TIME duration = 0;
     if (!VideoFormatDetails(mediaType, next.width, next.height, duration,
-                            next.bytes, &next.format)) return false;
+                            next.bytes, &next.format, &next.topDown)) return false;
     next.fps = fallbackFps;
     if (FAILED(ValidateVideoLayout(mediaType, next.width, next.height, next.format,
                                   next.bytes, next.stride, next.fps))) return false;
@@ -397,7 +504,7 @@ bool MatchesVideoSampleFormat(const AM_MEDIA_TYPE* mediaType,
     // Explicitly changed color declarations must not use stale interpretation.
     return actual.format == expected.format && actual.width == expected.width &&
         actual.height == expected.height && actual.fps == expected.fps &&
-        actual.stride == expected.stride &&
+        actual.stride == expected.stride && actual.topDown == expected.topDown &&
         (IsCompressedVideoFormat(actual.format) || actual.bytes == expected.bytes) &&
         actual.interlace == expected.interlace &&
         EqualRect(&actual.source, &expected.source) && EqualRect(&actual.target, &expected.target) &&
@@ -649,7 +756,7 @@ HRESULT ConfigureVideoPin(
         UINT32 candidateStride = 0;
         int candidateFps = candidate.fps;
         hr = ValidateVideoLayout(candidate.mediaType, wantedWidth, wantedHeight,
-            candidate.format, candidateBytes, candidateStride, candidateFps);
+            candidate.format, candidateBytes, candidateStride, candidateFps, logCallback);
         if (FAILED(hr)) {
             LogQuery(logCallback, L"invalid-candidate-layout/fps", candidate.fps, hr);
             continue;
@@ -663,7 +770,7 @@ HRESULT ConfigureVideoPin(
             if (SUCCEEDED(hr)) {
                 hr = IsRequestedFrameRate(actual, wantedFps)
                     ? ValidateVideoLayout(actual, wantedWidth, wantedHeight,
-                        candidate.format, candidateBytes, candidateStride, candidateFps)
+                        candidate.format, candidateBytes, candidateStride, candidateFps, logCallback)
                     : kRequestedFrameRateMismatch;
                 // A driver may substitute the other packed-422 subtype.
                 // Its byte layout still matches, but candidate-only color
@@ -761,10 +868,11 @@ std::vector<PixelFormatSupport> ProbePixelFormats(
         int candidateHeight = 0;
         REFERENCE_TIME duration = 0;
         DWORD bytes = 0;
+        bool candidateTopDown = true;
         const VideoPixelFormat format = PixelFormatFromSubtype(mediaType->subtype);
         const bool knownVideoType = mediaType->majortype == MEDIATYPE_Video &&
             format != VideoPixelFormat::Auto;
-        const bool readableHeader = ReadVideoHeader(mediaType, candidateWidth, candidateHeight, duration, bytes);
+        const bool readableHeader = ReadVideoHeader(mediaType, candidateWidth, candidateHeight, duration, bytes, candidateTopDown);
         if (diagnostics && readableHeader && candidateWidth == width && candidateHeight == height) {
             ++diagnostics->matchingResolutionTypes;
             if (!knownVideoType) {
@@ -796,11 +904,11 @@ std::vector<PixelFormatSupport> ProbePixelFormats(
             const bool hasTiming = duration > 0 || (duration == 0 &&
                 streamCaps.MinFrameInterval > 0 && streamCaps.MaxFrameInterval > 0);
             const HRESULT layoutHr = hasTiming ? ValidateVideoLayout(mediaType, width, height,
-                format, bytes, checkedStride, checkedFps) : HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+                format, bytes, checkedStride, checkedFps, logCallback) : HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
             if (FAILED(layoutHr)) {
                 if (queryStatus) *queryStatus = layoutHr;
                 LogQuery(logCallback, L"probe/invalid-layout", i, layoutHr);
-                LogRejectedMode(logCallback, i, mediaType, L"invalid-layout-or-timing");
+                if (!hasTiming) LogRejectedMode(logCallback, i, mediaType, L"missing-timing");
                 DeleteMediaType(mediaType);
                 continue;
             }
