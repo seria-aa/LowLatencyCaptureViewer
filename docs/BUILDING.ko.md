@@ -2,7 +2,7 @@
 
 # 소스에서 빌드
 
-[README](../README.ko.md) · [문서 목록](INDEX.ko.md) · [English](BUILDING.md)
+[README](../README.md) · [문서 목록](INDEX.ko.md) · [English](BUILDING.md)
 
 [필요 환경](#필요-환경) · [Release 빌드](#release-빌드) · [설치 프로그램과 포터블 ZIP](#설치-프로그램과-포터블-zip)
 
@@ -135,4 +135,4 @@ PDB와 빌드 폴더는 포함하지 않습니다. 자동 테스트는 실제 �
 
 ---
 
-[README](../README.ko.md) · [문서 목록](INDEX.ko.md) · [English](BUILDING.md)
+[README](../README.md) · [문서 목록](INDEX.ko.md) · [English](BUILDING.md)

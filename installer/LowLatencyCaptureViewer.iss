@@ -72,6 +72,7 @@ Source: "{#BuildDir}\avutil-60.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\ffmpeg-licenses\*"; DestDir: "{app}\ffmpeg-licenses"; Flags: ignoreversion recursesubdirs
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.ko.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\README.en.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\third_party\asio\LICENSE.txt"; DestDir: "{app}"; DestName: "ASIO-SDK-LICENSE.txt"; Flags: ignoreversion
 Source: "..\third_party\asio\HOST-LICENSE.txt"; DestDir: "{app}"; DestName: "ASIO-HOST-LICENSE.txt"; Flags: ignoreversion

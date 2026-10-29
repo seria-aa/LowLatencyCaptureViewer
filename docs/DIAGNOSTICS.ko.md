@@ -2,7 +2,7 @@
 
 # 실시간 정보창과 로그
 
-[README](../README.ko.md) · [문서 목록](INDEX.ko.md) · [English](DIAGNOSTICS.md)
+[README](../README.md) · [문서 목록](INDEX.ko.md) · [English](DIAGNOSTICS.md)
 
 [영상 항목](#영상-항목) · [오디오 항목](#오디오-항목) · [버퍼 용어](#버퍼-용어) · [버퍼 진단 방법](#버퍼-진단-방법) · [로그 파일](#로그-파일)
 
@@ -152,4 +152,4 @@ HRESULT와 `GetDeviceRemovedReason` 결과가 `video-event`로 함께 기록됩�
 
 ---
 
-[README](../README.ko.md) · [문서 목록](INDEX.ko.md) · [English](DIAGNOSTICS.md)
+[README](../README.md) · [문서 목록](INDEX.ko.md) · [English](DIAGNOSTICS.md)

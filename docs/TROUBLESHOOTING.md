@@ -2,7 +2,7 @@
 
 # Troubleshooting
 
-[README](../README.md) · [Documentation](INDEX.md) · [한국어](TROUBLESHOOTING.ko.md)
+[README](../README.en.md) · [Documentation](INDEX.md) · [한국어](TROUBLESHOOTING.ko.md)
 
 [Capture initialization fails](#capture-initialization-fails) · [Unlisted 30 fps](#unlisted-30-fps-request-fails) · [40 fps startup](#40-fps-capture-will-not-start) · [Playback stops or input disappears](#playback-stops-or-input-disappears) · [Devices or supported modes look out of date](#devices-or-supported-modes-look-out-of-date) · [Video works but audio does not](#video-works-but-audio-does-not) · [The picture is soft](#the-picture-is-soft) · [MJPEG color differs from another application](#mjpeg-color-differs-from-another-application) · [Frame drops or stutter](#frame-drops-or-stutter) · [Settings window is skipped](#settings-window-is-skipped) · [A shortcut does not work](#a-shortcut-does-not-work) · [Settings could not be saved](#settings-could-not-be-saved) · [Sleep or screen-off behavior](#sleep-or-screen-off-behavior) · [Collecting a useful report](#collecting-a-useful-report)
 
@@ -239,4 +239,4 @@ See [recording support and file protection](RECORDING.md).
 
 ---
 
-[README](../README.md) · [Documentation](INDEX.md) · [한국어](TROUBLESHOOTING.ko.md)
+[README](../README.en.md) · [Documentation](INDEX.md) · [한국어](TROUBLESHOOTING.ko.md)

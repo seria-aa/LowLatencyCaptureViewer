@@ -2,7 +2,7 @@
 
 # 영상 포맷, 확대와 전체화면
 
-[README](../README.ko.md) · [문서 목록](INDEX.ko.md) · [English](VIDEO.md)
+[README](../README.md) · [문서 목록](INDEX.ko.md) · [English](VIDEO.md)
 
 [캡처 경로](#캡처-경로) · [지원 모드 자동 인식](#지원-모드-자동-인식) · [NV12, YUY2와 MJPEG](#nv12-yuy2와-mjpeg) · [프레임](#프레임) · [30fps 직접 요청](#목록에-없는-30fps-요청) · [40fps 캡처](#40fps-캡처) · [화면 표시 방식](#화면-표시-방식) · [P010 HDR10](#p010-hdr10) · [Pixel-perfect와 창 크기](#pixel-perfect와-창-크기) · [확대와 멀티 모니터](#확대와-멀티-모니터)
 
@@ -398,4 +398,4 @@ HDR·원본 크기·축소·2배 초과 확대에서는 기존 출력 경로를 
 
 ---
 
-[README](../README.ko.md) · [문서 목록](INDEX.ko.md) · [English](VIDEO.md)
+[README](../README.md) · [문서 목록](INDEX.ko.md) · [English](VIDEO.md)

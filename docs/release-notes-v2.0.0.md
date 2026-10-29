@@ -80,5 +80,5 @@ added-latency value, and screenshots retain the input image without VSR.
 
 Retains latest-frame-first playback, existing audio-output/PCM-buffer defaults,
 experimental HDR10 and console LPCM 5.1, and F12 PNG/clipboard capture.
-HDR screenshots continue to be converted to SDR. See the [English README](../README.md)
+HDR screenshots continue to be converted to SDR. See the [English README](../README.en.md)
 for usage and requirements.

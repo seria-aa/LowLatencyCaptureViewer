@@ -2,7 +2,7 @@
 
 # LLCV documentation
 
-[README](../README.md) · [한국어](INDEX.ko.md)
+[README](../README.en.md) · [한국어](INDEX.ko.md)
 
 The current user guides cover **LLCV 2.1.9**. Historical development records are listed separately below.
 Features, defaults, and test results in historical records apply to the version and environment tested.
@@ -143,4 +143,4 @@ These records preserve implementation history and measurement conditions, not cu
 
 ---
 
-[README](../README.md) · [한국어](INDEX.ko.md)
+[README](../README.en.md) · [한국어](INDEX.ko.md)

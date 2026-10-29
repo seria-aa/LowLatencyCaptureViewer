@@ -2,84 +2,84 @@
 
 # LLCV - Low Latency Capture Viewer
 
-A low-latency Windows viewer for video and audio from HDMI capture devices.
-Use it to play console games without OBS, or listen in audio-only mode.
+HDMI 캡처보드로 들어오는 영상과 소리를 재생하는 Windows용 저지연 뷰어입니다.
+OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리만 들을 수 있습니다.
 
-**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.1.9.md) · [한국어](README.ko.md)
+**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.1.9.md) · [English](README.en.md)
 
 <br>
 
-| Video settings | Audio settings |
+| 영상 설정 | 오디오 설정 |
 | --- | --- |
-| [![Video settings](docs/images/settings-video-en.png)](docs/images/settings-video-en.png) | [![Audio settings](docs/images/settings-audio-en.png)](docs/images/settings-audio-en.png) |
+| [![영상 설정](docs/images/settings-video.png)](docs/images/settings-video.png) | [![오디오 설정](docs/images/settings-audio.png)](docs/images/settings-audio.png) |
 
-<sub>2.1.6 UI examples. Device lists and supported formats vary by system. Click an image to view it at full resolution.</sub>
-
-<br>
-
-## What's new in 2.1.9
-
-Adds **RGB24 / XRGB (RGB32)** SDR playback, source screenshots, NVIDIA VSR requests and recording.
-RGB recording checks conversion headroom before creating a file and uses bounded frame-buffer memory.
-Format rejection diagnostics and crash-recovery verification have also been strengthened.
-[Video settings](docs/VIDEO.md) · [Full release notes](docs/release-notes-v2.1.9.md)
+<sub>2.1.6 UI 예시입니다. 장치 목록과 지원 형식은 환경에 따라 다릅니다. 이미지를 누르면 원본 크기로 볼 수 있습니다.</sub>
 
 <br>
 
-## Install and run
+## 2.1.9 업데이트
 
-Requires Windows 10/11 x64 and a capture-device driver.
-No codec pack or separate Visual C++ Redistributable installation is needed.
-The FFmpeg mux libraries required for recording are included.
-
-Download the installer ending in **Setup.exe** from the [latest release](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest).
-For the portable version, extract **x64.zip** and run `LowLatencyCaptureViewer.exe`.
-
-1. Close OBS and other apps using the capture device.
-2. Check **Capture device** in LLCV and select **Start**.
-3. If audio is missing, check **Capture audio device**.
-
-<kbd>F1</kbd> Help · <kbd>F2</kbd> Settings · <kbd>F6</kbd> Upscaling · <kbd>F9</kbd> Record · <kbd>F11</kbd> Fullscreen · <kbd>F12</kbd> Screenshot · <kbd>Tab</kbd> Diagnostics
-
-These are the default keys; change them under **Guide & logs**.
+**RGB24 / XRGB (RGB32)** SDR 재생·원본 스크린샷·NVIDIA VSR 요청·녹화를 추가했습니다.
+RGB 녹화는 시작 전 변환 속도를 확인하고 프레임 버퍼 메모리를 제한합니다.
+입력 형식 거부 원인 안내와 강제 종료 복구 검증도 보완했습니다.
+[영상 설정](docs/VIDEO.ko.md) · [전체 변경 내역](docs/release-notes-v2.1.9.md)
 
 <br>
 
-## Features
+## 설치 및 실행
 
-- Latest-frame-first presentation with low latency (standard or exclusive fullscreen) and VSync
-- NV12/YUY2/UYVY (HDYC), MJPEG, and P010 HDR10 input — UYVY/HDYC supports playback and screenshots, not recording
-- Device-advertised RGB24 and XRGB (RGB32) SDR playback, source screenshots, NVIDIA VSR requests and recording — manual selection; [recording converts to BT.709 Limited NV12 (4:2:0)](docs/RECORDING.md)
-- Optional 40 fps capture and unlisted 30 fps requests, subject to driver acceptance
-- SDR range Auto/Limited/Full, shared by playback, screenshots and recording
-- NVIDIA VSR (experimental), with separate or capture-matched display resolutions
-- CMAA2 → NIS upscaling for SDR enlargement; HDR retains the original output. Select Off/VSR, default sharpness 0.15
-- WASAPI Shared/Exclusive, ASIO, console LPCM 5.1, and audio-only mode
-- NV12/YUY2/MJPEG/RGB SDR/stereo MP4 recording — codec, quality, volume, pause and splitting
-- Source-resolution PNG screenshots with optional clipboard copy
-- Sleep prevention during playback, with display sleep allowed in audio-only mode
-- Dark/light themes, fullscreen, window size locking, volume controls/playback mute, Korean/English UI
+Windows 10/11 x64와 캡처보드 드라이버가 필요합니다.
+별도 코덱 팩·Visual C++ 재배포 패키지는 설치하지 않아도 됩니다.
+녹화에 필요한 FFmpeg 저장 라이브러리는 배포본에 포함되어 있습니다.
 
-HDR10 needs compatible hardware and an HDR display; ASIO needs its driver.
-LPCM 5.1 requires multichannel capture and Shared output.
+[최신 릴리스](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)에서 **Setup.exe**로 끝나는 설치 파일을 받으세요.
+설치 없이 쓰려면 **x64.zip**을 풀고 `LowLatencyCaptureViewer.exe`를 실행하면 됩니다.
 
-VSR depends on GPU/driver support and may add latency. HDR screenshots are saved as SDR.
-See the [feature requirements](docs/USAGE.md#compatibility-and-feature-requirements).
+1. OBS 등 캡처보드를 사용 중인 다른 프로그램을 종료합니다.
+2. LLCV에서 **캡처 장치**를 확인하고 **시작**을 누릅니다.
+3. 소리가 나오지 않으면 **캡처 오디오 장치**를 확인하세요.
+
+<kbd>F1</kbd> 도움말 · <kbd>F2</kbd> 설정 · <kbd>F6</kbd> 업스케일링 · <kbd>F9</kbd> 녹화 · <kbd>F11</kbd> 전체화면 · <kbd>F12</kbd> 스크린샷 · <kbd>Tab</kbd> 진단
+
+위 키는 기본값이며, **도움말·진단**에서 변경할 수 있습니다.
 
 <br>
 
-## Documentation
+## 지원 기능
 
-The [documentation index](docs/INDEX.md) also lists release notes and development/validation records.
+- 최신 프레임 우선 표시, 저지연 출력(일반·독점 전체화면)과 VSync
+- NV12/YUY2/UYVY(HDYC), MJPEG, P010 HDR10 입력 — UYVY/HDYC는 재생·스크린샷 지원, 녹화 제외
+- 장치가 제공하는 RGB24·XRGB (RGB32) SDR 재생·원본 스크린샷·VSR 요청·녹화 — 직접 선택
+- 선택적 40fps 캡처 및 목록에 없는 30fps 직접 요청 — 드라이버 수락 필요
+- SDR 색 범위 자동/Limited/Full — 재생·스크린샷·녹화에 공통 적용
+- NVIDIA VSR (실험적), 캡처·표시 해상도 개별 설정 또는 연동
+- CMAA2 → NIS 업스케일링: SDR 전용 확대, HDR은 기존 출력 유지, 끄기/VSR 선택, 선명도 기본 0.15
+- WASAPI Shared·Exclusive, ASIO, 콘솔 LPCM 5.1, 오디오 전용 모드
+- NV12/YUY2/MJPEG/RGB SDR·스테레오 MP4 녹화 — 코덱·품질·음량, 일시정지, 자동 분할
+- 입력 해상도 PNG 스크린샷과 클립보드 복사
+- 재생 중 자동 절전 방지 — 오디오 전용 모드에서는 화면 꺼짐 허용
+- 다크·라이트 테마, 전체화면, 창 크기 고정, 음량 조절·재생 음소거, 한국어·영어
 
-- [User guide](docs/USAGE.md) — settings, shortcuts, upscaling/VSR, screenshots and sleep prevention
-- [Recording](docs/RECORDING.md) — requirements, quality, splitting and file protection
-- [Video and HDR](docs/VIDEO.md) / [Audio and 5.1](docs/AUDIO.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md) / [Diagnostics and logs](docs/DIAGNOSTICS.md) / [Build from source](docs/BUILDING.md)
+HDR10은 호환 장치와 HDR 디스플레이가, ASIO는 전용 드라이버가 필요합니다.
+LPCM 5.1은 다채널 캡처·Shared 출력 전용입니다.
 
-For Linux, see the independently maintained [LLCV for Linux](https://github.com/Meo-Hong/LLCV-for-Linux) fork.
-Installation instructions, supported environments, and support are handled in that repository.
+VSR 동작은 GPU·드라이버에 따라 다르며 지연이 늘 수 있습니다. HDR 스크린샷은 SDR로 저장됩니다.
+[기능별 지원 조건](docs/USAGE.ko.md#호환성-및-사용-조건)을 확인하세요.
+
+<br>
+
+## 문서
+
+[전체 문서 목록](docs/INDEX.ko.md)에서 릴리스 노트와 개발·검증 기록도 확인할 수 있습니다.
+
+- [사용 가이드](docs/USAGE.ko.md) — 설정, 단축키, 업스케일링·VSR, 스크린샷, 절전 방지
+- [녹화](docs/RECORDING.ko.md) — 지원 조건, 품질·용량, 분할·파일 보호
+- [영상·HDR](docs/VIDEO.ko.md) / [오디오·5.1](docs/AUDIO.ko.md)
+- [문제 해결](docs/TROUBLESHOOTING.ko.md) / [진단·로그](docs/DIAGNOSTICS.ko.md) / [소스 빌드](docs/BUILDING.ko.md)
+
+Linux용은 별도로 관리되는 [LLCV for Linux](https://github.com/Meo-Hong/LLCV-for-Linux) 포크를 확인하세요.
+설치 방법과 지원 범위, 문의는 해당 저장소에서 안내합니다.
 
 ---
 
-Copyright (C) 2026 seria-aa. [GNU GPL v3.0 or later](LICENSE).
+Copyright (C) 2026 seria-aa. [GNU GPL v3.0 또는 이후 버전](LICENSE).

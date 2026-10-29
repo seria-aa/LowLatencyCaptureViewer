@@ -57,4 +57,4 @@ screenshots continue to save the pre-VSR input image.
 
 Retains latest-frame-first playback and existing audio defaults, with no added
 frame queue or delay to equalize ON/OFF latency. Windows may suppress rounded
-corners in some environments. See the [English README](../README.md) for requirements.
+corners in some environments. See the [English README](../README.en.md) for requirements.

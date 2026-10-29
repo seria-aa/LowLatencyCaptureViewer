@@ -2,7 +2,7 @@
 
 # 녹화
 
-[README](../README.ko.md) · [문서 목록](INDEX.ko.md) · [English](RECORDING.md)
+[README](../README.md) · [문서 목록](INDEX.ko.md) · [English](RECORDING.md)
 
 NV12·YUY2·MJPEG·RGB SDR 영상과 16비트 PCM 스테레오 입력을 MP4로 저장합니다.
 MJPEG 입력은 녹화 작업 스레드에서 디코딩한 뒤 선택한 H.264·HEVC·AV1 인코더로 저장합니다.

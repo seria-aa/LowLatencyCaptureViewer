@@ -2,7 +2,7 @@
 
 # LLCV 사용 가이드
 
-[README](../README.ko.md) · [문서 목록](INDEX.ko.md) · [English](USAGE.md)
+[README](../README.md) · [문서 목록](INDEX.ko.md) · [English](USAGE.md)
 
 [다운로드](#다운로드) · [처음 사용하기](#처음-사용하기) · [설정 찾기](#설정-찾기) · [무엇을 고르면 되나요?](#무엇을-고르면-되나요) · [단축키 변경](#단축키-변경) · [자주 쓰는 기능](#자주-쓰는-기능) · [CMAA2 → NIS](#cmaa2--nis-업스케일링) · [NVIDIA VSR (실험적)](#nvidia-vsr-실험적) · [스크린샷](#스크린샷) · [문제 해결](#문제-해결) · [호환성 및 사용 조건](#호환성-및-사용-조건)
 
@@ -454,4 +454,4 @@ HLG, Full-range HDR, 호환성 출력(Blt)의 HDR, 앱 자체의 HDR→SDR 화�
 
 ---
 
-[README](../README.ko.md) · [문서 목록](INDEX.ko.md) · [English](USAGE.md)
+[README](../README.md) · [문서 목록](INDEX.ko.md) · [English](USAGE.md)
