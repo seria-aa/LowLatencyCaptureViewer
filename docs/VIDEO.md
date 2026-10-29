@@ -2,7 +2,7 @@
 
 # Video modes, scaling, and fullscreen
 
-[README](../README.md) · [Documentation](INDEX.md) · [한국어](VIDEO.ko.md)
+[README](../README.en.md) · [Documentation](INDEX.md) · [한국어](VIDEO.ko.md)
 
 [Capture path](#capture-path) · [Mode detection](#mode-detection) · [NV12, YUY2, and MJPEG](#nv12-yuy2-and-mjpeg) · [Frame rate](#frame-rate) · [Unlisted 30 fps](#unlisted-30-fps-requests) · [40 fps capture](#40-fps-capture) · [Presentation](#presentation) · [P010 HDR10](#p010-hdr10) · [Pixel-perfect and resizing](#pixel-perfect-and-resizing) · [Scaling and multi-monitor behavior](#scaling-and-multi-monitor-behavior)
 
@@ -422,4 +422,4 @@ is 20 DIP after DPI scaling. Hold Shift while dragging to bypass snap.
 
 ---
 
-[README](../README.md) · [Documentation](INDEX.md) · [한국어](VIDEO.ko.md)
+[README](../README.en.md) · [Documentation](INDEX.md) · [한국어](VIDEO.ko.md)

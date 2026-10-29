@@ -1482,7 +1482,7 @@ if(LLCV_RECORDING)
     install(FILES ${llcv_recording_runtime_dlls} DESTINATION .)
     install(DIRECTORY "${LLCV_RECORDING_FFMPEG_ROOT}/licenses/" DESTINATION ffmpeg-licenses)
 endif()
-install(FILES LICENSE README.md README.ko.md DEPENDENCIES.txt
+install(FILES LICENSE README.md README.ko.md README.en.md DEPENDENCIES.txt
         "실행안내.txt" DESTINATION .)
 install(FILES third_party/asio/LICENSE.txt DESTINATION . RENAME ASIO-SDK-LICENSE.txt)
 install(FILES third_party/asio/HOST-LICENSE.txt DESTINATION . RENAME ASIO-HOST-LICENSE.txt)

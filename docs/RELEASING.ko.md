@@ -2,7 +2,7 @@
 
 # 릴리스 가이드
 
-[README](../README.ko.md) · [문서 목록](INDEX.ko.md) · [English](RELEASING.md)
+[README](../README.md) · [문서 목록](INDEX.ko.md) · [English](RELEASING.md)
 
 [1. 버전 표기](#1-버전-표기) · [2. 빌드와 검사](#2-빌드와-검사) · [3. 패키지](#3-패키지) · [4. GitHub 공개](#4-github-공개)
 
@@ -118,7 +118,7 @@ try {
   foreach ($required in @('LowLatencyCaptureViewer.exe', 'LICENSE',
       'ASIO-SDK-LICENSE.txt', 'ASIO-HOST-LICENSE.txt', 'PRETENDARD-LICENSE.txt',
       'NIS-LICENSE.txt', 'CMAA2-LICENSE.txt', 'UPSCALING-NOTICE.txt',
-      'README.md', 'README.ko.md', 'DEPENDENCIES.txt', '실행안내.txt')) {
+      'README.md', 'README.ko.md', 'README.en.md', 'DEPENDENCIES.txt', '실행안내.txt')) {
     if ($null -eq $releaseArchive.GetEntry($required)) {
       throw "Missing package file: $required"
     }
@@ -169,4 +169,4 @@ gh release create v2.1.9 `
 
 ---
 
-[README](../README.ko.md) · [문서 목록](INDEX.ko.md) · [English](RELEASING.md)
+[README](../README.md) · [문서 목록](INDEX.ko.md) · [English](RELEASING.md)

@@ -2,7 +2,7 @@
 
 # Recording
 
-[README](../README.md) · [Documentation](INDEX.md) · [한국어](RECORDING.ko.md)
+[README](../README.en.md) · [Documentation](INDEX.md) · [한국어](RECORDING.ko.md)
 
 Records NV12/YUY2/MJPEG/RGB SDR video with 16-bit PCM stereo input to MP4.
 MJPEG input is decoded on the recording worker and saved with the selected H.264, HEVC or AV1 encoder.

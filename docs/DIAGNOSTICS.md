@@ -2,7 +2,7 @@
 
 # Diagnostics and logs
 
-[README](../README.md) · [Documentation](INDEX.md) · [한국어](DIAGNOSTICS.ko.md)
+[README](../README.en.md) · [Documentation](INDEX.md) · [한국어](DIAGNOSTICS.ko.md)
 
 [Video fields](#video-fields) · [Audio fields](#audio-fields) · [Buffer terminology](#buffer-terminology) · [Buffer diagnosis](#buffer-diagnosis) · [Log files](#log-files)
 
@@ -158,4 +158,4 @@ audio device.
 
 ---
 
-[README](../README.md) · [Documentation](INDEX.md) · [한국어](DIAGNOSTICS.ko.md)
+[README](../README.en.md) · [Documentation](INDEX.md) · [한국어](DIAGNOSTICS.ko.md)

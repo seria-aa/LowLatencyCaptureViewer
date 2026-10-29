@@ -32,12 +32,28 @@ try {
     $result = & $checkDocs -PackageRoot $package
     Assert-True ($result.Documents -gt 40) 'User guides/release history were not fully staged.'
     Assert-True ($result.LocalLinks -gt 100) 'Expected local documentation links were not checked.'
-    foreach ($relative in @('LICENSE', 'DEPENDENCIES.txt', '실행안내.txt',
+    foreach ($relative in @('README.md', 'README.ko.md', 'README.en.md', 'LICENSE', 'DEPENDENCIES.txt', '실행안내.txt',
             'NIS-LICENSE.txt', 'CMAA2-LICENSE.txt', 'UPSCALING-NOTICE.txt',
             'docs/USAGE.md', 'docs/USAGE.ko.md', 'docs/VIDEO.md', 'docs/VIDEO.ko.md',
             'docs/AUDIO.md', 'docs/AUDIO.ko.md', 'docs/TROUBLESHOOTING.md',
             'docs/TROUBLESHOOTING.ko.md', 'docs/DIAGNOSTICS.md', 'docs/DIAGNOSTICS.ko.md')) {
         Assert-True (Test-Path -LiteralPath (Join-Path $package $relative) -PathType Leaf) "Missing $relative"
+    }
+    $koreanReadme = [IO.File]::ReadAllText((Join-Path $package 'README.md'))
+    $legacyReadme = [IO.File]::ReadAllText((Join-Path $package 'README.ko.md'))
+    $englishReadme = [IO.File]::ReadAllText((Join-Path $package 'README.en.md'))
+    Assert-True ($koreanReadme -ceq $legacyReadme) 'Legacy Korean README must remain an exact compatibility mirror.'
+    Assert-True ($koreanReadme.Contains('[사용 가이드](docs/USAGE.ko.md)') -and
+        $koreanReadme.Contains('[English](README.en.md)')) 'Default README must be Korean and link to English.'
+    Assert-True ($englishReadme.Contains('[User guide](docs/USAGE.md)') -and
+        $englishReadme.Contains('[한국어](README.md)')) 'English README must link back to the canonical Korean README.'
+    foreach ($guide in @('AUDIO','BUILDING','DIAGNOSTICS','INDEX','RECORDING','RELEASING','TROUBLESHOOTING','USAGE','VIDEO')) {
+        foreach ($korean in @($true,$false)) {
+            $suffix = if ($korean) { '.ko.md' } else { '.md' }
+            $target = if ($korean) { '[README](../README.md)' } else { '[README](../README.en.md)' }
+            $text = [IO.File]::ReadAllText((Join-Path $package ('docs/' + $guide + $suffix)))
+            Assert-True ($text.Contains($target)) "Wrong README language navigation: $guide$suffix"
+        }
     }
     foreach ($relative in @('DESIGN.txt', 'BUILD_INFO.txt', 'GITHUB_PREP.md', 'tests',
             'docs/images/viewer.png', 'docs/rounded-corners-validation.md', 'docs/TEST-BLT.ko.md',
@@ -66,7 +82,7 @@ try {
 
     # Original regression: an index may exist even when its guide/image targets
     # are absent. Move just fixture files, verify errors, then restore them.
-    foreach ($relative in @('docs/USAGE.md', 'docs/USAGE.ko.md', 'docs/AUDIO.md',
+    foreach ($relative in @('README.en.md', 'README.ko.md', 'docs/USAGE.md', 'docs/USAGE.ko.md', 'docs/AUDIO.md',
                            'docs/images/help.png', 'docs/images/app-icon.png')) {
         $path = Join-Path $package $relative
         $held = Join-Path $fixtureRoot 'temporarily-held-document'

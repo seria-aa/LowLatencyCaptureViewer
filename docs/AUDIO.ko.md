@@ -2,7 +2,7 @@
 
 # 저지연 오디오
 
-[README](../README.ko.md) · [문서 목록](INDEX.ko.md) · [English](AUDIO.md)
+[README](../README.md) · [문서 목록](INDEX.ko.md) · [English](AUDIO.md)
 
 [캡처 오디오 선택](#캡처-오디오-선택) · [콘솔 LPCM 5.1 (v1.2.10부터)](#콘솔-lpcm-51-v1210부터) · [오디오 only 모드](#오디오-only-모드) · [WASAPI Shared와 Exclusive](#wasapi-shared와-exclusive) · [ASIO](#asio) · [출력 장치 전환](#출력-장치-전환) · [WASAPI 버퍼와 PCM 목표](#wasapi-버퍼와-pcm-목표) · [클록 드리프트 보정](#클록-드리프트-보정) · [음량과 백그라운드 음소거](#음량과-백그라운드-음소거)
 
@@ -214,4 +214,4 @@ WASAPI 소비는 계속되므로 다시 돌아왔을 때 PCM 누적 지연이 �
 
 ---
 
-[README](../README.ko.md) · [문서 목록](INDEX.ko.md) · [English](AUDIO.md)
+[README](../README.md) · [문서 목록](INDEX.ko.md) · [English](AUDIO.md)

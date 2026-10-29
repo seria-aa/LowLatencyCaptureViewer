@@ -2,7 +2,7 @@
 
 # LLCV user guide
 
-[README](../README.md) · [Documentation](INDEX.md) · [한국어](USAGE.ko.md)
+[README](../README.en.md) · [Documentation](INDEX.md) · [한국어](USAGE.ko.md)
 
 [Download](#download) · [First use](#first-use) · [Finding your settings](#finding-your-settings) · [What should I choose?](#what-should-i-choose) · [Changing shortcuts](#changing-shortcuts) · [Everyday controls](#everyday-controls) · [CMAA2 → NIS](#cmaa2--nis-upscaling) · [NVIDIA VSR (experimental)](#nvidia-vsr-experimental) · [Screenshots](#screenshots) · [Troubleshooting](#troubleshooting) · [Compatibility and feature requirements](#compatibility-and-feature-requirements)
 
@@ -478,4 +478,4 @@ and monitor.
 
 ---
 
-[README](../README.md) · [Documentation](INDEX.md) · [한국어](USAGE.ko.md)
+[README](../README.en.md) · [Documentation](INDEX.md) · [한국어](USAGE.ko.md)

@@ -19,7 +19,7 @@ foreach ($directory in @("docs", "tests")) {
 }
 
 # Keep this root list in sync with the installer and CMake install rules.
-$rootFiles = @("README.md", "README.ko.md", "LICENSE", "실행안내.txt", "DEPENDENCIES.txt")
+$rootFiles = @("README.md", "README.ko.md", "README.en.md", "LICENSE", "실행안내.txt", "DEPENDENCIES.txt")
 foreach ($relative in $rootFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $source $relative) -PathType Leaf)) {
         throw "Missing required package input: $relative"

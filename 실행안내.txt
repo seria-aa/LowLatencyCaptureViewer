@@ -115,8 +115,8 @@ PCM 버퍼 목표는 10/15/20/25/30ms 중 선택할 수 있습니다.
 - ASIO는 사용자 PC에 호환 드라이버가 설치된 경우에만 사용할 수 있습니다.
   ASIO 드라이버는 이 패키지에 포함되지 않습니다.
 
-자세한 설정·호환성·문제 해결: 같은 폴더의 README.ko.md
-영문 안내: README.md
+자세한 설정·호환성·문제 해결: 같은 폴더의 README.md
+영문 안내: README.en.md
 오디오 설명: docs\AUDIO.ko.md
 라이선스: LICENSE, ASIO-SDK-LICENSE.txt, ASIO-HOST-LICENSE.txt, PRETENDARD-LICENSE.txt
 

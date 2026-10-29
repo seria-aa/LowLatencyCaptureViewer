@@ -2,7 +2,7 @@
 
 # LLCV 문서
 
-[README](../README.ko.md) · [English](INDEX.md)
+[README](../README.md) · [English](INDEX.md)
 
 현재 사용 가이드는 **LLCV 2.1.9** 기준입니다. 평소 사용에는 아래 가이드를 참고하세요.
 과거 기록에 적힌 기능·기본값·테스트 결과는 해당 버전과 시험 환경을 기준으로 합니다.
@@ -143,4 +143,4 @@
 
 ---
 
-[README](../README.ko.md) · [English](INDEX.md)
+[README](../README.md) · [English](INDEX.md)

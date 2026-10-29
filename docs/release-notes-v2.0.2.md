@@ -86,4 +86,4 @@ Existing settings and installation paths are retained. The executable remains
 `LowLatencyCaptureViewer.exe` for update compatibility, with the same latest-frame-first
 presentation and audio defaults. Older Exclusive probe records are refreshed once;
 results completed under the new criteria are reused afterward.
-See the [English README](../README.md) for feature requirements.
+See the [English README](../README.en.md) for feature requirements.

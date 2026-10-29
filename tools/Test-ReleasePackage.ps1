@@ -9,7 +9,7 @@ $required = @("LowLatencyCaptureViewer.exe", "avformat-62.dll", "avcodec-62.dll"
     "NIS-LICENSE.txt", "CMAA2-LICENSE.txt", "UPSCALING-NOTICE.txt",
     "ffmpeg-licenses/COPYING.LGPLv2.1", "ffmpeg-licenses/LICENSE.md",
     "ffmpeg-licenses/recording-ffmpeg-NOTICE.txt", "ffmpeg-licenses/config.mak",
-    "README.md", "README.ko.md", "docs/RECORDING.md", "docs/RECORDING.ko.md")
+    "README.md", "README.ko.md", "README.en.md", "docs/RECORDING.md", "docs/RECORDING.ko.md")
 foreach ($relative in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $package $relative) -PathType Leaf)) {
         throw "Missing release file: $relative"

@@ -2,7 +2,7 @@
 
 # Building from source
 
-[README](../README.md) · [Documentation](INDEX.md) · [한국어](BUILDING.ko.md)
+[README](../README.en.md) · [Documentation](INDEX.md) · [한국어](BUILDING.ko.md)
 
 [Requirements](#requirements) · [Release build](#release-build) · [Installer and portable ZIP](#installer-and-portable-zip)
 
@@ -144,4 +144,4 @@ first launch and is not deleted automatically.
 
 ---
 
-[README](../README.md) · [Documentation](INDEX.md) · [한국어](BUILDING.ko.md)
+[README](../README.en.md) · [Documentation](INDEX.md) · [한국어](BUILDING.ko.md)

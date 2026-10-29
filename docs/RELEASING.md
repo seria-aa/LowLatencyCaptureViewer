@@ -2,7 +2,7 @@
 
 # Release guide
 
-[README](../README.md) · [Documentation](INDEX.md) · [한국어](RELEASING.ko.md)
+[README](../README.en.md) · [Documentation](INDEX.md) · [한국어](RELEASING.ko.md)
 
 [1. Versioning](#1-versioning) · [2. Build and verify](#2-build-and-verify) · [3. Package](#3-package) · [4. Publish](#4-publish)
 
@@ -125,7 +125,7 @@ try {
   foreach ($required in @('LowLatencyCaptureViewer.exe', 'LICENSE',
       'ASIO-SDK-LICENSE.txt', 'ASIO-HOST-LICENSE.txt', 'PRETENDARD-LICENSE.txt',
       'NIS-LICENSE.txt', 'CMAA2-LICENSE.txt', 'UPSCALING-NOTICE.txt',
-      'README.md', 'README.ko.md', 'DEPENDENCIES.txt', '실행안내.txt')) {
+      'README.md', 'README.ko.md', 'README.en.md', 'DEPENDENCIES.txt', '실행안내.txt')) {
     if ($null -eq $releaseArchive.GetEntry($required)) {
       throw "Missing package file: $required"
     }
@@ -177,4 +177,4 @@ next patch version instead.
 
 ---
 
-[README](../README.md) · [Documentation](INDEX.md) · [한국어](RELEASING.ko.md)
+[README](../README.en.md) · [Documentation](INDEX.md) · [한국어](RELEASING.ko.md)
