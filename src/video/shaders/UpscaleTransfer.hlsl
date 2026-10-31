@@ -1,5 +1,7 @@
-// SDR only: linearize BT.709 while blending CMAA2 edges, then restore encoding.
+// Blend in linear light, restore the source transfer before NIS.
 Texture2D<float4> source : register(t0);
+Texture2D<float4> originalPq : register(t1);
+SamplerState linearClamp : register(s0);
 cbuffer Settings : register(b0) {
     float4 placement;
 };
@@ -20,4 +22,15 @@ float4 Encode(float4 pos : SV_Position) : SV_Target {
 }
 float4 Copy(float4 pos : SV_Position) : SV_Target {
     return float4(source.Load(int3(int2(pos.xy-placement.xy),0)).rgb,1);
+}
+float4 CopyHdr(float4 pos : SV_Position) : SV_Target {
+    const float2 local=pos.xy-placement.xy;
+    const float3 filtered=source.Load(int3(int2(local),0)).rgb;
+    const float3 reference=originalPq.SampleLevel(linearClamp,local/placement.zw,0).rgb;
+    // Bound the total reconstruction + sharpening change, not only USM.
+    // The previous USM-only guard left already-eroded glyph contours intact.
+    // Anchor to original PQ bilinear samples, before either filter, in this
+    // existing final pass. This costs one sample, not a frame queue/readback.
+    const float3 limit=max(reference*0.02,0.5/1023.0);
+    return float4(clamp(filtered,max(reference-limit,0.0),min(reference+limit,1.0)),1);
 }

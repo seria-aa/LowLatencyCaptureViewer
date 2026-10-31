@@ -233,7 +233,7 @@ void CheckPaintContracts(TestWindow& state) {
     const COLORREF page = backgroundFor(state.controls.pageTitle);
     const COLORREF group = backgroundFor(state.controls.vsrStatus);
     Check(backgroundFor(state.controls.screenshotClipboardCheck) == page,
-        "screenshot checkbox blends into the uncluttered video page");
+        "screenshot checkbox blends into the uncluttered app settings page");
     if (!state.theme.HighContrast()) {
         Check(page == group, "upscaler details share the existing field background without an extra card");
         backgroundFor(state.controls.screenshotClipboardCheck);
@@ -437,11 +437,12 @@ void CheckActualTabOrder() {
         CreateActualContents(state, hwnd, english, dpi);
         auto& c = state.controls;
         const auto verify = [&](SettingsTab tab, bool exclusive, VideoPixelFormat format,
-                                bool pixelPerfect, bool externalCaptureAudio) {
+                                bool pixelPerfect, bool externalCaptureAudio, int upscaler = 2) {
             c.activeTab = tab;
             SendMessageW(c.tabControl, LB_SETCURSEL, SettingsNavigationIndex(tab), 0);
             SendMessageW(c.audioCombo, CB_SETCURSEL, exclusive ? 1 : 0, 0);
             SendMessageW(c.pixelCheck, BM_SETCHECK, pixelPerfect ? BST_CHECKED : BST_UNCHECKED, 0);
+            SendMessageW(c.upscalerCombo, CB_SETCURSEL, upscaler, 0);
             // A later page reflow/DPI application must preserve factory order.
             LayoutSettingsControls(&c, dpi);
             UpdateAdvancedControlVisibility(&c, exclusive, format);
@@ -466,9 +467,14 @@ void CheckActualTabOrder() {
                     expected.insert(expected.end(), {c.mjpegColorCombo, c.mjpegColorHelp});
                 expected.insert(expected.end(), {c.presentationCombo, c.presentationHelp,
                     c.displayMonitorCombo, c.pixelCheck});
-                if (!pixelPerfect) expected.push_back(c.scalingCombo); // fixture uses equal capture/display sizes
-                expected.insert(expected.end(), {c.displayResolutionCombo, c.upscalerCombo, c.vsrGuideButton,
-                    c.screenshotClipboardCheck, c.screenshotFolderButton});
+                // Equal capture/display sizes; CMAA/NIS replaces the ordinary scaler.
+                if (!pixelPerfect && upscaler != 1) expected.push_back(c.scalingCombo);
+                expected.insert(expected.end(), {c.displayResolutionCombo, c.upscalerCombo});
+                if (upscaler == 1) {
+                    if (format != VideoPixelFormat::P010) expected.push_back(c.cmaaQualityCombo);
+                    expected.push_back(c.nisSharpnessCombo);
+                }
+                expected.push_back(c.vsrGuideButton);
                 break;
             case SettingsTab::Audio:
                 expected.insert(expected.end(), {c.audioCombo, c.audioOutputCombo, c.bufferCombo});
@@ -489,7 +495,8 @@ void CheckActualTabOrder() {
                 break;
             case SettingsTab::Updates:
                 expected.insert(expected.end(), {c.languageCombo, c.themeCombo, c.skipStartupCheck,
-                    c.preventSleepCheck, c.checkForUpdatesCheck, c.updateNowButton});
+                    c.preventSleepCheck, c.checkForUpdatesCheck, c.updateNowButton, c.releaseNotesButton,
+                    c.screenshotClipboardCheck, c.screenshotFolderButton});
                 break;
             }
             expected.insert(expected.end(), {c.startButton, c.cancelButton});
@@ -513,6 +520,17 @@ void CheckActualTabOrder() {
             Check(GetWindow(c.captureDeviceLabel, GW_HWNDNEXT) == c.captureDeviceCombo &&
                 GetWindow(c.frameRateLabel, GW_HWNDNEXT) == c.frameRateCombo,
                 "native labels stay adjacent to their fields");
+            Check(GetWindow(c.updateStatus, GW_HWNDNEXT) == c.screenshotTitle &&
+                GetWindow(c.screenshotTitle, GW_HWNDNEXT) == c.screenshotClipboardCheck,
+                "screenshot accessible reading group follows updates, not video");
+            if(tab==SettingsTab::Updates) {
+                EnableWindow(c.updateNowButton,FALSE);
+                Check(IsWindowEnabled(c.releaseNotesButton) &&
+                    GetNextDlgTabItem(hwnd,c.checkForUpdatesCheck,FALSE)==c.releaseNotesButton &&
+                    GetNextDlgTabItem(hwnd,c.releaseNotesButton,TRUE)==c.checkForUpdatesCheck,
+                    "release notes stays reachable while an update check disables its own button");
+                EnableWindow(c.updateNowButton,TRUE);
+            }
             const HWND labelledFields[][3] = {
                 {c.presentationLabel, c.presentationCombo, c.presentationHelp},
                 {c.driftLabel, c.driftCombo, c.driftHelp},
@@ -540,7 +558,8 @@ void CheckActualTabOrder() {
         };
         for (auto format : {VideoPixelFormat::Nv12, VideoPixelFormat::P010, VideoPixelFormat::Mjpeg})
             for (bool pixelPerfect : {false, true}) for (bool externalAudio : {false, true})
-                verify(SettingsTab::VideoWindow, false, format, pixelPerfect, externalAudio);
+                for (int upscaler : {0, 1, 2})
+                    verify(SettingsTab::VideoWindow, false, format, pixelPerfect, externalAudio, upscaler);
         for (bool exclusive : {false, true})
             verify(SettingsTab::Audio, exclusive, VideoPixelFormat::Nv12, false, false);
         for (auto tab : {SettingsTab::Window, SettingsTab::GuideDiagnostics, SettingsTab::Updates})
@@ -564,13 +583,14 @@ void CheckDeferredTransitions() {
     Check(hwnd != nullptr, "create transition window");
     CreateActualContents(state, hwnd, false, 96);
     auto& c = state.controls;
-    c.activeTab = SettingsTab::VideoWindow;
+    c.activeTab = SettingsTab::Updates;
     RefreshPreview(state);
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
     unsigned childPaints = 0;
     Check(SetWindowSubclass(c.screenshotClipboardCheck, CountPaints, 72,
           reinterpret_cast<DWORD_PTR>(&childPaints)) != FALSE, "track button painting");
+    Check(IsWindowVisible(c.screenshotClipboardCheck),"paint coalescing is tested on the screenshot's actual page");
     for (int i = 0; i < 50; ++i)
         SendMessageW(c.screenshotClipboardCheck, BM_SETCHECK, i % 2 ? BST_CHECKED : BST_UNCHECKED, 0);
     Check(childPaints == 0, "nested state notifications never force intermediate paints");
@@ -582,8 +602,9 @@ void CheckDeferredTransitions() {
             Check(!IsWindowVisible(hwnd), "page update suppresses intermediate redraw");
             {
                 SettingsVisualUpdate nested(hwnd);
-                c.activeTab = i % 3 == 0 ? SettingsTab::GuideDiagnostics :
-                    i % 3 == 1 ? SettingsTab::VideoWindow : SettingsTab::Audio;
+                c.activeTab = i % 4 == 0 ? SettingsTab::GuideDiagnostics :
+                    i % 4 == 1 ? SettingsTab::VideoWindow :
+                    i % 4 == 2 ? SettingsTab::Audio : SettingsTab::Updates;
                 RefreshPreview(state);
                 for (size_t row = 0; row < c.guideKeys.size(); ++row) {
                     for (HWND control : {c.guideKeys[row], c.guideDescriptions[row]}) {

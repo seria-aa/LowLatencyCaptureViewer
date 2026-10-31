@@ -979,6 +979,22 @@ int main(int argc, char** argv) {
             "empty version cannot erase review marker");
         WritePrivateProfileStringW(L"General",L"StartupSettingsVersion",nullptr,path.c_str());
     }
+    {
+        using namespace llcv::settings;
+        for(bool preserve:{false,true}) {
+            AppSettings settings;settings.cmaaPreserve=preserve;settings.nisSharpnessPercent=37;
+            for(bool enabled:{false,true}) {
+                settings.cmaaNisEnabled=enabled;CheckSaved(path,settings,"save CMAA correction");
+                const auto loaded=LoadFromIni(path).settings;
+                Check(loaded.cmaaPreserve==preserve && loaded.nisSharpnessPercent==37 &&
+                    loaded.cmaaNisEnabled==enabled,"CMAA quality survives enabled/OFF save and restart");
+            }
+        }
+        for(const wchar_t* invalid:{L"-1",L"2",L"invalid",static_cast<const wchar_t*>(nullptr)}) {
+            WritePrivateProfileStringW(L"Video",L"CmaaPreserve",invalid,path.c_str());
+            Check(!LoadFromIni(path).settings.cmaaPreserve,"legacy/malformed CMAA choice keeps HIGH default");
+        }
+    }
     TestPresentationModes(path);
     {
         using namespace llcv::settings;

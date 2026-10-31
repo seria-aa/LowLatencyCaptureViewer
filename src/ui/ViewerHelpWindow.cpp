@@ -106,7 +106,7 @@ bool Window::CreateContent() {
     add(L"F12로 입력 해상도 PNG 저장\nOSD·화면 필터 제외 / HDR은 SDR로 변환",L"F12 saves a source-resolution PNG.\nNo OSD or display filters; HDR to SDR.",Normal,Card,true);
     add(L"저장 위치",L"Save location",Small,Card,true);
     add(L"사진 / LowLatencyCaptureViewer",L"Pictures / LowLatencyCaptureViewer",Small,Card);
-    add(L"클립보드 복사: 영상 설정의 스크린샷",L"Clipboard copy: Screenshots in Video settings.",Small,Card,true);
+    add(L"클립보드 복사: 앱 설정의 스크린샷",L"Clipboard copy: Screenshots in App settings.",Small,Card,true);
     const auto footer=shortcuts::Expand(english_ ? L"Playback continues · F1 / Esc closes this guide" : L"재생은 계속됩니다 · F1 / Esc로 안내창 닫기",bindings_);
     footer_=CreateWindowW(L"STATIC",footer.c_str(),
         WS_CHILD|WS_VISIBLE|SS_NOPREFIX,0,0,1,1,window_,nullptr,nullptr,nullptr);

@@ -49,16 +49,25 @@ docs/UPSCALING_OVERFLOW_DIAGNOSTIC.md. No diagnostic executable is installed.
 It also independently tests NIS opposite-edge isolation and offset viewport
 sentinels instead of relying only on an image produced by the same SDK.
 
-RGB scratch images are FP16. `UpscaleTransfer.hlsl` linearizes BT.709-encoded
-SDR before CMAA2 and restores the same encoding afterward. The unsuccessful
-HDR transfer/sharpening experiment has been removed; HDR bypasses this pipeline
-and retains the original HDR renderer. No tone mapping or gamut conversion
-occurs here; only the SDR CMAA2 and NIS variants are compiled.
+SDR RGB working images are FP16. `UpscaleTransfer.hlsl` linearizes BT.709 SDR
+before CMAA2 and restores the encoding before NIS. HDR skips CMAA2 entirely:
+RGB10 PQ input feeds matching NIS PQ shader/config permutations (both dispatch
+sizes), without AA textures, lists or transfer passes. The saved SDR quality
+choice is not modified. The former HDR AA kernels/transfers are embedded only
+in `CmaaNisTests` for offline reference comparisons, not in the app/library.
+The old USM-only dark-ring mitigation did not preserve glyph contours.
+Instead, the existing final HDR copy bounds the total reconstruction/USM
+change against bilinear sampling of the original, pre-filter PQ image:
+per-channel +/- max(2% of the reference PQ code, half a 10-bit code).
+This intentionally makes HDR correction more conservative. It adds one
+bilinear sample in the existing pass, not another pass/queue/CPU readback.
+It is not a proof of subjective text quality; live HDR visual approval is
+separate from the numerical bound. No tone mapping or gamut conversion occurs.
 Typed float UAV output does not add an sRGB store conversion.
 
 NIS preprocessing and postprocessing are available for this quality experiment.
 Preprocessing uses native FHD dimensions; postprocessing uses QHD dimensions.
 Both use the same SDR CMAA2 settings, transfer, and border handling. The regular
-viewer exposes only CMAA2 before NIS for SDR. Native-size,
+viewer exposes CMAA2 before NIS for SDR and NIS with the contour guard for HDR10. Native-size,
 downscaled, or beyond-2x views use the original processor. Private post-AA and
 other filter comparisons are not linked into the normal executable.

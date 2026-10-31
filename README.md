@@ -5,7 +5,7 @@
 HDMI 캡처보드로 들어오는 영상과 소리를 재생하는 Windows용 저지연 뷰어입니다.
 OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리만 들을 수 있습니다.
 
-**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.2.0.md) · [English](README.en.md)
+**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.2.1.md) · [English](README.en.md)
 
 <br>
 
@@ -17,12 +17,12 @@ OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리�
 
 <br>
 
-## 2.2.0 업데이트
+## 2.2.1 업데이트
 
-**진단자료 ZIP 만들기**와 다중 입력 장치의 **크로스바 연결 보완**을 추가했습니다.
-도움말을 스크롤 없이 표시하고 NIS 선명도 선택을 간소화했습니다.
-설정·녹화 안정성과 진단 로그 처리, VSync의 최신 프레임 선택도 개선했습니다.
-[진단·로그](docs/DIAGNOSTICS.ko.md) · [전체 변경 내역](docs/release-notes-v2.2.0.md)
+SDR 업스케일링에 **CMAA2 높음·보존형** 선택을 추가하고, **HDR10은 NIS와 윤곽 보호**로 확대합니다.
+업스케일링 조절을 나란히 배치하고 스크린샷 설정을 앱 설정으로 옮겼습니다.
+간격·정렬과 키보드 이동 순서를 다듬고, 앱 설정에서 **릴리스 노트**를 바로 열 수 있습니다.
+[전체 변경 내역](docs/release-notes-v2.2.1.md)
 
 <br>
 
@@ -53,7 +53,7 @@ Windows 10/11 x64와 캡처보드 드라이버가 필요합니다.
 - 선택적 40fps 캡처 및 목록에 없는 30fps 직접 요청 — 드라이버 수락 필요
 - SDR 색 범위 자동/Limited/Full — 재생·스크린샷·녹화에 공통 적용
 - NVIDIA VSR (실험적), 캡처·표시 해상도 개별 설정 또는 연동
-- CMAA2 → NIS 업스케일링: SDR 전용 확대, HDR은 기존 출력 유지, 끄기/VSR 선택, 선명도 기본 0.15
+- 업스케일링: SDR은 CMAA2 → NIS(높음/보존형), HDR10은 NIS+윤곽 보호. 끄기/VSR 선택, 선명도 기본 0.15
 - WASAPI Shared·Exclusive, ASIO, 콘솔 LPCM 5.1, 오디오 전용 모드
 - NV12/YUY2/MJPEG/RGB SDR·스테레오 MP4 녹화 — 코덱·품질·음량, 일시정지, 자동 분할
 - 입력 해상도 PNG 스크린샷과 클립보드 복사

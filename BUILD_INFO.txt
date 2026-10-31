@@ -1,4 +1,14 @@
-LLCV v2.2.0 x64 (continued from the v0.14.2 rework)
+LLCV v2.2.1 x64 (continued from the v0.14.2 rework)
+
+v2.2.1 SDR correction, HDR upscaling and settings layout
+-----------------------------------------------------
+- Adds High/Preserve CMAA2 correction for SDR without changing the saved sharpness.
+- Uses NIS + original-reference contour protection for HDR10, without HDR CMAA2 resources.
+- Retains SDR correction preference across HDR/SDR transitions and F6 toggles.
+- Aligns upscaling controls and moves screenshot preferences to App settings.
+- Matches native keyboard/reading order to the page layout and expands UI regression checks.
+- Opens current-version GitHub release notes from App settings, without an update query.
+- See tests/RELEASE_V2_2_1_AUDIT.md for preparation status and pending release gates.
 
 v2.2.0 Diagnostics, capture compatibility and settings stability
 -------------------------------------------------------------

@@ -414,9 +414,11 @@ on another monitor does not unexpectedly reopen fullscreen.
 Select **Off / CMAA2 → NIS / NVIDIA VSR** under **Video → Upscaling**.
 CMAA2 → NIS smooths SDR source edges before enlargement up to 2× per axis,
 with default sharpness **0.15**. It is opt-in and mutually exclusive with VSR.
+SDR offers High/Preserve CMAA2 correction.
 Sharpness choices are 0.00, 0.10, 0.15, 0.20, 0.30, 0.50, and 1.00.
 An existing saved value outside these presets remains a separate choice without rounding.
-HDR, native-size output, downscaling and enlargement beyond 2× use the original path.
+HDR10 uses NIS alone with original-reference contour protection; CMAA2 correction
+is retained for SDR. Native-size output, downscaling and enlargement beyond 2× use the original path.
 Increase display size if it currently matches capture.
 Recordings and screenshots are not filtered; OSD is drawn afterward.
 See [selection and requirements](USAGE.md#cmaa2--nis-upscaling).

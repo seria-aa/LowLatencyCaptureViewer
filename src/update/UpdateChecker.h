@@ -17,6 +17,10 @@ struct CheckResult {
 bool IsNewerReleaseTag(const std::wstring& latestTag,
                        const std::wstring& currentTag);
 
+// Current-version notes on the fixed official repository. Diagnostic suffixes
+// are ignored; invalid labels fall back to its releases list. No network query.
+std::wstring ReleaseNotesUrl(const std::wstring& currentVersion);
+
 // Parses a complete successful API response without network access. A newer
 // release need not have an installer; installerUrl stays empty in that case.
 bool ParseLatestReleaseResponse(const std::string& json,

@@ -7,11 +7,11 @@
 [1. 버전 표기](#1-버전-표기) · [2. 빌드와 검사](#2-빌드와-검사) · [3. 패키지](#3-패키지) · [4. GitHub 공개](#4-github-공개)
 
 버전 표기, 빌드, 패키지와 GitHub 릴리스를 일관되게 유지하기 위한 체크리스트입니다.
-이번 준비에는 로컬 `release/v2.2.0` 브랜치를 사용합니다. 빌드·게시 전에 현재 브랜치를
+이번 준비에는 로컬 `release/v2.2.1` 브랜치를 사용합니다. 빌드·게시 전에 현재 브랜치를
 확인하세요. 다른 복제본에서는 같은 이름의 브랜치를 먼저 만들거나 체크아웃합니다.
 새 명명 규칙에 맞추려고 과거 감사 문서나 병합 기록의 브랜치 이름을 바꾸지 않습니다.
-아래 실행 명령은 모두 **v2.2.0** 기준이며 빌드 폴더는 현재 관례인
-`build-v2200-release`를 사용합니다. 다른 버전은 버전·빌드 폴더·출력 경로를
+아래 실행 명령은 모두 **v2.2.1** 기준이며 빌드 폴더는 현재 관례인
+`build-v2210-release`를 사용합니다. 다른 버전은 버전·빌드 폴더·출력 경로를
 함께 변경합니다. 빌드 폴더에 점이 있는 버전을 넣고 패키지 기본 경로는 그대로
 두지 않습니다.
 
@@ -19,7 +19,7 @@
 
 ## 1. 버전 표기
 
-Git 태그와 앱 버전 표시에는 `v2.2.0`를 사용합니다. 실행 파일 리소스와 설치
+Git 태그와 앱 버전 표시에는 `v2.2.1`를 사용합니다. 실행 파일 리소스와 설치
 프로그램의 버전 필드는 `v` 없는 숫자를 사용합니다. 다음 위치의 버전을 맞춥니다.
 
 - `CMakeLists.txt`의 `project(... VERSION ...)`
@@ -29,14 +29,14 @@ Git 태그와 앱 버전 표시에는 `v2.2.0`를 사용합니다. 실행 파일
   `VersionInfoVersion`
 - `tools/package-v1.ps1`의 기본 빌드·출력 경로
 - `BUILD_INFO.txt`, `DEPENDENCIES.txt`, `실행안내.txt`의 현재 버전 머리말
-- `docs/release-notes-v2.2.0.md`
+- `docs/release-notes-v2.2.1.md`
 - 한영 README·가이드의 현재 버전과 변경 내용, 설정 예시 이미지·캡션
 
 변경 후 현재 버전 표기에 이전 문자열이 남지 않았는지 확인합니다.
 과거 릴리스 노트와 변경 기록의 버전 번호는 그대로 보존합니다.
 
 ```powershell
-rg -n "2\.1\.9|build-v2190-release" CMakeLists.txt src installer tools DEPENDENCIES.txt 실행안내.txt
+rg -n "2\.2\.0|build-v2200-release" CMakeLists.txt src installer tools DEPENDENCIES.txt 실행안내.txt
 ```
 
 <br>
@@ -53,19 +53,24 @@ rg -n "2\.1\.9|build-v2190-release" CMakeLists.txt src installer tools DEPENDENC
 
 테스트·비공개 미리보기는 새로 빌드한 격리 프로필 버전을 사용하세요.
 일반 앱을 옵션 없이 실행하면 실제 사용자 설정을 사용합니다.
-현재 검증 범위는 `tests/RELEASE_V2_2_0_AUDIT.md`, 설정 분리 정책은
+현재 검증 범위는 `tests/RELEASE_V2_2_1_AUDIT.md`, 설정 분리 정책은
 `tests/PROFILE_ISOLATION.md`에 기록합니다.
 
 저장소 루트의 x64 Visual Studio 개발자 PowerShell에서 콘솔을 UTF-8로 설정합니다.
 Release x64 빌드를 만들고 등록된 모든 테스트와 공백 검사를 통과해야 합니다.
 
+전체 녹화 검증에는 Python 3과 테스트용 ffmpeg/ffprobe도 필요합니다.
+PATH 또는 `Python3_EXECUTABLE`·`LLCV_TEST_FFMPEG`·`LLCV_TEST_FFPROBE`로 지정하세요.
+설정 단계에서 독립 미디어 테스트가 비활성화됐다고 나오면 축소된 테스트 목록을
+전체 릴리스 게이트로 간주하지 마세요. 독립 미디어·강제 종료 복구 검사의 등록을 확인합니다.
+
 ```powershell
 chcp.com 65001 > $null
-if ((git branch --show-current) -ne 'release/v2.2.0') { throw 'release/v2.2.0 브랜치를 먼저 확인하세요.' }
+if ((git branch --show-current) -ne 'release/v2.2.1') { throw 'release/v2.2.1 브랜치를 먼저 확인하세요.' }
 .\tools\Build-RecordingFFmpeg.ps1
-cmake -S . -B build-v2200-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DLLCV_RECORDING=ON -DLLCV_UPSCALING_DIAGNOSTIC=OFF -DLLCV_SPATIAL_PROTOTYPE=OFF -DLLCV_HDR_FRAME_AUDIT=OFF -DLLCV_HDR_SCRGB_PROTOTYPE=OFF -DLLCV_VSR_EXPERIMENT=OFF -DLLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC=OFF -DLLCV_RECORDING_FFMPEG_ROOT="$PWD/outputs/dependencies/recording-ffmpeg/install"
-cmake --build build-v2200-release
-ctest --test-dir build-v2200-release --output-on-failure
+cmake -S . -B build-v2210-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DLLCV_RECORDING=ON -DLLCV_UPSCALING_DIAGNOSTIC=OFF -DLLCV_SPATIAL_PROTOTYPE=OFF -DLLCV_HDR_FRAME_AUDIT=OFF -DLLCV_HDR_SCRGB_PROTOTYPE=OFF -DLLCV_VSR_EXPERIMENT=OFF -DLLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC=OFF -DLLCV_RECORDING_FFMPEG_ROOT="$PWD/outputs/dependencies/recording-ffmpeg/install"
+cmake --build build-v2210-release
+ctest --test-dir build-v2210-release --output-on-failure
 git diff --check
 ```
 
@@ -81,21 +86,21 @@ git diff --check
 공개할 릴리스 자산은 아래 설치 파일과 포터블 ZIP 두 개입니다.
 
 ```text
-LowLatencyCaptureViewer_v2.2.0_Setup.exe
-LowLatencyCaptureViewer_v2.2.0_x64.zip
+LowLatencyCaptureViewer_v2.2.1_Setup.exe
+LowLatencyCaptureViewer_v2.2.1_x64.zip
 ```
 
 ```powershell
 chcp.com 65001 > $null
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
-  -Version 2.2.0 -BuildDir ..\build-v2200-release -OutputDir outputs\v2.2.0
+  -Version 2.2.1 -BuildDir ..\build-v2210-release -OutputDir outputs\v2.2.1
 & "C:\Program Files\Inno Setup 7\ISCC.exe" `
-  "--define=BuildDir=..\build-v2200-release" ".\installer\LowLatencyCaptureViewer.iss"
+  "--define=BuildDir=..\build-v2210-release" ".\installer\LowLatencyCaptureViewer.iss"
 ```
 
 `settings.ini`, `%LOCALAPPDATA%` 로그, `build-*` 폴더, PDB, ILK와 테스트 실행
-파일은 패키지에 넣지 않습니다. ZIP 안의 EXE와 설치 파일 버전이 `2.2.0` 또는
-`2.2.0.0`인지 확인합니다. 파일명만 새 버전이고 내부 EXE는 구버전이면 안 됩니다.
+파일은 패키지에 넣지 않습니다. ZIP 안의 EXE와 설치 파일 버전이 `2.2.1` 또는
+`2.2.1.0`인지 확인합니다. 파일명만 새 버전이고 내부 EXE는 구버전이면 안 됩니다.
 
 업스케일링 실험 보고서·비교 이미지와 셰이더 소스·수동 테스트 도구는 사용자 패키지에서 제외합니다.
 정식 NIS·CMAA2 셰이더는 실행 파일에 포함하고 아래 라이선스 고지는 함께 배포합니다.
@@ -115,7 +120,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
 ```powershell
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $releaseArchive = [IO.Compression.ZipFile]::OpenRead(
-  (Resolve-Path 'outputs\v2.2.0\LowLatencyCaptureViewer_v2.2.0_x64.zip').Path)
+  (Resolve-Path 'outputs\v2.2.1\LowLatencyCaptureViewer_v2.2.1_x64.zip').Path)
 try {
   foreach ($required in @('LowLatencyCaptureViewer.exe', 'LICENSE',
       'ASIO-SDK-LICENSE.txt', 'ASIO-HOST-LICENSE.txt', 'PRETENDARD-LICENSE.txt',
@@ -150,21 +155,21 @@ Inno Setup의 구성까지 확인된 것은 아닙니다.
 ```powershell
 git status --short
 git diff --cached --check
-git commit -m "Prepare v2.2.0 release"
-git push origin release/v2.2.0
+git commit -m "Prepare v2.2.1 release"
+git push origin release/v2.2.1
 ```
 
 릴리스 노트를 사용해 브랜치 HEAD를 태그 대상으로 공개합니다. 베타가 명시된 경우에만
-`--prerelease`를 추가합니다. **v2.2.0는 정식 릴리스**이므로 해당 옵션을 쓰지 않습니다.
+`--prerelease`를 추가합니다. **v2.2.1는 정식 릴리스**이므로 해당 옵션을 쓰지 않습니다.
 
 ```powershell
-gh release create v2.2.0 `
-  "outputs\v2.2.0\LowLatencyCaptureViewer_v2.2.0_Setup.exe" `
-  "outputs\v2.2.0\LowLatencyCaptureViewer_v2.2.0_x64.zip" `
+gh release create v2.2.1 `
+  "outputs\v2.2.1\LowLatencyCaptureViewer_v2.2.1_Setup.exe" `
+  "outputs\v2.2.1\LowLatencyCaptureViewer_v2.2.1_x64.zip" `
   --repo seria-aa/LowLatencyCaptureViewer `
-  --target release/v2.2.0 `
-  --title "LLCV v2.2.0" `
-  --notes-file ".\docs\release-notes-v2.2.0.md"
+  --target release/v2.2.1 `
+  --title "LLCV v2.2.1" `
+  --notes-file ".\docs\release-notes-v2.2.1.md"
 ```
 
 공개된 태그·자산은 덮어쓰지 않습니다. 문제가 생기면 다음 패치 버전으로 수정합니다.

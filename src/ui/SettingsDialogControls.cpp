@@ -486,7 +486,13 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
     }
     SendMessageW(state->upscalerCombo, CB_SETCURSEL,
         initial.settings.cmaaNisEnabled ? 1 : initial.settings.vsrEnabled && !state->vsrGpuUnavailable ? 2 : 0, 0);
-    state->nisSharpnessLabel = makeLabel(initial.english ? L"NIS sharpness" : L"NIS 선명도", 600, 448);
+    state->cmaaQualityLabel = makeLabel(initial.english ? L"CMAA2 correction" : L"CMAA2 보정", 600, 450);
+    state->cmaaQualityCombo = CreateWindowExW(0,L"COMBOBOX",nullptr,kSettingsDropdownStyle,
+        600,474,180,140,hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_CMAA_QUALITY)),instance,nullptr);
+    for(const auto* label:{initial.english?L"High":L"높음",initial.english?L"Preserve":L"보존형"})
+        SendMessageW(state->cmaaQualityCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+    SendMessageW(state->cmaaQualityCombo,CB_SETCURSEL,initial.settings.cmaaPreserve?1:0,0);
+    state->nisSharpnessLabel = makeLabel(initial.english ? L"NIS sharpness" : L"NIS 선명도", 796, 450);
     state->nisSharpnessCombo = CreateWindowExW(0, L"COMBOBOX", nullptr, kSettingsDropdownStyle,
         724, 448, 136, 230, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_NIS_SHARPNESS)), instance, nullptr);
     PopulateNisSharpnessPicker(state->nisSharpnessCombo, initial.settings.nisSharpnessPercent);
@@ -574,6 +580,10 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
     state->updateStatus = CreateWindowExW(
         0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
         235, 234, 650, 24, hwnd, nullptr, instance, nullptr);
+    state->releaseNotesButton = CreateWindowExW(
+        0,L"BUTTON",initial.english?L"Release notes":L"릴리스 노트",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON|WS_TABSTOP,380,460,180,32,hwnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_RELEASE_NOTES)),instance,nullptr);
     state->versionWatermark = CreateWindowExW(
         0, L"STATIC", initial.versionLabel,
         WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
@@ -1026,9 +1036,8 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
         state->displayMonitorLabel, state->displayMonitorCombo, state->pixelCheck,
         state->scalingLabel, state->scalingCombo,
         state->displayResolutionLabel, state->displayResolutionCombo, state->upscalerLabel, state->upscalerCombo,
+        state->cmaaQualityLabel, state->cmaaQualityCombo,
         state->nisSharpnessLabel, state->nisSharpnessCombo, state->vsrGuideButton, state->vsrStatus,
-        state->screenshotTitle, state->screenshotClipboardCheck,
-        state->screenshotFolderButton, state->screenshotHelp,
 
         state->audioOutputSection,
         state->audioLabel, state->audioCombo, state->audioOutputLabel, state->audioOutputCombo,
@@ -1059,7 +1068,9 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
         state->skipStartupCheck, state->skipStartupHint,
         state->preventSleepCheck, state->preventSleepHint,
         state->updateTitle, state->updateText, state->checkForUpdatesCheck,
-        state->updateNowButton, state->updateStatus,
+        state->updateNowButton, state->releaseNotesButton, state->updateStatus,
+        state->screenshotTitle, state->screenshotClipboardCheck,
+        state->screenshotFolderButton, state->screenshotHelp,
 
         state->versionWatermark, state->startButton, state->cancelButton,
     };

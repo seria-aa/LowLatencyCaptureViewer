@@ -39,6 +39,7 @@ llcv_shader(transferVertex ${transfer} Vertex vs_5_0)
 llcv_shader(copyPixel ${transfer} Copy ps_5_0)
 llcv_shader(decode709 ${transfer} Decode ps_5_0)
 llcv_shader(encode709 ${transfer} Encode ps_5_0)
+llcv_shader(copyHdr ${transfer} CopyHdr ps_5_0)
 set(cmaa_defines /D CMAA2_STATIC_QUALITY_PRESET=2 /D CMAA2_EXTRA_SHARPNESS=0
     /D CMAA2_EDGE_DETECTION_LUMA_PATH=0 /D CMAA2_USE_HALF_FLOAT_PRECISION=0
     /D CMAA2_COLLECT_EXPAND_BLEND_ITEMS=0 /D CMAA2_UAV_STORE_TYPED=1
@@ -50,11 +51,23 @@ foreach(pair IN ITEMS "cmaaEdges,EdgesColor2x2CS" "cmaaArgs,ComputeDispatchArgsC
     llcv_shader(${name} third_party/upscaling/cmaa2/CMAA2.hlsl ${entry} cs_5_0
         ${cmaa_defines} /D CMAA2_SUPPORT_HDR_COLOR_RANGE=0)
 endforeach()
+string(REPLACE "CMAA2_EXTRA_SHARPNESS=0" "CMAA2_EXTRA_SHARPNESS=1" cmaa_preserve_defines "${cmaa_defines}")
+foreach(pair IN ITEMS "cmaaPreserveEdges,EdgesColor2x2CS" "cmaaPreserveArgs,ComputeDispatchArgsCS" "cmaaPreserveCandidates,ProcessCandidatesCS" "cmaaPreserveApply,DeferredColorApply2x2CS")
+    string(REPLACE "," ";" fields "${pair}")
+    list(GET fields 0 name)
+    list(GET fields 1 entry)
+    llcv_shader(${name} third_party/upscaling/cmaa2/CMAA2.hlsl ${entry} cs_5_0
+        ${cmaa_preserve_defines} /D CMAA2_SUPPORT_HDR_COLOR_RANGE=0)
+endforeach()
 foreach(threads IN ITEMS 128 256)
     # NIS_Config.h is host-side C++ only; the compiler tracks that include.
     # Only NIS shaders include NIS_Scaler.h, not CMAA2 or the transfer passes.
     llcv_shader(nis${threads} third_party/upscaling/nis/NIS_Main.hlsl main cs_5_0
         /D NIS_SCALER=1 /D NIS_HDR_MODE=0 /D NIS_NV12_SUPPORT=0 /D NIS_VIEWPORT_SUPPORT=1
+        /D NIS_CLAMP_OUTPUT=1 /D NIS_BLOCK_WIDTH=32 /D NIS_BLOCK_HEIGHT=24 /D NIS_THREAD_GROUP_SIZE=${threads}
+        DEPENDS third_party/upscaling/nis/NIS_Scaler.h)
+    llcv_shader(nisPq${threads} third_party/upscaling/nis/NIS_Main.hlsl main cs_5_0
+        /D NIS_SCALER=1 /D NIS_HDR_MODE=2 /D NIS_NV12_SUPPORT=0 /D NIS_VIEWPORT_SUPPORT=1
         /D NIS_CLAMP_OUTPUT=1 /D NIS_BLOCK_WIDTH=32 /D NIS_BLOCK_HEIGHT=24 /D NIS_THREAD_GROUP_SIZE=${threads}
         DEPENDS third_party/upscaling/nis/NIS_Scaler.h)
 endforeach()

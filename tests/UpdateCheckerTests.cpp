@@ -23,6 +23,11 @@ void Expect(bool condition, const char* message) {
 
 void TestReleaseResponses() {
     using namespace llcv::update;
+    const std::wstring notes=L"https://github.com/seria-aa/LowLatencyCaptureViewer/releases";
+    for(const auto* label:{L"v2.2.1",L"2.2.1",L"V2.2.1",L"v2.2.1-vsr-test",L"v2.2.1-audio-recovery-diagnostic"})
+        Expect(ReleaseNotesUrl(label)==notes+L"/tag/v2.2.1","notes link follows current version without diagnostic suffixes");
+    for(const auto* label:{L"",L"preview",L"v2..1",L"v2.2",L"v2.2.1/other",L"https://example.invalid",L"v2.2.1?redirect=other",L"v2.2.1.0"})
+        Expect(ReleaseNotesUrl(label)==notes,"invalid notes labels stay on the official releases list");
     CheckResult result;
     Expect(ParseLatestReleaseResponse(
                R"({"tag_name":"v2.0.1","assets":[{"browser_download_url":"https://github.com/seria-aa/LowLatencyCaptureViewer/releases/download/v2.0.1/LowLatencyCaptureViewer_v2.0.1_Setup.exe"}]})",

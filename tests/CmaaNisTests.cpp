@@ -7,8 +7,19 @@
 #include <numeric>
 #include <cmath>
 #include <limits>
+#include <array>
 #include <mfreadwrite.h>
 #include "../third_party/upscaling/nis/NIS_Config.h"
+#include "cmaaHdrEdges.h"
+#include "cmaaHdrArgs.h"
+#include "cmaaHdrCandidates.h"
+#include "cmaaHdrApply.h"
+#include "cmaaHdrPreserveEdges.h"
+#include "cmaaHdrPreserveArgs.h"
+#include "cmaaHdrPreserveCandidates.h"
+#include "cmaaHdrPreserveApply.h"
+#include "decodePq.h"
+#include "encodePq.h"
 static void Require(bool value,const char* label) {
     if(!value) { std::fprintf(stderr,"FAIL: %s\n",label);std::exit(1); }
 }
@@ -70,15 +81,20 @@ static HWND Window(UINT w,UINT h) {
 struct Timer {
     Microsoft::WRL::ComPtr<ID3D11Query> disjoint,start,stop;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> completionPixel;
-    explicit Timer(ID3D11Device* d) {
+    uint32_t completedPixel=0;
+    explicit Timer(ID3D11Device* d,DXGI_FORMAT outputFormat=DXGI_FORMAT_B8G8R8A8_UNORM) {
         D3D11_QUERY_DESC q{D3D11_QUERY_TIMESTAMP_DISJOINT,0};Check(d->CreateQuery(&q,&disjoint),"disjoint query");
         q.Query=D3D11_QUERY_TIMESTAMP;Check(d->CreateQuery(&q,&start),"start timestamp");Check(d->CreateQuery(&q,&stop),"stop timestamp");
         D3D11_TEXTURE2D_DESC pixel{};pixel.Width=pixel.Height=pixel.MipLevels=pixel.ArraySize=pixel.SampleDesc.Count=1;
-        pixel.Format=DXGI_FORMAT_B8G8R8A8_UNORM;pixel.Usage=D3D11_USAGE_STAGING;pixel.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        pixel.Format=outputFormat;pixel.Usage=D3D11_USAGE_STAGING;pixel.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         Check(d->CreateTexture2D(&pixel,nullptr,&completionPixel),"output-dependent completion pixel");
     }
     void Begin(ID3D11DeviceContext* c){c->Begin(disjoint.Get());c->End(start.Get());}
     double End(ID3D11DeviceContext* c,ID3D11Texture2D* output) {
+        D3D11_TEXTURE2D_DESC source{},destination{};
+        output->GetDesc(&source);completionPixel->GetDesc(&destination);
+        Require(source.Format==destination.Format && source.SampleDesc.Count==1,
+            "timing completion copy must match the actual output format");
         // Bare VP timestamps can omit work on the video engine. Force an output
         // dependency, and independently verify completion with one-pixel Map.
         const D3D11_BOX box{0,0,0,1,1,1};
@@ -92,7 +108,8 @@ struct Timer {
         Check(hr,"timestamp disjoint read");UINT64 a=0,b=0;
         Require(c->GetData(start.Get(),&a,sizeof(a),0)==S_OK && c->GetData(stop.Get(),&b,sizeof(b),0)==S_OK,"timestamps ready");
         D3D11_MAPPED_SUBRESOURCE mapped{};
-        Check(c->Map(completionPixel.Get(),0,D3D11_MAP_READ,0,&mapped),"actual output ready");c->Unmap(completionPixel.Get(),0);
+        Check(c->Map(completionPixel.Get(),0,D3D11_MAP_READ,0,&mapped),"actual output ready");
+        std::memcpy(&completedPixel,mapped.pData,sizeof(completedPixel));c->Unmap(completionPixel.Get(),0);
         Require(!d.Disjoint && d.Frequency && b>=a,"valid GPU clock");return double(b-a)*1000/d.Frequency;
     }
 };
@@ -101,6 +118,68 @@ static double Percentile(std::vector<double> v,double p){std::sort(v.begin(),v.e
 namespace llcv::upscaling {
 // Inspect the exact embedded NIS stage without changing production state/layout.
 struct PipelineTestAccess {
+    static bool HasCmaaResources(Pipeline& p) {
+        return p.cmaa_.linearView_ || p.cmaa_.encodedView_ || p.cmaa_.indirect_ || p.cmaa_.compute_[0];
+    }
+    // The removed HDR AA path remains a test-only reference, not a product mode.
+    static void ConfigureLegacyHdrCmaa(Pipeline& p,ID3D11Device* d,bool preserve) {
+        Require(p.hdr_,"legacy HDR reference cannot replace SDR");
+        Check(p.cmaa_.Configure(d,p.width_,p.height_,preserve),"legacy AA storage");
+        struct Code {const BYTE* data;size_t size;};
+        const Code high[]={{cmaaHdrEdges,sizeof(cmaaHdrEdges)},{cmaaHdrArgs,sizeof(cmaaHdrArgs)},
+            {cmaaHdrCandidates,sizeof(cmaaHdrCandidates)},{cmaaHdrApply,sizeof(cmaaHdrApply)}};
+        const Code kept[]={{cmaaHdrPreserveEdges,sizeof(cmaaHdrPreserveEdges)},{cmaaHdrPreserveArgs,sizeof(cmaaHdrPreserveArgs)},
+            {cmaaHdrPreserveCandidates,sizeof(cmaaHdrPreserveCandidates)},{cmaaHdrPreserveApply,sizeof(cmaaHdrPreserveApply)}};
+        const auto* codes=preserve?kept:high;
+        for(unsigned i=0;i<4;i++)Check(d->CreateComputeShader(codes[i].data,codes[i].size,nullptr,
+            p.cmaa_.compute_[i].ReleaseAndGetAddressOf()),"legacy HDR AA shader");
+        Check(d->CreatePixelShader(decodePq,sizeof(decodePq),nullptr,p.cmaa_.decode_.ReleaseAndGetAddressOf()),"legacy PQ decode");
+        Check(d->CreatePixelShader(encodePq,sizeof(encodePq),nullptr,p.cmaa_.encode_.ReleaseAndGetAddressOf()),"legacy PQ encode");
+    }
+    static Microsoft::WRL::ComPtr<ID3D11PixelShader> DisableHdrGuard(Pipeline& p,ID3D11Device* d) {
+        auto original=p.pixel_;
+        const char shader[]="Texture2D<float4> image:register(t0);cbuffer C:register(b0){float4 placement;};float4 main(float4 pos:SV_Position):SV_Target{return float4(image.Load(int3(int2(pos.xy-placement.xy),0)).rgb,1);}";
+        Microsoft::WRL::ComPtr<ID3DBlob> code,error;
+        Check(D3DCompile(shader,sizeof(shader)-1,nullptr,nullptr,nullptr,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&error),"compile unguarded HDR mutation");
+        Check(d->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,p.pixel_.ReleaseAndGetAddressOf()),"unguarded HDR mutation");
+        return original;
+    }
+    static void RestoreHdrGuard(Pipeline& p,const Microsoft::WRL::ComPtr<ID3D11PixelShader>& guard) {p.pixel_=guard;}
+    using CmaaPrograms = std::array<Microsoft::WRL::ComPtr<ID3D11ComputeShader>, 4>;
+    static CmaaPrograms Programs(Pipeline& p) {
+        CmaaPrograms result;
+        for (unsigned i=0;i<4;++i) result[i]=p.cmaa_.compute_[i];
+        return result;
+    }
+    static void Programs(Pipeline& p,const CmaaPrograms& programs) {
+        for (unsigned i=0;i<4;++i) p.cmaa_.compute_[i]=programs[i];
+    }
+    static UINT Overflow(Pipeline& p,ID3D11Device* d,ID3D11DeviceContext* c) {
+        Microsoft::WRL::ComPtr<ID3D11Resource> resource;p.cmaa_.uavs_[6]->GetResource(&resource);
+        Microsoft::WRL::ComPtr<ID3D11Buffer> source;Check(resource.As(&source),"CMAA control buffer");
+        D3D11_BUFFER_DESC desc{};source->GetDesc(&desc);
+        desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        desc.BindFlags=desc.MiscFlags=desc.StructureByteStride=0;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> staging;
+        Check(d->CreateBuffer(&desc,nullptr,&staging),"control staging");
+        c->CopyResource(staging.Get(),source.Get());D3D11_MAPPED_SUBRESOURCE map{};
+        Check(c->Map(staging.Get(),0,D3D11_MAP_READ,0,&map),"control readback");
+        UINT result=0;std::memcpy(&result,map.pData,sizeof(result));c->Unmap(staging.Get(),0);return result;
+    }
+    static void NativeForNis(Pipeline& p,ID3D11DeviceContext* c,ID3D11VideoContext* vc,
+                             ID3D11VideoProcessor* vp,D3D11_VIDEO_PROCESSOR_STREAM& stream,UINT ow,UINT oh) {
+        // Same VP input and SDR conversion as Pipeline::Draw, without running AA.
+        const RECT native{0,0,LONG(p.width_),LONG(p.height_)},output{0,0,LONG(ow),LONG(oh)};
+        c->OMSetRenderTargets(0,nullptr,nullptr);
+        vc->VideoProcessorSetStreamDestRect(vp,0,TRUE,&native);
+        vc->VideoProcessorSetOutputTargetRect(vp,TRUE,&native);
+        const HRESULT hr=vc->VideoProcessorBlt(vp,p.inputOutput_.Get(),0,1,&stream);
+        vc->VideoProcessorSetStreamDestRect(vp,0,TRUE,&p.destination_);
+        vc->VideoProcessorSetOutputTargetRect(vp,TRUE,&output);Check(hr,"NIS-only native VP");
+        c->OMSetBlendState(nullptr,nullptr,0xffffffff);c->OMSetDepthStencilState(nullptr,0);
+        c->RSSetState(p.rasterizer_.Get());c->IASetInputLayout(nullptr);
+        c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);c->GSSetShader(nullptr,nullptr,0);
+    }
     static void DisableSharpen(Pipeline& p,ID3D11Device* d) {
         NISConfig config{};
         Require(NVScalerUpdateConfig(config,.15f,0,0,p.width_,p.height_,p.width_,p.height_,
@@ -110,10 +189,26 @@ struct PipelineTestAccess {
         D3D11_SUBRESOURCE_DATA initial{&config,0,0};
         Check(d->CreateBuffer(&desc,&initial,p.nisConstants_.ReleaseAndGetAddressOf()),"NIS zero-sharpen diagnostic");
     }
+    static NISConfig NisParameters(Pipeline& p,ID3D11Device* d,float strength,bool zeroUsm) {
+        NISConfig config{};
+        Require(NVScalerUpdateConfig(config,strength,0,0,p.width_,p.height_,p.width_,p.height_,
+            0,0,p.scaledWidth_,p.scaledHeight_,p.scaledWidth_,p.scaledHeight_,
+            p.hdr_?NISHDRMode::PQ:NISHDRMode::None),"test NIS config retains actual transfer mode");
+        if(zeroUsm)config.kSharpStrengthMin=config.kSharpStrengthScale=0;
+        D3D11_BUFFER_DESC desc{};desc.ByteWidth=sizeof(config);desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA initial{&config,0,0};
+        Check(d->CreateBuffer(&desc,&initial,p.nisConstants_.ReleaseAndGetAddressOf()),"test NIS parameter buffer");
+        return config;
+    }
     static ID3D11ShaderResourceView* NativeInput(Pipeline& p){return p.inputView_.Get();}
+    static void BindHdrReference(Pipeline& p,ID3D11DeviceContext* c) {
+        c->PSSetShaderResources(1,1,p.inputView_.GetAddressOf());
+        c->PSSetSamplers(0,1,p.sampler_.GetAddressOf());
+    }
     static ID3D11ShaderResourceView* CmaaOnly(Pipeline& p,ID3D11DeviceContext* c){return p.cmaa_.Draw(c,p.inputView_.Get());}
-    static void NisOnly(Pipeline& p,ID3D11DeviceContext* c,ID3D11RenderTargetView* target) {
-        ID3D11ShaderResourceView* inputs[]={p.inputView_.Get(),p.coefficients_[0].Get(),p.coefficients_[1].Get()};
+    static void NisOnly(Pipeline& p,ID3D11DeviceContext* c,ID3D11RenderTargetView* target,
+                        ID3D11ShaderResourceView* input=nullptr) {
+        ID3D11ShaderResourceView* inputs[]={input?input:p.inputView_.Get(),p.coefficients_[0].Get(),p.coefficients_[1].Get()};
         c->CSSetShader(p.compute_.Get(),nullptr,0);c->CSSetShaderResources(0,3,inputs);
         c->CSSetSamplers(0,1,p.sampler_.GetAddressOf());c->CSSetConstantBuffers(0,1,p.nisConstants_.GetAddressOf());
         c->CSSetUnorderedAccessViews(0,1,p.intermediateUav_.GetAddressOf(),nullptr);
@@ -123,18 +218,31 @@ struct PipelineTestAccess {
         c->RSSetState(p.rasterizer_.Get());
         D3D11_VIEWPORT viewport{float(p.destination_.left),float(p.destination_.top),float(p.scaledWidth_),float(p.scaledHeight_),0,1};
         c->RSSetViewports(1,&viewport);c->OMSetRenderTargets(1,&target,nullptr);
-        c->VSSetShader(p.cmaa_.vertex_.Get(),nullptr,0);c->PSSetShader(p.pixel_.Get(),nullptr,0);
+        c->VSSetShader(p.hdr_?p.hdrVertex_.Get():p.cmaa_.vertex_.Get(),nullptr,0);c->PSSetShader(p.pixel_.Get(),nullptr,0);
         c->PSSetConstantBuffers(0,1,p.constants_.GetAddressOf());c->PSSetShaderResources(0,1,p.intermediateView_.GetAddressOf());c->Draw(3,0);
         c->PSSetShaderResources(0,1,empty);c->OMSetRenderTargets(0,nullptr,nullptr);c->RSSetState(nullptr);
     }
 };
+}
+static void RenderLegacyHdr(DirectD3D11Renderer& r,const std::vector<BYTE>& input,UINT stride) {
+    using Access=llcv::upscaling::PipelineTestAccess;
+    r.upload(input.data(),stride);
+    D3D11_VIDEO_PROCESSOR_STREAM stream{};stream.Enable=TRUE;stream.pInputSurface=r.inputViews[r.activeUploadSurface];
+    D3D11_TEXTURE2D_DESC output{};r.backBuffer->GetDesc(&output);
+    auto& p=r.cmaaNisPipeline;
+    Access::NativeForNis(p,r.context,r.videoContext,r.processor,stream,output.Width,output.Height);
+    auto* filtered=Access::CmaaOnly(p,r.context);
+    // CmaaOnly leaves no PS bindings; restore the same reference/sampler as the app.
+    Access::BindHdrReference(p,r.context);
+    Access::NisOnly(p,r.context,r.backBufferRenderTarget,filtered);
+    ID3D11ShaderResourceView* empty=nullptr;r.context->PSSetShaderResources(1,1,&empty);
 }
 static std::vector<BYTE> ReadSdrView(DirectD3D11Renderer& r,ID3D11ShaderResourceView* view) {
     Microsoft::WRL::ComPtr<ID3D11Resource> resource;view->GetResource(&resource);
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;Check(resource.As(&texture),"SDR stage texture");
     D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);
     Require(d.Width==1920 && d.Height==1080,"SDR native stage dimensions");
-    const auto format=d.Format;Require(format==DXGI_FORMAT_B8G8R8A8_UNORM || format==DXGI_FORMAT_R16G16B16A16_FLOAT,"native stage format");
+    const auto format=d.Format;Require(format==DXGI_FORMAT_B8G8R8A8_UNORM || format==DXGI_FORMAT_R8G8B8A8_UNORM || format==DXGI_FORMAT_R16G16B16A16_FLOAT,"native stage format");
     d.BindFlags=d.MiscFlags=0;d.Usage=D3D11_USAGE_STAGING;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;Check(r.device->CreateTexture2D(&d,nullptr,&staging),"SDR stage staging");
     r.context->CopyResource(staging.Get(),texture.Get());D3D11_MAPPED_SUBRESOURCE map{};
@@ -144,6 +252,9 @@ static std::vector<BYTE> ReadSdrView(DirectD3D11Renderer& r,ID3D11ShaderResource
         const auto* row=static_cast<const BYTE*>(map.pData)+size_t(y)*map.RowPitch;
         auto* pixel=out.data()+(size_t(y)*d.Width+x)*4;
         if(format==DXGI_FORMAT_B8G8R8A8_UNORM)std::memcpy(pixel,row+x*4,4);
+        else if(format==DXGI_FORMAT_R8G8B8A8_UNORM) {
+            pixel[0]=row[x*4+2];pixel[1]=row[x*4+1];pixel[2]=row[x*4];pixel[3]=row[x*4+3];
+        }
         else {
             for(int c=0;c<3;c++) {
                 uint16_t half=0;std::memcpy(&half,row+x*8+c*2,2);
@@ -266,7 +377,9 @@ static void RgbRegression() {
     DestroyWindow(hwnd);g_cmaaNisRequest=-1;
     std::puts("PASS: RGB24/RGB32 production upscale ON/OFF, flat/asymmetric frames, source preserved");
 }
+static void PreserveSelectionRegression();
 static void Regression() {
+    PreserveSelectionRegression();
     {
         const auto settings=g_settings;const int request=g_cmaaNisRequest.load();
         const auto mode=g_vsrMode.load();const auto vendor=g_vsrGpuVendor.load();
@@ -348,11 +461,11 @@ static void Regression() {
     g_cmaaNisRequest=15;Check(r.configureVideoOutput(w,h),"pattern enable");Render(r,pattern,w);
     const auto enabled=Read(r);Require(Difference(enabled,plain)>5,"upscaler changes edges");
     for(int i=0;i<8;i++){Render(r,pattern,w);Require(Difference(Read(r),enabled)<=1,"dense edge lists stable");}
-    Require(r.cmaaNisPipeline.Configure(nullptr,nullptr,nullptr,true,true,w,h,
-        RECT{0,0,480,270},r.adapterVendor,.15f)==S_FALSE,"HDR bypass releases an already active SDR pipeline");
+    Require(r.cmaaNisPipeline.Configure(nullptr,nullptr,nullptr,false,true,w,h,
+        RECT{0,0,480,270},r.adapterVendor,.15f)==S_FALSE,"disabled HDR request releases an already active SDR pipeline");
     Require(!r.cmaaNisPipeline.Enabled() &&
         llcv::upscaling::PipelineTestAccess::NativeInput(r.cmaaNisPipeline)==nullptr,
-        "HDR bypass retains no prior SDR input texture");
+        "disabled HDR request retains no prior SDR input texture");
     Check(r.configureVideoOutput(w,h),"SDR resumes after resource bypass");Render(r,pattern,w);
     Require(Difference(Read(r),enabled)<=1,"SDR output is preserved after HDR bypass");
     g_vsrGpuVendor=r.adapterVendor;
@@ -423,7 +536,9 @@ static void Regression() {
     r.reset();DestroyWindow(hwnd);g_cmaaNisRequest=-1;
     std::puts("PASS: production SDR formats/ranges/matrices, sharpness, OFF restoration, OSD, source preservation, F6, borders.");
 }
-static void HdrBypassRegression() {
+#include "CmaaHdrContour.inl"
+#include "CmaaHdrQuality.inl"
+static void HdrRegression() {
     const UINT w=320,h=180;HWND hwnd=Window(480,270);
     for(auto chroma:{DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020}) {
         g_cmaaNisRequest=-1;DirectD3D11Renderer r;
@@ -441,26 +556,28 @@ static void HdrBypassRegression() {
             }
             const auto original=p;
             g_cmaaNisRequest=-1;Check(r.configureVideoOutput(w,h),"HDR baseline");Render(r,p,w*2);const auto plain=Read(r);
-            for(int sharp:{0,15,100}) {
+            for(int sharp:{0,15,100,llcv::upscaling::Request(true,15,true)}) {
                 g_cmaaNisRequest=sharp;Check(r.configureVideoOutput(w,h),"HDR enable");
-                Require(!r.cmaaNisPipeline.Enabled() && r.cmaaNisStatus==S_FALSE,"HDR bypasses SDR-only filter");
-                Require(g_cmaaNisRequest==sharp,"HDR bypass preserves SDR sharpness request");
+                Require(r.cmaaNisPipeline.Enabled() && r.cmaaNisStatus==S_OK,"HDR runs the selected filter");
+                Require(!llcv::upscaling::PipelineTestAccess::HasCmaaResources(r.cmaaNisPipeline),
+                    "HDR allocates no AA textures, shaders or lists");
+                Require(g_cmaaNisRequest==sharp,"HDR preserves sharpness and correction request");
                 Render(r,p,w*2);const auto scaled=Read(r);
                 const auto error=Difference(plain,scaled,true);
                 std::printf("HDR chroma=%d Y=%u sharpness=%d maximum10bitError=%d\n",int(chroma),level,sharp,error);
-                Require(error==0,"HDR bypass is pixel-identical to the original output");
+                Require(error<=2,"HDR flat fields retain PQ brightness and color within two 10-bit codes");
                 Require(p==original,"P010 source preserved");
-                Require(r.cmaaNisPipeline.Configure(nullptr,nullptr,nullptr,true,true,w,h,
-                    RECT{0,0,480,270},0x8086,float(sharp)/100.0f)==S_FALSE,
-                    "HDR bypass needs no GPU filter resources on any vendor");
-                Render(r,p,w*2);Require(Difference(Read(r),scaled,true)==0,"HDR bypass agrees across vendor selections");
+                Check(r.cmaaNisPipeline.Configure(r.device,r.videoDevice,r.enumerator,true,true,w,h,
+                    RECT{0,0,480,270},0x8086,float(llcv::upscaling::RequestSharpness(sharp))/100.0f,
+                    llcv::upscaling::RequestPreserve(sharp)),"HDR generic-vendor NIS dispatch");
+                Render(r,p,w*2);Require(Difference(Read(r),scaled,true)<=2,"HDR agrees across 128/256-thread dispatches");
                 g_audioOsdVisible=true;Check(r.drawOverlayQuads(),"HDR OSD composition");
                 Require(Read(r)!=scaled,"HDR OSD visible");g_audioOsdVisible=false;
                 Render(r,p,w*2);Require(Difference(Read(r),scaled,true)<=1,"HDR OSD removed next frame");
             }
         }
     }
-    // HDR bypass must preserve patterned edges as well as flat colors.
+    // Patterned edges must exercise the filter, not silently bypass HDR.
     const auto sdrPattern=Pattern(w,h);
     std::vector<BYTE> hdrPattern(size_t(w)*h*3);
     auto* words=reinterpret_cast<uint16_t*>(hdrPattern.data());
@@ -471,7 +588,23 @@ static void HdrBypassRegression() {
     Render(r,hdrPattern,w*2);const auto plain=Read(r);
     g_cmaaNisRequest=15;Check(r.configureVideoOutput(w,h),"HDR pattern enable");
     Render(r,hdrPattern,w*2);const auto filtered=Read(r);
-    Require(Difference(plain,filtered,true)==0,"HDR edges are unchanged by an SDR filter request");
+    Require(Difference(plain,filtered,true)>2,"HDR filter changes patterned edges");
+    {
+        // Release measurement resources before the later same-HWND swapchain
+        // recreation; keeping the old device alive can defer DXGI teardown.
+        Timer hdrTimer(r.device,r.backBufferFormat);
+        hdrTimer.Begin(r.context);Render(r,hdrPattern,w*2);
+        const auto duration=hdrTimer.End(r.context,r.backBuffer);
+        const auto timedOutput=Read(r);
+        uint32_t expectedPixel=0;std::memcpy(&expectedPixel,timedOutput.data(),sizeof(expectedPixel));
+        Require(std::isfinite(duration) && duration>=0 && hdrTimer.completedPixel==expectedPixel,
+            "HDR timing uses a valid RGB10 completion copy and reads the actual output pixel");
+    }
+    g_cmaaNisRequest=llcv::upscaling::Request(true,15,true);
+    Check(r.configureVideoOutput(w,h),"HDR ignores saved SDR correction without resetting it");
+    Render(r,hdrPattern,w*2);
+    Require(Read(r)==filtered,"HDR high/preserve requests use identical NIS + guard output");
+    Require(!llcv::upscaling::PipelineTestAccess::HasCmaaResources(r.cmaaNisPipeline),"HDR preserve also allocates no AA");
     for(int repeat=0;repeat<8;repeat++) {
         Render(r,hdrPattern,w*2);Require(Difference(Read(r),filtered,true)<=2,"HDR dense edge output stable");
     }
@@ -492,7 +625,7 @@ static void HdrBypassRegression() {
     GdiFlush();const std::vector<BYTE> mask(static_cast<BYTE*>(maskPixels),static_cast<BYTE*>(maskPixels)+size_t(w)*h*4);
     SelectObject(dc,previousFont);DeleteObject(font);SelectObject(dc,previousBitmap);DeleteObject(bitmap);DeleteDC(dc);
     auto pq=[](double nits){const auto p=std::pow(nits/10000,2610.0/16384);return std::pow((3424.0/4096+2413.0/128*p)/(1+2392.0/128*p),2523.0/32);};
-    for(double nits:{100.0,400.0,1000.0}) {
+    for(double nits:{100.0,159.0,160.0,161.0,400.0,1000.0,4000.0,10000.0}) {
         const auto peak=pq(nits);std::vector<BYTE> text(size_t(w)*h*3);
         auto* values=reinterpret_cast<uint16_t*>(text.data());
         std::fill(values,values+size_t(w)*h*3/2,uint16_t(512<<6));
@@ -519,21 +652,29 @@ static void HdrBypassRegression() {
     Require(!r.cmaaNisPipeline.Enabled() && g_transientHudContent==TransientHudContent::CmaaNisOff,
         "HDR OFF does not switch to VSR");
     HandleVsrTestKey(VK_F6,0,0);Check(r.presentUploaded(),"HDR selected filter request");
-    Require(!r.cmaaNisPipeline.Enabled() && !g_settings.vsrEnabled &&
-        g_transientHudContent==TransientHudContent::CmaaNisHdrBypass,
-        "HDR toggle reports SDR-only bypass rather than ON");
+    Require(r.cmaaNisPipeline.Enabled() && !g_settings.vsrEnabled &&
+        g_transientHudContent==TransientHudContent::CmaaNisOn,
+        "HDR toggle reports actual filter ON without switching to VSR");
     r.reset();
-    g_settings.cmaaNisEnabled=true;g_settings.nisSharpnessPercent=15;g_cmaaNisRequest=15;
+    g_settings.cmaaNisEnabled=true;g_settings.nisSharpnessPercent=15;g_settings.cmaaPreserve=true;
+    const auto retainedRequest=llcv::upscaling::Request(true,15,true);g_cmaaNisRequest=retainedRequest;
     for(int pass=0;pass<3;++pass) {
         const bool hdr=pass==1;
         Check(r.initialize(hwnd,w,h,60,hdr?VideoPixelFormat::P010:VideoPixelFormat::Nv12,hdr),"SDR HDR SDR transition");
-        Require(r.cmaaNisPipeline.Enabled()==!hdr,"SDR filter resumes after HDR bypass");
-        Require(g_settings.cmaaNisEnabled && g_settings.nisSharpnessPercent==15 && g_cmaaNisRequest==15,
-            "HDR does not overwrite the selected SDR filter or sharpness");
-        if(hdr)Require(r.vsrOsdLine().find(L"SDR")!=std::wstring::npos,"HDR OSD explains SDR-only bypass");
+        Require(r.cmaaNisPipeline.Enabled(),"selected filter runs across SDR HDR SDR transitions");
+        Require(g_settings.cmaaNisEnabled && g_settings.nisSharpnessPercent==15 &&
+            g_settings.cmaaPreserve && g_cmaaNisRequest==retainedRequest,
+            "HDR does not overwrite selected SDR filter, correction or sharpness");
+        Require(llcv::upscaling::PipelineTestAccess::HasCmaaResources(r.cmaaNisPipeline)==!hdr,
+            "SDR restores AA storage after the HDR-only bypass");
+        if(hdr)Require(r.vsrOsdLine().find(L"HDR10")!=std::wstring::npos &&
+            r.vsrOsdLine().find(L"NIS   ON")!=std::wstring::npos && r.vsrOsdLine().find(L"CMAA2")==std::wstring::npos,
+            "HDR OSD reports NIS without an inactive CMAA correction");
         r.reset();
     }
-    DestroyWindow(hwnd);g_cmaaNisRequest=-1;std::puts("PASS: HDR bypass, exact output, chroma, PQ, OSD, source and SDR preference preservation.");
+    DestroyWindow(hwnd);g_cmaaNisRequest=-1;
+    HdrCapturedGlyphRegression();
+    std::puts("PASS: HDR filtering, PQ flat colors, chroma, glyph cores, OSD, source and preference preservation.");
 }
 static void ApprovedReference(const std::filesystem::path& inputPath,const std::filesystem::path& referencePath) {
     std::ifstream source(inputPath,std::ios::binary);
@@ -551,8 +692,16 @@ static void ApprovedReference(const std::filesystem::path& inputPath,const std::
     HWND hwnd=Window(2560,1440);g_cmaaNisRequest=15;
     DirectD3D11Renderer r;Check(r.initialize(hwnd,1920,1080,60,VideoPixelFormat::Nv12),"approved source renderer");
     Require(r.cmaaNisPipeline.Enabled(),"approved source uses production scaler");
-    Render(r,input,1920);const auto difference=Difference(Read(r),reference);
+    Render(r,input,1920);const auto actual=Read(r);const auto difference=Difference(actual,reference);
+    unsigned interior=0,border=0;size_t changed=0,borderChanged=0;
+    for(unsigned y=0;y<1440;y++)for(unsigned x=0;x<2560;x++)for(unsigned c=0;c<3;c++) {
+        const unsigned delta=unsigned(std::abs(int(actual[(size_t(y)*2560+x)*4+c])-int(reference[(size_t(y)*2560+x)*4+c])));
+        const bool edge=x<8||y<8||x>=2552||y>=1432;
+        auto& maximum=edge?border:interior;maximum=std::max(maximum,delta);
+        if(delta>1){++changed;borderChanged+=edge;}
+    }
     std::printf("Approved CMAA2 then NIS 0.15: maximum channel difference=%d/255\n",difference);
+    std::printf("Reference diagnostics: interior max=%u border max=%u channels>1=%zu border>1=%zu\n",interior,border,changed,borderChanged);
     Require(difference<=1,"production preserves selected prototype quality");
     r.reset();DestroyWindow(hwnd);g_cmaaNisRequest=-1;
 }
@@ -667,6 +816,51 @@ static void RecordingIntegration(std::filesystem::path output) {
 }
 #endif
 
+#include "CmaaNisTextComparison.inl"
+#include "SpatialAaComparison.inl"
+#include "CmaaPreserveTiming.inl"
+
+static void PreserveSelectionRegression() {
+    using namespace llcv::upscaling;
+    for(bool preserve:{false,true})for(bool enabled:{false,true})for(int sharp=0;sharp<=100;++sharp) {
+        const int request=Request(enabled,sharp,preserve);
+        Require(request!=-1 && (request>=0)==enabled && RequestSharpness(request)==sharp &&
+            RequestPreserve(request)==preserve,"atomic quality/enable/sharpness request round trip");
+        if(!preserve)Require(request==(enabled?sharp:-sharp-2),"legacy HIGH request encoding remains unchanged");
+    }
+    Require(RequestSharpness(-1)==-1 && !RequestPreserve(-1),"VSR sentinel remains unambiguous");
+    const auto settings=g_settings;const auto request=g_cmaaNisRequest.load();const auto vsr=g_vsrMode.load();
+    g_settings.cmaaPreserve=true;g_settings.cmaaNisEnabled=true;g_settings.vsrEnabled=false;
+    g_settings.preferredUpscaler=llcv::settings::UpscalingMethod::CmaaNis;g_settings.nisSharpnessPercent=37;
+    g_cmaaNisRequest=Request(true,37,true);g_vsrMode=llcv::vsr::Mode::Disabled;
+    HWND window=Window(2560,1440);DirectD3D11Renderer r;const auto input=Pattern(1920,1080);
+    Check(r.initialize(window,1920,1080,60,VideoPixelFormat::Nv12),"preserve choice renderer");
+    Require(r.cmaaNisPipeline.Enabled(),"packed preserve request decodes valid NIS sharpness");
+    Render(r,input,1920);const auto embeddedPreserve=Read(r);
+    const auto shader=std::filesystem::path(__FILE__).parent_path().parent_path()/"third_party/upscaling/cmaa2/CMAA2.hlsl";
+    using A=PipelineTestAccess;
+    A::Programs(r.cmaaNisPipeline,text_comparison::Compile(r.device,shader,true));Render(r,input,1920);
+    Require(Difference(Read(r),embeddedPreserve)<=1,"shipped preserve shaders match approved preservation variant");
+    const auto device=r.device;const auto chain=r.swapChain;const auto upload=r.nv12Textures[0];
+    for(int i=0;i<2;++i) {
+        Require(HandleVsrTestKey(VK_F6,0,0),"preserve mode F6");Check(r.presentUploaded(),"preserve mode transition");
+        Require(RequestPreserve(g_cmaaNisRequest) && RequestSharpness(g_cmaaNisRequest)==37 &&
+            g_settings.cmaaPreserve && r.vsrOsdLine().find(L"0.37")!=std::wstring::npos,
+            "F6 and OSD retain preserve quality and sharpness while OFF/ON");
+    }
+    g_settings.cmaaPreserve=false;g_cmaaNisRequest=Request(true,37,false);Check(r.presentUploaded(),"restore HIGH");
+    // presentUploaded also draws the F6 status HUD. Compare AA-only outputs,
+    // not that transient overlay against a later overlay-free processVideo.
+    Render(r,input,1920);
+    const auto high=Read(r);A::Programs(r.cmaaNisPipeline,text_comparison::Compile(r.device,shader,false));Render(r,input,1920);
+    Require(Difference(Read(r),high)<=1,"embedded HIGH shaders match the approved variant");
+    Require(Difference(high,embeddedPreserve)>0,"HIGH/preserve selector produces distinct AA results on the test pattern");
+    Require(r.device==device && r.swapChain==chain && r.nv12Textures[0]==upload,
+        "quality changes preserve device, swapchain and capture upload ring");
+    r.reset();DestroyWindow(window);g_settings=settings;g_cmaaNisRequest=request;g_vsrMode=vsr;
+    g_transientHudContent=TransientHudContent::Volume;g_volumeHudUntilMs=0;
+}
+
 int main(int argc,char** argv) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     Check(CoInitializeEx(nullptr,COINIT_MULTITHREADED),"COM");
@@ -676,10 +870,19 @@ int main(int argc,char** argv) {
     g_osdVisible=false;g_audioOsdVisible=false;g_volumeHudUntilMs=0;
     WNDCLASSW wc{};wc.hInstance=GetModuleHandleW(nullptr);wc.lpfnWndProc=DefWindowProcW;wc.lpszClassName=L"LLCV_SPATIAL_TEST";
     Require(RegisterClassW(&wc)!=0,"register class");
-    if(argc>=4 && std::string(argv[1])=="--sdr-text")SdrTextComparison(argv[2],argv[3]);
+    if(argc==5 && std::string(argv[1])=="--preserve-timing")PreserveTiming(argv[2],argv[3],argv[4]);
+    else if((argc==4 || argc==5) && (std::string(argv[1])=="--spatial-aa-fixture" || std::string(argv[1])=="--spatial-aa-soft"))
+        spatial_aa_comparison::Run(argv[2],argv[3],argc==5?std::filesystem::path(argv[4]):std::filesystem::path{},std::string(argv[1])=="--spatial-aa-soft");
+    else if(argc==4 && std::string(argv[1])=="--text-fixture")SyntheticTextComparison(argv[2],argv[3]);
+    else if(argc>=4 && std::string(argv[1])=="--sdr-text")SdrTextComparison(argv[2],argv[3]);
+    else if(argc==4 && std::string(argv[1])=="--hdr-saved")HdrSavedComparison(argv[2],argv[3]);
+    else if(argc==4 && std::string(argv[1])=="--hdr-quality")hdr_quality::Run(argv[2],argv[3]);
+    else if(argc==4 && std::string(argv[1])=="--hdr-regions")hdr_quality::Run(argv[2],argv[3],false);
+    else if(argc==4 && std::string(argv[1])=="--hdr-nis-timing")hdr_quality::Timing(argv[2],argv[3]);
+    else if(argc==4 && std::string(argv[1])=="--hdr-root")hdr_quality::Root(argv[2],argv[3]);
     else if(argc>=4 && std::string(argv[1])=="--reference")ApprovedReference(argv[2],argv[3]);
     else if(argc>=3 && std::string(argv[1])=="--benchmark")BenchmarkProduction(argv[2]);
-    else if(argc>=2 && std::string(argv[1])=="--hdr")HdrBypassRegression();
+    else if(argc>=2 && std::string(argv[1])=="--hdr")HdrRegression();
     else if(argc>=2 && std::string(argv[1])=="--rgb")RgbRegression();
 #ifdef LLCV_RECORDING
     else if(argc>=3 && std::string(argv[1])=="--recording")RecordingIntegration(argv[2]);

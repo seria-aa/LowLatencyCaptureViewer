@@ -76,12 +76,14 @@ Position and layout adapt to resolution/DPI changes and moves between monitors w
 
 The sidebar separates **Video**, **Audio**, **Recording**, **Window**, **Guide & logs**, and **App**.
 [Recording](RECORDING.md) contains codec, quality, size/rate limits, AAC, recording volume, splitting and storage settings.
-Video contains capture/display settings, upscaling and screenshot options. **More** next
+Video contains capture/display settings and upscaling options. **More** next
 to Frame rate contains unlisted FPS requests and 40 fps capture.
 Audio contains output devices, buffers, volume options, audio-only mode, and LPCM 5.1.
 Window controls placement, resizing, borders, and cursor behavior.
+In App settings, **Release notes** opens the current app version's GitHub release
+page in your browser, independently of manual or automatic update checks.
 Guide & logs groups shortcut editing/reset, 40 fps guidance, logging and [report ZIP creation](DIAGNOSTICS.md#log-files); App contains language,
-theme, startup, sleep prevention, and update preferences.
+theme, startup, sleep prevention, update preferences, and screenshot options.
 
 On small screens or at high display scales, settings fit within the desktop work
 area. When space is limited, use the section selector at the top to access pages
@@ -321,11 +323,11 @@ automatically; accepting the prompt opens the installer link in your browser.
 ## CMAA2 → NIS upscaling
 
 Under **Video → Upscaling**, below **Display resolution**, select **Off / CMAA2 → NIS / NVIDIA VSR**.
-CMAA2 smooths edges at source size before NIS enlargement. Sharpness defaults to **0.15**
+CMAA2 smooths SDR edges at source size before NIS enlargement. HDR10 is shown as **NIS (HDR10)** and skips CMAA2. Sharpness defaults to **0.15**
 and is adjustable from 0.00 to 1.00. Existing VSR preferences are preserved; the new filter is opt-in.
 
-- SDR NV12/YUY2/decoded MJPEG only; enlargement up to 2× on each axis.
-- P010 HDR10 bypasses this filter and retains the original output. The SDR filter selection and sharpness are retained and apply again when returning to SDR.
+- SDR NV12/YUY2/UYVY/decoded MJPEG/RGB and P010 HDR10; enlargement up to 2× on each axis.
+- HDR10 runs NIS alone, retaining PQ/BT.2020 and bounding excessive contour changes against the original bilinear image. Method, correction and sharpness are retained across SDR/HDR transitions.
 - Native size, downscaling and enlargement beyond 2× use the original path. Increase display size if it currently matches capture.
 - Display only: OSD is drawn afterward; recordings and screenshots retain the capture source.
 - Mutually exclusive with VSR. F6 toggles the selected method without switching it. NIS sharpness is retained when toggling off and on.
@@ -334,7 +336,9 @@ and is adjustable from 0.00 to 1.00. Existing VSR preferences are preserved; the
 - Additional GPU work is required. Select Off for the lowest processing cost.
 
 For example, with **1920 × 1080** capture, choose **2560 × 1440** display resolution and
-**CMAA2 → NIS**. **NIS sharpness** appears below only when this method is selected.
+**CMAA2 → NIS**. **CMAA2 correction** and **NIS sharpness** appear side by side below only when this method is selected.
+CMAA2 correction applies only to SDR. Selecting P010 disables that field without changing its saved value; switching back to SDR restores it.
+**High** smooths more edges; **Preserve** retains more of the original text and thin-line shapes.
 0.00 minimizes sharpening; it does not disable the filter.
 The adjacent **?** button explains the requirements of both upscaling methods.
 
@@ -393,7 +397,7 @@ remain source images without VSR.
 ## Screenshots
 
 Press **F12** during video playback to save a PNG in **Pictures / LowLatencyCaptureViewer**.
-The bottom-right screenshot section of **Video** has **Open folder** and
+The screenshot section of **App** has **Open folder** and
 **Also copy to clipboard** (off by default).
 
 **F1** opens a modeless guide with the app version, keyboard shortcuts, mouse controls,

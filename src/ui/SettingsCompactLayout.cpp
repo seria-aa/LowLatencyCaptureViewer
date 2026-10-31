@@ -49,6 +49,10 @@ public:
         Block(32, {{control,0,0,width_-(help?34:0),32},
                    {help,width_-24,4,24,24}});
     }
+    void HeadingField(HWND label,HWND field,HWND help) {
+        Block(58,{{label,0,2,width_-36,20},{help,width_-24,0,24,24},
+            {field,0,28,width_,30}});
+    }
     void Text(HWND control, int height) { Block(height, {{control,0,0,width_,height}}); }
     void Button(HWND control) { Block(32, {{control,0,0,std::min(width_,240),32}}); }
     std::vector<Page> Take() { return std::move(pages_); }
@@ -198,21 +202,28 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
             pages.Field(s->mjpegColorLabel,s->mjpegColorCombo,s->mjpegColorHelp);
         }
         pages.Group(text(L"화면 표시",L"Display"));
-        pages.Field(s->presentationLabel,s->presentationCombo,s->presentationHelp);
+        pages.HeadingField(s->presentationLabel,s->presentationCombo,s->presentationHelp);
         pages.Field(s->displayMonitorLabel,s->displayMonitorCombo);
         pages.Field(s->scalingLabel,s->scalingCombo);
-        pages.Check(s->pixelCheck);
         pages.Group(text(L"표시 해상도 · 업스케일링",L"Resolution & upscaling"));
         pages.Field(s->displayResolutionLabel,s->displayResolutionCombo);
-        pages.Field(s->upscalerLabel,s->upscalerCombo,s->vsrGuideButton);
-        if (SendMessageW(s->upscalerCombo,CB_GETCURSEL,0,0)==1)
-            pages.Field(s->nisSharpnessLabel,s->nisSharpnessCombo);
-        if (SendMessageW(s->upscalerCombo,CB_GETCURSEL,0,0)!=0 || s->vsrGpuUnavailable)
+        pages.Check(s->pixelCheck);
+        {
+        const bool cmaa=SendMessageW(s->upscalerCombo,CB_GETCURSEL,0,0)==1;
+        pages.HeadingField(s->upscalerLabel,s->upscalerCombo,s->vsrGuideButton);
+        if (cmaa) {
+            if(width>=360) {
+                const int half=(width-16)/2;
+                pages.Block(54,{{s->cmaaQualityLabel,0,0,half,20},{s->cmaaQualityCombo,0,24,half,30},
+                    {s->nisSharpnessLabel,half+16,0,half,20},{s->nisSharpnessCombo,half+16,24,half,30}});
+            } else {
+                pages.Field(s->cmaaQualityLabel,s->cmaaQualityCombo);
+                pages.Field(s->nisSharpnessLabel,s->nisSharpnessCombo);
+            }
+        }
+        if (!cmaa && (SendMessageW(s->upscalerCombo,CB_GETCURSEL,0,0)!=0 || s->vsrGpuUnavailable))
             pages.Text(s->vsrStatus,36);
-        pages.Block(134, {{s->screenshotTitle,0,0,width,20},
-            {s->screenshotClipboardCheck,0,28,width,28},
-            {s->screenshotFolderButton,0,66,std::min(200,width/2),32},
-            {s->screenshotHelp,0,102,width,32}},62);
+        }
         break;
     case SettingsTab::Audio:
         pages.Group(text(L"출력",L"Output"));
@@ -279,8 +290,20 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
         pages.Group(text(L"업데이트",L"Updates"));
         pages.Text(s->updateText,64);
         pages.Check(s->checkForUpdatesCheck);
-        pages.Button(s->updateNowButton);
+        if(width>=320) {
+            const int half=(width-16)/2;
+            pages.Block(32,{{s->updateNowButton,0,0,half,32},
+                {s->releaseNotesButton,half+16,0,width-half-16,32}});
+        } else {
+            pages.Button(s->updateNowButton);
+            pages.Button(s->releaseNotesButton);
+        }
         pages.Text(s->updateStatus,56);
+        pages.Group(text(L"스크린샷",L"Screenshots"));
+        pages.Block(134, {{s->screenshotTitle,0,0,width,20},
+            {s->screenshotClipboardCheck,0,28,width,28},
+            {s->screenshotFolderButton,0,66,std::min(200,width/2),32},
+            {s->screenshotHelp,0,102,width,32}},62);
         break;
     }
     auto available = pages.Take();

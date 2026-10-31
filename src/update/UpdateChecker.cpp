@@ -96,6 +96,23 @@ std::vector<int> ParseReleaseTag(const std::wstring& input) {
 
 }  // namespace
 
+std::wstring ReleaseNotesUrl(const std::wstring& version) {
+    constexpr auto releases=L"https://github.com/seria-aa/LowLatencyCaptureViewer/releases";
+    size_t begin=(!version.empty() && (version[0]==L'v'||version[0]==L'V'))?1:0;
+    size_t end=begin;
+    for(unsigned part=0;part<3;++part) {
+        const size_t first=end;
+        while(end<version.size() && version[end]>=L'0' && version[end]<=L'9')++end;
+        if(end==first || end-first>6)return releases;
+        if(part<2) {
+            if(end>=version.size() || version[end]!=L'.')return releases;
+            ++end;
+        }
+    }
+    if(end<version.size() && version[end]!=L'-')return releases;
+    return std::wstring(releases)+L"/tag/v"+version.substr(begin,end-begin);
+}
+
 namespace detail {
 namespace {
 

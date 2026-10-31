@@ -185,6 +185,10 @@ static void TestExplicitCaptureRateSelection() {
     state.frameRateCombo = child(L"COMBOBOX", CBS_DROPDOWNLIST, IDC_SETTINGS_FRAME_RATE);
     state.upscalerCombo = child(L"COMBOBOX",CBS_DROPDOWNLIST,IDC_SETTINGS_UPSCALER);
     state.nisSharpnessCombo = child(L"COMBOBOX",CBS_DROPDOWNLIST,IDC_SETTINGS_NIS_SHARPNESS);
+    state.cmaaQualityCombo = child(L"COMBOBOX",CBS_DROPDOWNLIST,IDC_SETTINGS_CMAA_QUALITY);
+    SendMessageW(state.cmaaQualityCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"High"));
+    SendMessageW(state.cmaaQualityCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"Preserve"));
+    SendMessageW(state.cmaaQualityCombo,CB_SETCURSEL,1,0);
     for(const auto* label:{L"Off",L"CMAA2 -> NIS",L"NVIDIA VSR"})
         SendMessageW(state.upscalerCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
     llcv::settings_ui::PopulateNisSharpnessPicker(state.nisSharpnessCombo,25);
@@ -243,7 +247,7 @@ static void TestExplicitCaptureRateSelection() {
         "incompatible format preserves explicit FPS and explains disabled Start");
     EnableWindow(state.startButton, TRUE);
     FinishSettingsDialog(hwnd, &state, true);
-    Require(!g_settings.cmaaNisEnabled && g_settings.nisSharpnessPercent==15,
+    Require(!g_settings.cmaaNisEnabled && !g_settings.cmaaPreserve && g_settings.nisSharpnessPercent==15,
         "rejected settings never commit pending upscaler preferences");
     Require(IsWindow(hwnd) && !state.accepted && g_settings.videoFrameRate == 60,
         "stale enabled Start cannot save unavailable FPS as Auto");
@@ -683,9 +687,14 @@ static void TestSettingsBufferModeTransitions() {
         SendMessageW(state.upscalerCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
     llcv::settings_ui::PopulateNisSharpnessPicker(state.nisSharpnessCombo,25);
     SendMessageW(state.upscalerCombo,CB_SETCURSEL,1,0);
+    state.cmaaQualityCombo=CreateWindowW(L"COMBOBOX",L"",WS_CHILD|CBS_DROPDOWNLIST,
+        0,0,100,100,hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_CMAA_QUALITY)),wc.hInstance,nullptr);
+    SendMessageW(state.cmaaQualityCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"High"));
+    SendMessageW(state.cmaaQualityCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"Preserve"));
+    SendMessageW(state.cmaaQualityCombo,CB_SETCURSEL,1,0);
     SendMessageW(state.preventSleepCheck, BM_SETCHECK, BST_UNCHECKED, 0);
     FinishSettingsDialog(hwnd, &state, true);
-    Require(g_settings.cmaaNisEnabled && !g_settings.vsrEnabled && g_settings.nisSharpnessPercent==25 &&
+    Require(g_settings.cmaaNisEnabled && g_settings.cmaaPreserve && !g_settings.vsrEnabled && g_settings.nisSharpnessPercent==25 &&
         g_settings.preferredUpscaler==llcv::settings::UpscalingMethod::CmaaNis,
         "accepted settings save exclusive upscaler mode and exact sharpness");
     Require(state.accepted && !IsWindow(hwnd) && g_settings.audioMode == AudioMode::Asio &&
