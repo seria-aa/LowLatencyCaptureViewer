@@ -85,6 +85,9 @@
 #include "ui/SettingsTheme.h"
 #include <dwmapi.h>
 #include "ui/SettingsModeCache.h"
+#include "ui/InitializationLease.h"
+#include "video/PresentationReadiness.h"
+#include "diagnostics/DiagnosticReport.h"
 #ifdef LLCV_RECORDING
 #include "recording/RecordingSettingsView.h"
 #endif
@@ -164,11 +167,11 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
 #if defined(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.9-audio-recovery-diagnostic";
+constexpr wchar_t kAppVersionLabel[] = L"v2.2.0-audio-recovery-diagnostic";
 #elif defined(LLCV_VSR_EXPERIMENT)
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.9-vsr-test";
+constexpr wchar_t kAppVersionLabel[] = L"v2.2.0-vsr-test";
 #else
-constexpr wchar_t kAppVersionLabel[] = L"v2.1.9";
+constexpr wchar_t kAppVersionLabel[] = L"v2.2.0";
 #endif
 
 constexpr int kRecommendedCaptureBufferMs = 20;
@@ -379,6 +382,11 @@ static std::atomic<bool> g_videoTearing{false};
 static std::atomic<bool> g_videoExclusiveActive{false};
 static std::atomic<bool> g_directVideoActive{false};
 static std::atomic<HRESULT> g_captureFailureHr{S_OK};
+static constexpr HRESULT kSettingsProbeTimeout = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x631);
+static std::atomic<bool> g_audioStartupProbeTimeout{false};
+static std::atomic<const wchar_t*> g_captureFailureStage{nullptr}; // Static stage literals only.
+static std::mutex g_captureReportMutex;
+static std::wstring g_captureRequestedDetail, g_captureConnectedDetail;
 static std::atomic<bool> g_captureGraphStopped{false};
 static std::atomic<bool> g_captureGraphCompleted{false};
 static llcv::power::PlaybackPowerEvents g_playbackPowerEvents;
@@ -546,6 +554,10 @@ static std::mutex g_activeAudioOutputMutex;
 constexpr size_t kAudioErrorHistoryCapacity = 128;
 static AudioErrorHistory g_audioErrorHistory{kAudioErrorHistoryCapacity};
 static llcv::audio::RealtimeLogQueue g_audioDiagnosticMessages;
+// Render-thread records after the first presentation. Sized for a renderer
+// recovery burst between 500 ms UI timer drains.
+static llcv::audio::BasicRealtimeLogQueue<64> g_videoDiagnosticMessages;
+static thread_local bool t_deferVideoDiagnostics = false;
 
 static bool AudioTrackingActive();
 
@@ -568,12 +580,49 @@ static void SafeRelease(T*& p) {
 static int TeeFwprintf(FILE* stream, const wchar_t* format, ...) {
     va_list args;
     va_start(args, format);
-    const int result = g_logger.PrintV(stream, format, args);
+    int result;
+    if (t_deferVideoDiagnostics && stream == stderr) {
+        // A blocked console or slow log disk must not stall frame presentation.
+        llcv::audio::RealtimeLogQueue::Message message;
+        result = _vsnwprintf_s(message.data(), message.size(), _TRUNCATE, format, args);
+        g_videoDiagnosticMessages.Push(message.data());
+    } else {
+        result = g_logger.PrintV(stream, format, args);
+    }
     va_end(args);
     return result;
 }
 
 #define fwprintf TeeFwprintf
+
+// UI thread only, the single consumer of the render-thread queue. Bound each
+// drain so a busy producer or slow output cannot hold the UI timer.
+static void FlushVideoDiagnostics() {
+    llcv::audio::RealtimeLogQueue::Message message;
+    for (size_t index = 0; index < decltype(g_videoDiagnosticMessages)::kCapacity &&
+         g_videoDiagnosticMessages.Pop(message); ++index) {
+        fwprintf(stderr, L"%s", message.data());
+    }
+    if (const auto dropped = g_videoDiagnosticMessages.TakeDropped()) fwprintf(stderr,
+        L"[video] %llu diagnostic messages skipped while the UI was busy; presentation was not blocked.\n",
+        static_cast<unsigned long long>(dropped));
+}
+
+// Render thread: defer only the steady presentation loop. Startup records stay
+// synchronous. On a failure exit, let the UI drain queued records first so that
+// later failure records keep their order. During shutdown the UI is joining
+// this thread and cannot drain; the final flush after the join writes them.
+struct DeferredVideoDiagnostics {
+    void Begin() { t_deferVideoDiagnostics = true; }
+    void End() {
+        if (!t_deferVideoDiagnostics) return;
+        t_deferVideoDiagnostics = false;
+        if (!g_running.load(std::memory_order_acquire)) return;
+        const uint64_t until = GetTickCount64() + 600;
+        while (!g_videoDiagnosticMessages.Empty() && GetTickCount64() < until) Sleep(10);
+    }
+    ~DeferredVideoDiagnostics() { End(); }
+};
 
 static void RefreshHdrDisplayStatus(HWND hwnd) {
     const auto state = llcv::hdr::QueryDisplay(hwnd);
@@ -732,6 +781,19 @@ static ExclusiveCompatibilityProbe ProbeExclusiveBufferRecommendation(
     return llcv::audio_device::ProbeExclusiveBufferRecommendation(
         endpointId, cancel, LogModuleMessage);
 }
+static std::shared_ptr<std::timed_mutex> SettingsExclusiveProbeGate() {
+    static const auto gate = std::make_shared<std::timed_mutex>();
+    return gate;
+}
+struct SettingsInitializationLease : llcv::settings_ui::InitializationLease {
+    explicit SettingsInitializationLease(std::shared_ptr<std::timed_mutex> value)
+        : InitializationLease(std::move(value), g_running) {}
+};
+static const wchar_t* SettingsProbeTimeoutText(bool english) {
+    return english
+               ? L"A previous device check has not released the device within 5 seconds. Startup was stopped instead of waiting indefinitely.\n\nWait for the check to finish, then retry from settings. If it remains blocked, restart LLCV and check the device/driver. No driver thread was forcibly terminated."
+               : L"이전 장치 조회가 5초 안에 장치를 해제하지 않아 시작을 중단했습니다. 무기한 기다리지는 않습니다.\n\n조회가 끝난 뒤 설정에서 다시 시작해 주세요. 계속 막히면 LLCV를 다시 실행하고 장치·드라이버 상태를 확인해 주세요. 드라이버 스레드는 강제로 종료하지 않았습니다.";
+}
 static std::wstring AppDirectory() {
     wchar_t path[MAX_PATH]{};
     const DWORD n = GetModuleFileNameW(nullptr, path, ARRAYSIZE(path));
@@ -801,6 +863,18 @@ static void OpenSavedLog() {
 
 static void CloseSavedLog() {
     g_logger.Close();
+}
+
+// A click in the console starts QuickEdit selection, which suspends console
+// writers until the selection ends. Mark from the window menu stays available.
+static void DisableConsoleQuickEdit() {
+    const HANDLE input = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (input == INVALID_HANDLE_VALUE) return;
+    DWORD mode = 0;
+    if (GetConsoleMode(input, &mode))
+        SetConsoleMode(input, (mode | ENABLE_EXTENDED_FLAGS) & ~ENABLE_QUICK_EDIT_MODE);
+    CloseHandle(input);
 }
 
 static std::vector<CaptureDeviceInfo> EnumerateCaptureDevices() {
@@ -935,6 +1009,29 @@ static int RequestedVideoFrameRate() {
     return g_settings.videoFrameRate > 0
                ? g_settings.videoFrameRate
                : CurrentCapturePreset().framerate;
+}
+static void BeginCaptureReport() {
+    g_captureFailureStage.store(L"initialize capture COM / validate output path");
+    std::lock_guard lock(g_captureReportMutex);
+    const auto preset = CurrentCapturePreset();
+    g_captureRequestedDetail = L"Requested: " + std::to_wstring(preset.width) + L"x" +
+        std::to_wstring(preset.height) + L" @ " +
+        (g_settings.capture40Fps || g_settings.videoFrameRate > 0
+            ? std::to_wstring(RequestedVideoFrameRate()) + L" fps" : L"Auto fps") + L", " + PixelFormatName(g_settings.pixelFormat) +
+        (g_settings.audioOnly ? L", audio-only" : L", video+audio");
+    g_captureConnectedDetail = g_settings.audioOnly ? L"Video layout: not applicable (audio-only)" : L"Connected layout: not confirmed";
+}
+static void ConfirmCaptureReport(VideoPixelFormat format, int width, int height, int fps, UINT stride) {
+    std::lock_guard lock(g_captureReportMutex);
+    g_captureConnectedDetail = L"Validated capture layout: " + std::to_wstring(width) + L"x" +
+        std::to_wstring(height) + L" @ " + std::to_wstring(fps) + L" fps, " + PixelFormatName(format) +
+        L", stride " + std::to_wstring(stride);
+}
+static std::wstring CaptureReportDetails(bool english) {
+    std::lock_guard lock(g_captureReportMutex);
+    const auto* stage = g_captureFailureStage.load();
+    return std::wstring(english ? L"Startup stage: " : L"시작 단계: ") + (stage ? stage : L"not attempted") +
+        L"\r\n" + g_captureRequestedDetail + L"\r\n" + g_captureConnectedDetail;
 }
 
 static bool RequestsExactCaptureRate() {
@@ -1134,10 +1231,11 @@ static ISampleGrabberCB* CreateAudioSampleCallback(
 
 static HRESULT FindCaptureFilter(
     const std::wstring& selectedId, IBaseFilter** output,
-    std::wstring* selectedName = nullptr, std::wstring* selectedDevicePath = nullptr) {
+    std::wstring* selectedName = nullptr, std::wstring* selectedDevicePath = nullptr,
+    llcv::capture::LogCallback log = LogModuleMessage) {
     return llcv::capture::FindVideoCaptureFilter(
         selectedId, kCaptureName, output, selectedName,
-        LogModuleMessage, selectedDevicePath);
+        log, selectedDevicePath);
 }
 
 static HRESULT FindCaptureAudioFilter(
@@ -1725,9 +1823,20 @@ static void BeforeWasapiEndpointRestart(void*) {
         UINT32_MAX, std::memory_order_release);
 }
 
+// Runs on the WASAPI owner thread. Format on the stack and use the same
+// nonblocking queue as host.log; the UI timer performs console/file output.
 static void LogWasapiHresult(
     void*, const wchar_t* operation, HRESULT result) {
-    LogHr(operation, result);
+    wchar_t description[256]{};
+    const DWORD length = FormatMessageW(
+        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+        result, 0, description, ARRAYSIZE(description), nullptr);
+    if (!length) wcscpy_s(description, L"(unknown HRESULT)\n");
+    wchar_t message[llcv::audio::RealtimeLogQueue::kMessageCharacters]{};
+    swprintf_s(message, L"%s failed: 0x%08X %s%s", operation ? operation : L"WASAPI",
+               static_cast<unsigned>(result), description,
+               length && description[length - 1] == L'\n' ? L"" : L"\n");
+    QueueAudioDiagnostic(message);
 }
 
 static llcv::wasapi::RunResult AudioRenderThreadWasapi(
@@ -1911,6 +2020,21 @@ static bool AudioRenderThreadAsio() {
 }
 
 static void AudioRenderThread() {
+    // A closing settings scan can still own an exclusive endpoint. Wait on the
+    // audio worker, not the UI, and let shutdown cancel this wait. Hold the
+    // lease for the session so no late scan can seize the active output.
+    SettingsInitializationLease probeLease(SettingsExclusiveProbeGate());
+    if (!probeLease.lock.owns_lock()) {
+        if (probeLease.TimedOut()) {
+            fwprintf(
+                stderr,
+                L"[startup] audio output blocked by an unfinished settings probe for 5000 ms; output not started.\n");
+            SetActiveAudioOutputName(IsEnglishUi() ? L"Device check timed out · F2 to retry"
+                                                   : L"장치 조회 대기 초과 · F2로 재시도");
+            g_audioStartupProbeTimeout.store(true);
+        }
+        return;
+    }
     bool reinitializingEndpoint = false;
     AudioMode mode = ActiveAudioMode();
     if (mode == AudioMode::Asio) {
@@ -1947,13 +2071,17 @@ static void AudioRenderThread() {
             continue;
         }
         const unsigned delay = recovery.NextDelay();
+        // Same producer thread as the WASAPI host logs, so recovery never
+        // waits on console or file output.
         if (!delay) {
-            fwprintf(stderr, L"[audio] WASAPI recovery limit reached; reopen settings with F2.\n");
+            QueueAudioDiagnostic(L"[audio] WASAPI recovery limit reached; reopen settings with F2.\n");
             SetActiveAudioOutputName(keys::Expand(UI_TEXT(L"WASAPI: 출력 복구 실패 · F2로 설정 확인"),g_settings.shortcuts));
             g_audioActualBufferFrames.store(0, std::memory_order_release);
             break;
         }
-        fwprintf(stderr, L"[audio] WASAPI restarting output after failure in %u ms.\n", delay);
+        wchar_t restartNotice[96]{};
+        swprintf_s(restartNotice, L"[audio] WASAPI restarting output after failure in %u ms.\n", delay);
+        QueueAudioDiagnostic(restartNotice);
         g_audioActualBufferFrames.store(0, std::memory_order_release);
         g_audioWasapiPaddingFrames.store(0, std::memory_order_release);
         if (!WaitForAudioRetry(delay)) break;
@@ -2111,11 +2239,33 @@ static HRESULT GetActiveVideoPinFormat(
 static std::vector<PixelFormatSupport> (*g_testVideoCapabilityProbe)(
     const std::wstring&, int, int, HRESULT*) = nullptr;
 #endif
-static std::mutex g_settingsCaptureProbeMutex;
+static std::shared_ptr<std::timed_mutex> SettingsCaptureProbeGate() {
+    static const auto gate = std::make_shared<std::timed_mutex>();
+    return gate;
+}
+struct CaptureInitializationLease : SettingsInitializationLease {
+    CaptureInitializationLease() : SettingsInitializationLease(SettingsCaptureProbeGate()) {}
+};
+static thread_local std::wstring* t_settingsProbeMessages = nullptr;
+static void CollectSettingsProbeMessage(const wchar_t* text) {
+    if (text && t_settingsProbeMessages && t_settingsProbeMessages->size() < 65536)
+        t_settingsProbeMessages->append(text, std::min<size_t>(wcslen(text), 65536 - t_settingsProbeMessages->size()));
+}
+struct SettingsProbeLogScope {
+    std::wstring* previous;
+    explicit SettingsProbeLogScope(std::wstring& messages) : previous(t_settingsProbeMessages) { t_settingsProbeMessages = &messages; }
+    ~SettingsProbeLogScope() { t_settingsProbeMessages = previous; }
+};
 static std::vector<PixelFormatSupport> ProbePixelFormats(
     const std::wstring& captureDeviceId, int width, int height, HRESULT* queryStatus = nullptr,
-    llcv::video::VideoCapabilityDiagnostics* diagnostics = nullptr) {
-    std::lock_guard captureLock(g_settingsCaptureProbeMutex);
+    llcv::video::VideoCapabilityDiagnostics* diagnostics = nullptr,
+    llcv::video::LogCallback log = LogModuleMessage,
+    std::shared_ptr<std::timed_mutex> gate = SettingsCaptureProbeGate(), const std::atomic<bool>* stop = nullptr) {
+    std::lock_guard captureLock(*gate);
+    if (stop && stop->load()) {
+        if (queryStatus) *queryStatus = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+        return {};
+    }
     if (queryStatus) *queryStatus = S_OK;
     if (diagnostics) *diagnostics = {};
 #if defined(LLCV_GPU_DIAGNOSTICS) || defined(LLCV_SETTINGS_MODE_TEST)
@@ -2130,17 +2280,38 @@ static std::vector<PixelFormatSupport> ProbePixelFormats(
 
     IBaseFilter* capture = nullptr;
     IPin* videoPin = nullptr;
-    HRESULT hr = FindCaptureFilter(captureDeviceId, &capture);
+    IGraphBuilder* probeGraph = nullptr;
+    HRESULT hr = FindCaptureFilter(captureDeviceId, &capture, nullptr, nullptr, log);
+    if (stop && stop->load()) hr = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    // Playback connects an upstream crossbar before using the video pin. Probe
+    // multi-input devices the same way, in a throwaway graph that is never
+    // run, in case a driver reports modes only once its video input is fed.
+    // Single-input filters are probed exactly as before, without a graph.
+    if (SUCCEEDED(hr) && llcv::capture::NeedsUpstreamCrossbar(capture) &&
+        SUCCEEDED(CoCreateInstance(CLSID_FilterGraph, nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&probeGraph))) &&
+        SUCCEEDED(probeGraph->AddFilter(capture, L"Probe Capture Device"))) {
+        // A restored graph without a crossbar is probed as before. Modes read
+        // from a graph that could not be restored are not reported.
+        const auto crossbar = llcv::capture::AttachUpstreamCrossbar(
+            probeGraph, capture, L"settings capture filter", log);
+        if (!crossbar.graphIntact) hr = crossbar.result;
+    }
     if (SUCCEEDED(hr)) {
         hr = FindOutputPinByMajorType(capture, MEDIATYPE_Video, &videoPin);
     }
+    if (stop && stop->load()) hr = HRESULT_FROM_WIN32(ERROR_CANCELLED);
     if (SUCCEEDED(hr)) {
-        result = llcv::video::ProbePixelFormats(videoPin, width, height, queryStatus, LogModuleMessage, diagnostics);
+        result = llcv::video::ProbePixelFormats(videoPin, width, height, queryStatus, log, diagnostics);
     } else {
         if (queryStatus) *queryStatus = hr;
-        LogHr(L"Video capability device/pin query", hr);
+        wchar_t message[128]{};
+        swprintf_s(message,L"Video capability device/pin query failed: 0x%08X\n",static_cast<unsigned>(hr));
+        if (log) log(message);
     }
     SafeRelease(videoPin);
+    // Releasing the never-run graph disconnects and releases its filters.
+    SafeRelease(probeGraph);
     SafeRelease(capture);
     if (uninitialize) CoUninitialize();
     return result;
@@ -2149,9 +2320,11 @@ static std::vector<PixelFormatSupport> ProbePixelFormats(
 // DirectShow filter's advertised output pins without building or running a
 // graph, so it cannot add capture-time latency or steady-state overhead.
 static InternalCaptureAudioProbe ProbeInternalCaptureAudio(
-    const std::wstring& captureDeviceId) {
-    std::lock_guard captureLock(g_settingsCaptureProbeMutex);
+    const std::wstring& captureDeviceId, std::shared_ptr<std::timed_mutex> gate = SettingsCaptureProbeGate(),
+    const std::atomic<bool>* stop = nullptr) {
+    std::lock_guard captureLock(*gate);
     InternalCaptureAudioProbe probe{};
+    if (stop && stop->load()) { probe.result=HRESULT_FROM_WIN32(ERROR_CANCELLED); return probe; }
     HRESULT initHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool uninitialize = SUCCEEDED(initHr);
     if (initHr == RPC_E_CHANGED_MODE) initHr = S_OK;
@@ -2163,11 +2336,12 @@ static InternalCaptureAudioProbe ProbeInternalCaptureAudio(
 
     IBaseFilter* capture = nullptr;
     IPin* audioPin = nullptr;
-    HRESULT hr = FindCaptureFilter(captureDeviceId, &capture);
+    HRESULT hr = FindCaptureFilter(captureDeviceId, &capture, nullptr, nullptr, nullptr);
+    if (stop && stop->load()) hr = HRESULT_FROM_WIN32(ERROR_CANCELLED);
     if (SUCCEEDED(hr)) {
         hr = FindOutputPinByName(capture, kAudioPinName, &audioPin);
     }
-    if (FAILED(hr) && capture) {
+    if (FAILED(hr) && capture && !(stop && stop->load())) {
         hr = FindOutputPinByMajorType(capture, MEDIATYPE_Audio, &audioPin);
     }
     if (SUCCEEDED(hr) && audioPin) {
@@ -2301,6 +2475,7 @@ struct DirectD3D11Renderer {
     UINT nextUploadSurface = 0;
     UINT activeUploadSurface = 0;
     bool allowTearing = false;
+    llcv::presentation::Readiness presentationReadiness;
     bool sharpScalingActive = false;
     bool discardUpdateAvailable = false;
     bool occluded = false;
@@ -2587,6 +2762,7 @@ struct DirectD3D11Renderer {
         rgbInput = false;
         rgbFullRange = true;
         lastTopDown = true;
+        presentationReadiness.Reset();
         SafeRelease(swapChain);
         SafeRelease(videoContext);
         SafeRelease(videoContext1);
@@ -2837,8 +3013,19 @@ struct DirectD3D11Renderer {
         if ((swapDesc.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) &&
             SUCCEEDED(swapChain->QueryInterface(IID_PPV_ARGS(&swapChain2)))) {
             hr = swapChain2->SetMaximumFrameLatency(1);
+            if (SUCCEEDED(hr) &&
+                llcv::presentation::UsesPresentationReadiness(g_settings.presentationMode)) {
+                HANDLE ready = swapChain2->GetFrameLatencyWaitableObject();
+                if (ready)
+                    presentationReadiness.Reset(ready);
+                else
+                    fwprintf(
+                        stderr,
+                        L"[video] VSync readiness handle unavailable; retaining original presentation path.\n");
+            }
             SafeRelease(swapChain2);
-            if (FAILED(hr)) return hr;
+            if (FAILED(hr))
+                return hr;
         }
 
         IDXGIDevice1* dxgiDevice1 = nullptr;
@@ -4119,6 +4306,29 @@ struct DirectD3D11Renderer {
 #endif
     }
 
+    HRESULT pollOcclusion() {
+        if (!occluded)
+            return S_OK;
+        const uint64_t nowMs = GetTickCount64();
+        if (nowMs < nextOcclusionTestMs)
+            return DXGI_STATUS_OCCLUDED;
+        const HRESULT test = swapChain->Present(0, DXGI_PRESENT_TEST);
+        if (test == DXGI_STATUS_OCCLUDED) {
+            nextOcclusionTestMs = nowMs + 50;
+            return test;
+        }
+        if (FAILED(test))
+            return test;
+        occluded = false;
+        nextOcclusionTestMs = 0;
+        if (occlusionLogged) {
+            fwprintf(stderr,
+                     L"[display-event] swapchain visible again after occlusion; uptime=%llu ms\n",
+                     static_cast<unsigned long long>(nowMs));
+            occlusionLogged = false;
+        }
+        return S_OK;
+    }
     HRESULT presentUploaded() {
         const bool cmaaRequestChanged=cmaaNisAppliedRequest!=g_cmaaNisRequest.load(std::memory_order_acquire);
         if(cmaaRequestChanged) {
@@ -4141,25 +4351,8 @@ struct DirectD3D11Renderer {
                 : TransientHudContent::CmaaNisScaleBypass);
         }
 #endif
-        if (occluded) {
-            const uint64_t nowMs = GetTickCount64();
-            if (nowMs < nextOcclusionTestMs) return DXGI_STATUS_OCCLUDED;
-            const HRESULT test = swapChain->Present(0, DXGI_PRESENT_TEST);
-            if (test == DXGI_STATUS_OCCLUDED) {
-                nextOcclusionTestMs = nowMs + 50;
-                return test;
-            }
-            if (FAILED(test)) return test;
-            occluded = false;
-            if (occlusionLogged) {
-                fwprintf(stderr,
-                         L"[display-event] swapchain visible again after "
-                         L"occlusion; uptime=%llu ms\n",
-                         static_cast<unsigned long long>(nowMs));
-                occlusionLogged = false;
-            }
-            nextOcclusionTestMs = 0;
-        }
+        const HRESULT visibility = pollOcclusion();
+        if (visibility != S_OK) return visibility;
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE;
         stream.pInputSurface = inputViews[activeUploadSurface];
@@ -4215,6 +4408,7 @@ struct DirectD3D11Renderer {
         spatialPresentQpc=spatialPresentTime.QuadPart;
 #endif
         hr = swapChain->Present(syncInterval, flags);
+        presentationReadiness.Presented();
 #ifdef LLCV_VSR_EXPERIMENT
         if (hr == S_OK) vsrTiming.AddPresent(std::chrono::duration<double,std::milli>(
             llcv::vsr::Timing::Clock::now()-presentStart).count());
@@ -4248,6 +4442,20 @@ static llcv::capture::AudioInputAttempt AudioOnlyCaptureAttempt() {
 #else
 static bool AudioOnlyCaptureLoop() {
 #endif
+    BeginCaptureReport();
+    CaptureInitializationLease captureLease;
+    if (!captureLease.lock.owns_lock()) {
+        if (captureLease.TimedOut()) {
+            g_captureFailureStage.store(L"wait for previous capture device query to release the device");
+            g_captureFailureHr.store(kSettingsProbeTimeout);
+            fwprintf(stderr,L"[startup] audio capture blocked by an unfinished settings probe for 5000 ms; capture not started.\n");
+        }
+#ifdef LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC
+        return llcv::capture::AudioInputAttempt::Failed;
+#else
+        return false;
+#endif
+    }
     g_captureFailureHr.store(S_OK, std::memory_order_release);
 #ifdef LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC
     g_captureAudioRejected.store(false, std::memory_order_release);
@@ -4414,6 +4622,8 @@ static bool AudioOnlyCaptureLoop() {
         hr = control->Run();
         if (FAILED(hr)) break;
         initialized = true;
+        g_captureFailureStage.store(L"audio capture graph running");
+        captureLease.Release();
         llcv::power::PlaybackPowerRequest powerRequest(g_settings.preventSleep, true, IsEnglishUi(), true);
         uint64_t powerRevision = 0;
         if (g_running.load(std::memory_order_acquire))
@@ -4473,6 +4683,7 @@ static bool AudioOnlyCaptureLoop() {
 #endif
     if (!initialized) {
         const HRESULT failure = FAILED(hr) ? hr : E_FAIL;
+        g_captureFailureStage.store(initializationStage, std::memory_order_release);
         g_captureFailureHr.store(failure, std::memory_order_release);
         fwprintf(stderr, L"[capture] initialization stage: %s\n",
                  initializationStage);
@@ -4549,6 +4760,16 @@ static HRESULT ValidateCaptureLayout(const wchar_t* stage, const AM_MEDIA_TYPE* 
 static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false) {
     const auto& preset = CurrentCapturePreset();
     g_hdrFailureDetail.store(nullptr, std::memory_order_release);
+    BeginCaptureReport();
+    CaptureInitializationLease captureLease;
+    if (!captureLease.lock.owns_lock()) {
+        if (captureLease.TimedOut()) {
+            g_captureFailureStage.store(L"wait for previous capture device query to release the device");
+            g_captureFailureHr.store(kSettingsProbeTimeout);
+            fwprintf(stderr,L"[startup] video capture blocked by an unfinished settings probe for 5000 ms; capture not started.\n");
+        }
+        return false;
+    }
     g_captureFailureHr.store(S_OK, std::memory_order_release);
     g_captureGraphStopped.store(false, std::memory_order_release);
     g_captureGraphCompleted.store(false, std::memory_order_release);
@@ -4623,6 +4844,16 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
         initializationStage = L"add selected video capture filter";
         hr = graph->AddFilter(capture, L"Selected Capture Device");
         if (FAILED(hr)) break;
+        // Video only, as in OBS. Multi-input devices only; single-input
+        // filters are left untouched. A missing crossbar keeps the original
+        // graph; only a failed undo stops the start.
+        const auto crossbar = llcv::capture::AttachUpstreamCrossbar(
+            graph, capture, L"video capture filter", LogModuleMessage);
+        if (!crossbar.graphIntact) {
+            initializationStage = L"restore graph after failed crossbar connection";
+            hr = crossbar.result;
+            break;
+        }
         initializationStage = L"find video output pin";
         hr = FindOutputPinByMajorType(capture, MEDIATYPE_Video, &videoPin);
         if (FAILED(hr)) break;
@@ -4649,6 +4880,7 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
         initializationStage = L"validate active video layout";
         hr = ValidateCaptureLayout(L"active", activeVideoType, preset.width, preset.height,
             configuredFormat, imageBytes, stride, configuredFps);
+        if (SUCCEEDED(hr)) ConfirmCaptureReport(configuredFormat, preset.width, preset.height, configuredFps, stride);
         if (SUCCEEDED(hr) && RequestsExactCaptureRate() &&
             !llcv::video::IsRequestedFrameRate(activeVideoType, RequestedVideoFrameRate()))
             hr = llcv::video::kRequestedFrameRateMismatch;
@@ -4790,6 +5022,7 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
         const int previousFps = configuredFps;
         if (SUCCEEDED(hr)) hr = ValidateCaptureLayout(L"connected", &connectedLayout,
             preset.width, preset.height, configuredFormat, imageBytes, stride, configuredFps);
+        if (SUCCEEDED(hr)) ConfirmCaptureReport(configuredFormat, preset.width, preset.height, configuredFps, stride);
         if (SUCCEEDED(hr) && RequestsExactCaptureRate() &&
             !llcv::video::IsRequestedFrameRate(&connectedLayout, RequestedVideoFrameRate()))
             hr = llcv::video::kRequestedFrameRateMismatch;
@@ -5011,6 +5244,8 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
         hr = control->Run();
         if (FAILED(hr)) break;
         initialized = true;
+        g_captureFailureStage.store(L"video capture graph running");
+        captureLease.Release();
         llcv::power::PlaybackPowerRequest powerRequest(g_settings.preventSleep, false, IsEnglishUi(), true);
         uint64_t powerRevision = 0;
         if (g_running.load(std::memory_order_acquire))
@@ -5086,6 +5321,10 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
         int64_t arrivalUs = 0;
         bool receivedAnyFrame = false;
         bool presentedAnyFrame = false;
+        DeferredVideoDiagnostics deferredDiagnostics;
+        bool frameReady = false;
+        bool observedReadyInput = false;
+        std::chrono::steady_clock::time_point admissionPendingSince{};
         const auto firstFrameStart = std::chrono::steady_clock::now();
         const auto firstFrameDeadline = firstFrameStart + std::chrono::seconds(10);
         initializationStage = L"wait for first valid capture frame";
@@ -5094,7 +5333,7 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
                 break;
             // Focus and modal-window transitions must be serviced even when
             // capture has no new sample. Only this thread owns DXGI state.
-            if (ExclusiveOutputSelected() && renderer.outputConfigurationChanged()) {
+            if ((ExclusiveOutputSelected() || renderer.presentationReadiness.Enabled()) && renderer.outputConfigurationChanged()) {
                 hr = renderer.resizeOutput(host);
                 if (FAILED(hr) && !recoverRenderer(L"D3D11 fullscreen transition", hr)) {
                     initialized = false;
@@ -5107,12 +5346,22 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
                 initialized = false;
                 break;
             }
-            hr = resources.events.Wait(frameEvent, 100, g_playbackPowerEvents.Event());
+            auto& admission = renderer.presentationReadiness;
+            const bool paced = admission.Enabled();
+            const DWORD waitMs = renderer.occluded && paced                 ? 50u
+                                 : paced && frameReady && admission.Ready() ? 0u
+                                                                            : 100u;
+            // These are two prerequisites, not an OR of frame/presentation.
+            // Once capture is ready, stop waiting on its repeated notifications;
+            // the one-slot mailbox keeps replacing input until DXGI is ready.
+            hr = resources.events.Wait(paced && frameReady ? nullptr : frameEvent, waitMs,
+                                       g_playbackPowerEvents.Event(), admission.WaitHandle());
             if (ExclusiveOutputSelected() && g_presentationClosing.load(std::memory_order_acquire))
                 break;
             if (FAILED(hr)) {
                 g_captureGraphStopped.store(true, std::memory_order_release);
-                initializationStage = L"capture device disconnected or graph aborted; restart required";
+                initializationStage =
+                    L"capture device disconnected or graph aborted; restart required";
                 initialized = false;
                 break;
             }
@@ -5120,14 +5369,89 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
                 g_captureGraphCompleted.store(true, std::memory_order_release);
                 break;
             }
-            if (resources.events.LastWaitReason() == llcv::capture::CaptureGraphEvents::WaitReason::Wake) {
-                if (!g_running.load(std::memory_order_acquire)) break;
-                if (g_playbackPowerEvents.ApplyPending(powerRequest, powerRevision) && powerRequest.Error())
-                    LogHr(L"Playback power request after power broadcast", HRESULT_FROM_WIN32(powerRequest.Error()));
+            if (resources.events.LastWaitReason() ==
+                llcv::capture::CaptureGraphEvents::WaitReason::Wake) {
+                if (!g_running.load(std::memory_order_acquire))
+                    break;
+                if (g_playbackPowerEvents.ApplyPending(powerRequest, powerRevision) &&
+                    powerRequest.Error())
+                    LogHr(L"Playback power request after power broadcast",
+                          HRESULT_FROM_WIN32(powerRequest.Error()));
                 continue;
+            }
+            if (resources.events.LastWaitReason() ==
+                llcv::capture::CaptureGraphEvents::WaitReason::Frame) {
+                frameReady = true;
+                observedReadyInput = true;
+            }
+            if (resources.events.LastWaitReason() ==
+                llcv::capture::CaptureGraphEvents::WaitReason::PresentationReady)
+                admission.Signaled();
+            if (paced && FAILED(latest.FormatFailure())) {
+                hr = latest.FormatFailure();
+                initialized = false;
+                initializationStage =
+                    L"capture video format changed while awaiting presentation; restart required";
+                break;
+            }
+            if (!observedReadyInput &&
+                StartupInputWaitExpired(receivedAnyFrame, std::chrono::steady_clock::now(),
+                                        firstFrameDeadline)) {
+                fwprintf(
+                    stderr,
+                    L"[video] no valid %s input within 10 seconds; rejected samples=%llu expected bytes=%lu.\n",
+                    PixelFormatName(configuredFormat),
+                    static_cast<unsigned long long>(latest.RejectedSamples()), imageBytes);
+                hr = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+                initialized = false;
+                break;
+            }
+            if (paced) {
+                hr = renderer.pollOcclusion();
+                if (hr == DXGI_STATUS_OCCLUDED) {
+                    admissionPendingSince = {};
+                    continue;
+                }
+                if (FAILED(hr)) {
+                    if (recoverRenderer(L"D3D11 visibility test", hr))
+                        continue;
+                    initialized = false;
+                    break;
+                }
+                if (!frameReady || !admission.Ready()) {
+                    if (resources.events.LastWaitReason() ==
+                        llcv::capture::CaptureGraphEvents::WaitReason::Timeout) {
+                        const auto removed = renderer.deviceRemovedReason();
+                        if (FAILED(removed)) {
+                            if (recoverRenderer(L"D3D11 device while awaiting presentation",
+                                                removed)) {
+                                admissionPendingSince = {};
+                                continue;
+                            }
+                            hr = removed;
+                            initialized = false;
+                            break;
+                        }
+                    }
+                    if (frameReady && !admission.Ready()) {
+                        const auto now = std::chrono::steady_clock::now();
+                        if (admissionPendingSince == std::chrono::steady_clock::time_point{})
+                            admissionPendingSince = now;
+                        else if (now - admissionPendingSince >= std::chrono::seconds(2)) {
+                            fwprintf(
+                                stderr,
+                                L"[video] VSync readiness signal absent for 2000 ms; using the original presentation path without changing settings.\n");
+                            admission.Bypass();
+                        }
+                    }
+                    if (!frameReady || !admission.Ready())
+                        continue;
+                }
+                admissionPendingSince = {};
             }
             // Drain once even on timeout: publication can race the wait result.
             IMediaSample* videoSample = latest.TakeLatest(arrivalUs);
+            frameReady=false;
             if (FAILED(latest.FormatFailure())) {
                 SafeRelease(videoSample);
                 initializationStage = L"capture video format changed or could not be verified; restart required";
@@ -5136,16 +5460,6 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
                 break;
             }
             if (!videoSample) {
-                if (StartupInputWaitExpired(receivedAnyFrame,
-                        std::chrono::steady_clock::now(), firstFrameDeadline)) {
-                    fwprintf(stderr,
-                             L"[video] no valid %s input within 10 seconds; rejected samples=%llu expected bytes=%lu.\n",
-                             PixelFormatName(configuredFormat),
-                             static_cast<unsigned long long>(latest.RejectedSamples()), imageBytes);
-                    hr = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
-                    initialized = false;
-                    break;
-                }
                 continue;
             }
             if (!receivedAnyFrame) {
@@ -5181,6 +5495,16 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
             }
             BYTE* sampleData = nullptr;
             IMFMediaBuffer* decodedBuffer = nullptr;
+            const auto readmission = renderer.presentationReadiness.Poll();
+            if (readmission != S_OK) {
+                videoSample->Release();
+                if (FAILED(readmission)) {
+                    hr = readmission;
+                    initialized = false;
+                    break;
+                }
+                continue;
+            }
             if (compressedVideo) {
                 hr = compressedDecoder.decode(videoSample, &decodedBuffer);
                 if (SUCCEEDED(hr)) {
@@ -5195,6 +5519,21 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
                             host, preset.width, preset.height, configuredFps,
                             rendererInputFormat, hdrInputMetadataAvailable,
                             sdrColor, hdrColorSpace);
+                    }
+                }
+                // A decoder color change can recreate the swap chain after the
+                // first admission. Do not upload/render against an unready chain.
+                if (SUCCEEDED(hr) && decodedBuffer) {
+                    const auto ready = renderer.presentationReadiness.Poll();
+                    if (ready != S_OK) {
+                        SafeRelease(decodedBuffer);
+                        videoSample->Release();
+                        if (FAILED(ready)) {
+                            hr = ready;
+                            initialized = false;
+                            break;
+                        }
+                        continue;
                     }
                 }
                 if (SUCCEEDED(hr) && decodedBuffer) {
@@ -5281,8 +5620,10 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
                 fwprintf(stderr, L"[video] first successful presentation after %lld ms\n",
                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - firstFrameStart).count()));
+                deferredDiagnostics.Begin();
             }
         }
+        deferredDiagnostics.End();
         powerRequest.Reset();
         control->Stop();
     } while (false);
@@ -5295,6 +5636,7 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
     }
     if (!initialized) {
         const HRESULT failure = FAILED(hr) ? hr : E_FAIL;
+        g_captureFailureStage.store(initializationStage, std::memory_order_release);
         g_captureFailureHr.store(failure, std::memory_order_release);
         fwprintf(stderr, L"[capture] initialization stage: %s\n",
                  initializationStage);
@@ -5343,6 +5685,7 @@ constexpr UINT WM_EXCLUSIVE_ENDPOINT_PROBE_COMPLETE = WM_APP + 79;
 constexpr UINT WM_EXCLUSIVE_SCAN_COMPLETE = WM_APP + 80;
 constexpr UINT WM_SETTINGS_VIDEO_MODES_READY = WM_APP + 81;
 constexpr UINT WM_SETTINGS_INVENTORY_READY = WM_APP + 82;
+constexpr UINT WM_SETTINGS_REPORT_READY = WM_APP + 85;
 #ifdef LLCV_RECORDING
 constexpr UINT WM_RECORD_ENCODERS_READY = WM_APP + 83;
 #endif
@@ -5363,13 +5706,21 @@ struct SettingsVideoModes {
     std::vector<PixelFormatSupport> formats;
     HRESULT status = S_OK;
     llcv::video::VideoCapabilityDiagnostics diagnostics;
+    std::wstring messages;
 };
 struct SettingsDeviceInventory {
     std::vector<CaptureDeviceInfo> videoInputs;
     std::vector<CaptureDeviceInfo> audioInputs;
     std::vector<AudioEndpointInfo> audioOutputs;
 };
+struct ExclusiveScanWork {
+    std::atomic<bool> stop{false}, done{false};
+    std::mutex mutex;
+    HWND owner = nullptr; // Only used while holding mutex; cleared before HWND destruction.
+    std::vector<ExclusiveEndpointProbeResult> pending;
+};
 struct SettingsDialogState : llcv::settings_ui::SettingsControls {
+    std::unique_ptr<llcv::settings_ui::SettingsModeCache<llcv::diagnostics::ReportResult>> reportQuery;
     std::unique_ptr<llcv::settings_ui::SettingsModeCache<SettingsVideoModes>> videoModeCache;
 #ifdef LLCV_RECORDING
     std::atomic<bool> recordingProbeStop{false};
@@ -5391,8 +5742,7 @@ struct SettingsDialogState : llcv::settings_ui::SettingsControls {
     bool probeReady = false; // Published cache results are applied on the UI thread.
     std::atomic<bool> exclusiveProbeStop{false};
     std::atomic<bool> exclusiveScanRunning{false};
-    std::mutex exclusiveProbeResultsMutex;
-    std::vector<ExclusiveEndpointProbeResult> pendingExclusiveProbeResults;
+    std::shared_ptr<ExclusiveScanWork> exclusiveWork;
     bool captureAudioProbeReady = false;
     AudioClient3Support probe{};
     InternalCaptureAudioProbe captureAudioProbe{};
@@ -5416,6 +5766,25 @@ struct SettingsDialogState : llcv::settings_ui::SettingsControls {
     bool asioAvailable = false;
     bool accepted = false;
 };
+static void StopSettingsQueries(SettingsDialogState* state) {
+    if (!state) return;
+    if (state->videoModeCache) state->videoModeCache->Stop();
+    if (state->sharedProbeCache) state->sharedProbeCache->Stop();
+    if (state->captureAudioProbeCache) state->captureAudioProbeCache->Stop();
+    if (state->inventoryCache) state->inventoryCache->Stop();
+    if (state->reportQuery) state->reportQuery->Stop();
+#ifdef LLCV_RECORDING
+    state->recordingProbeStop = true;
+    if (state->recordingProbe) state->recordingProbe->Stop();
+    if (state->recordingStorageQuery) state->recordingStorageQuery->Stop();
+#endif
+    state->exclusiveProbeStop = true;
+    if (state->exclusiveWork) {
+        std::lock_guard lock(state->exclusiveWork->mutex);
+        state->exclusiveWork->stop = true;
+        state->exclusiveWork->owner = nullptr;
+    }
+}
 
 static VideoPixelFormat SelectedPixelFormat(
     const SettingsDialogState* state);
@@ -5997,19 +6366,12 @@ static void UpdateExclusiveVerificationUi(SettingsDialogState* state) {
     }
 }
 
-static void QueueExclusiveEndpointProbeResult(
-    SettingsDialogState* state, ExclusiveEndpointProbeResult result) {
-    if (!state) return;
-    std::lock_guard<std::mutex> lock(state->exclusiveProbeResultsMutex);
-    state->pendingExclusiveProbeResults.push_back(std::move(result));
-}
-
 static void ConsumeExclusiveEndpointProbeResults(SettingsDialogState* state) {
     if (!state) return;
     std::vector<ExclusiveEndpointProbeResult> pending;
-    {
-        std::lock_guard<std::mutex> lock(state->exclusiveProbeResultsMutex);
-        pending.swap(state->pendingExclusiveProbeResults);
+    if (state->exclusiveWork) {
+        std::lock_guard<std::mutex> lock(state->exclusiveWork->mutex);
+        pending.swap(state->exclusiveWork->pending);
     }
     for (const auto& message : pending) {
         if (message.endpointIndex >= state->exclusiveEndpointResults.size() ||
@@ -6044,7 +6406,9 @@ static void ConsumeExclusiveEndpointProbeResults(SettingsDialogState* state) {
 static void CompleteExclusiveEndpointScan(SettingsDialogState* state) {
     if (!state) return;
     if (state->exclusiveProbeThread.joinable()) {
-        state->exclusiveProbeThread.join();
+        if (state->exclusiveProbeStop.load()) state->exclusiveProbeThread.detach();
+        else if (state->exclusiveWork && state->exclusiveWork->done.load()) state->exclusiveProbeThread.join();
+        else return;
     }
     // The completion notification owns the transition to idle. A worker that
     // has finished but whose notifications are still queued must not allow a
@@ -6127,27 +6491,34 @@ static void StartExclusiveEndpointScan(SettingsDialogState* state, HWND hwnd,
         }
         if (scanOrder.empty() || i != scanOrder.front()) scanOrder.push_back(i);
     }
+    auto work = std::make_shared<ExclusiveScanWork>();
+    work->owner = hwnd;
+    state->exclusiveWork = work;
+    // A cancelled scan can still be inside a driver. Serialize with subsequent
+    // dialogs, without keeping any dialog state or global logging callbacks alive.
+    const auto scanGate = SettingsExclusiveProbeGate();
     state->exclusiveProbeThread = std::thread(
-        [state, hwnd, endpoints, scanOrder]() {
+        [work, gate = scanGate, endpoints, scanOrder]() {
+            std::unique_lock operation(*gate, std::defer_lock);
+            while (!operation.try_lock_for(std::chrono::milliseconds(20))) {
+                if (work->stop) return;
+            }
             for (const size_t i : scanOrder) {
-                if (state->exclusiveProbeStop.load(std::memory_order_acquire)) {
+                if (work->stop.load(std::memory_order_acquire)) {
                     break;
                 }
                 ExclusiveEndpointProbeResult message{};
                 message.endpointIndex = i;
-                message.probe = ProbeExclusiveBufferRecommendation(
-                    endpoints[i].id, &state->exclusiveProbeStop);
-                if (state->exclusiveProbeStop.load(std::memory_order_acquire)) break;
-                // Results belong to the dialog state, not its message queue.
-                // Closing the HWND can discard notifications safely: the
-                // state outlives the joined worker and persists unread results.
-                QueueExclusiveEndpointProbeResult(state, std::move(message));
-                if (!PostMessageW(hwnd, WM_EXCLUSIVE_ENDPOINT_PROBE_COMPLETE,
-                                  0, 0)) {
-                    break;
-                }
+                message.probe = llcv::audio_device::ProbeExclusiveBufferRecommendation(
+                    endpoints[i].id, &work->stop, nullptr);
+                std::lock_guard lock(work->mutex);
+                if (work->stop) break;
+                work->pending.push_back(std::move(message));
+                if (work->owner) PostMessageW(work->owner, WM_EXCLUSIVE_ENDPOINT_PROBE_COMPLETE, 0, 0);
             }
-            PostMessageW(hwnd, WM_EXCLUSIVE_SCAN_COMPLETE, 0, 0);
+            std::lock_guard lock(work->mutex);
+            work->done = true;
+            if (work->owner) PostMessageW(work->owner, WM_EXCLUSIVE_SCAN_COMPLETE, 0, 0);
         });
 }
 
@@ -6225,7 +6596,8 @@ static void StartCaptureAudioProbe(SettingsDialogState* state, HWND hwnd) {
     }
     if (!state->captureAudioProbeCache)
         state->captureAudioProbeCache = std::make_unique<llcv::settings_ui::SettingsModeCache<InternalCaptureAudioProbe>>(
-            [](const llcv::settings_ui::ModeQueryKey& request) { return ProbeInternalCaptureAudio(request.device); },
+            [gate=SettingsCaptureProbeGate()](const llcv::settings_ui::ModeQueryKey& request, const std::atomic<bool>& stop) {
+                return ProbeInternalCaptureAudio(request.device, gate, &stop); },
             [hwnd] { PostMessageW(hwnd, WM_CAPTURE_AUDIO_PROBE_COMPLETE, 0, 0); });
     const auto result = state->captureAudioProbeCache->Request({captureDeviceId, 0, 0});
     state->captureAudioProbeReady = result.has_value();
@@ -6442,9 +6814,11 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
     if (!state->videoModeCache) {
         const HWND owner = GetParent(state->videoCombo);
         state->videoModeCache = std::make_unique<llcv::settings_ui::SettingsModeCache<SettingsVideoModes>>(
-            [](const llcv::settings_ui::ModeQueryKey& request) {
+            [gate=SettingsCaptureProbeGate()](const llcv::settings_ui::ModeQueryKey& request, const std::atomic<bool>& stop) {
                 SettingsVideoModes result;
-                result.formats = ProbePixelFormats(request.device, request.width, request.height, &result.status, &result.diagnostics);
+                SettingsProbeLogScope scope(result.messages);
+                result.formats = ProbePixelFormats(request.device, request.width, request.height, &result.status,
+                    &result.diagnostics, CollectSettingsProbeMessage, gate, &stop);
                 return result;
             }, [owner] { PostMessageW(owner, WM_SETTINGS_VIDEO_MODES_READY, 0, 0); });
     }
@@ -6455,6 +6829,7 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
         return;
     }
     state->videoModesPending = false;
+    if (!modes->messages.empty()) fwprintf(stderr,L"%s",modes->messages.c_str());
     state->appliedVideoModeKey = key;
     VideoPixelFormat desiredFormat = g_settings.pixelFormat;
     if (SendMessageW(state->pixelFormatCombo, CB_GETCOUNT, 0, 0) > 0) {
@@ -6796,8 +7171,7 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
         if (upscaler==1 || upscaler==2)
             g_settings.preferredUpscaler = upscaler==1 ? llcv::settings::UpscalingMethod::CmaaNis
                 : llcv::settings::UpscalingMethod::NvidiaVsr;
-        const LRESULT nisSharpness=SendMessageW(state->nisSharpnessCombo,CB_GETCURSEL,0,0);
-        g_settings.nisSharpnessPercent = nisSharpness>=0 && nisSharpness<=100 ? int(nisSharpness) : 15;
+        g_settings.nisSharpnessPercent = llcv::settings_ui::SelectedNisSharpness(state->nisSharpnessCombo);
         g_settings.showDiagnosticConsole = SendMessageW(
             state->showConsoleCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.skipStartupSettings = SendMessageW(
@@ -6893,11 +7267,57 @@ static void RequestRecordingEncoders(SettingsDialogState* state,HWND hwnd){
     if(state->activeTab!=SettingsTab::Recording || state->recordingProbeStop.load() ||
         state->recordingProbe || !state->recordingProbePending || llcv::recording::recorder.Busy())return;
     state->recordingProbe=std::make_unique<llcv::settings_ui::SettingsModeCache<llcv::recording::EncoderProbeResult>>(
-        [state](const auto&){return llcv::recording::ProbeEncodersIsolated(&state->recordingProbeStop);},
+        [](const llcv::settings_ui::ModeQueryKey&, const std::atomic<bool>& stop){
+            return llcv::recording::ProbeEncodersIsolated(&stop);},
         [hwnd]{PostMessageW(hwnd,WM_RECORD_ENCODERS_READY,0,0);});
     state->recordingProbe->Request({});
 }
 #endif
+static void RequestSettingsReport(SettingsDialogState* state, HWND hwnd) {
+    if (!state || state->reportQuery) return;
+    llcv::diagnostics::ReportRequest request;
+    request.directory = UserDataDirectory();
+    SYSTEMTIME now{}; GetLocalTime(&now);
+    wchar_t line[256]{};
+    swprintf_s(line,L"LLCV %s | %04u-%02u-%02u %02u:%02u:%02u | HRESULT 0x%08X\r\n",
+        kAppVersionLabel,now.wYear,now.wMonth,now.wDay,now.wHour,now.wMinute,now.wSecond,
+        static_cast<unsigned>(g_captureFailureHr.load()));
+    request.summary = line + CaptureReportDetails(true);
+    request.summary += L"\r\nSaved logging enabled: " + std::to_wstring(g_settings.saveLog) +
+        L"\r\nCurrent UI capture device: " + SelectedCaptureDeviceId(state) +
+        L"\r\nCurrent UI capture audio: " + SelectedCaptureAudioDeviceId(state) +
+        L"\r\nCurrent UI playback output: " + SelectedAudioEndpointId(state) +
+        L"\r\nCaptured video frames: " + std::to_wstring(g_videoCapturedFrames.load()) +
+        L"\r\nPresented video frames: " + std::to_wstring(g_videoPresentedFrames.load()) +
+        L"\r\nAudio callbacks: " + std::to_wstring(g_audioCaptureCallbacks.load()) +
+        L"\r\nAudio underrun frames: " + std::to_wstring(g_audioUnderrunFrames.load()) +
+        L"\r\nPlayback muted: " + std::to_wstring(g_playbackMuted.load()) +
+        L"\r\nBackground muted: " + std::to_wstring(g_backgroundAudioMuted.load()) +
+        L"\r\nPlayback master volume: " + std::to_wstring(g_volumePercent.load()) +
+        L"\r\nAudio input available: " + std::to_wstring(g_captureAudioAvailable.load()) +
+        L"\r\nAudio packet frames: " + std::to_wstring(g_audioCapturePacketFrames.load());
+    if (const auto* hdr = g_hdrFailureDetail.load()) request.summary += L"\r\nHDR detail: " + std::wstring(hdr);
+    wchar_t profile[32768]{};
+    const auto length=GetEnvironmentVariableW(L"USERPROFILE",profile,32768);
+    if (length && length<32768) request.redactions.emplace_back(profile,L"<USER>");
+    request.deviceIds={g_settings.captureDeviceId,g_settings.captureAudioDeviceId,g_settings.audioOutputDeviceId,
+        SelectedCaptureDeviceId(state),SelectedCaptureAudioDeviceId(state),SelectedAudioEndpointId(state)};
+    for(const auto& device:state->captureDevices)request.deviceIds.push_back(device.id);
+    for(const auto& device:state->captureAudioDevices)request.deviceIds.push_back(device.id);
+    for(const auto& endpoint:state->audioEndpoints)request.deviceIds.push_back(endpoint.id);
+#ifdef LLCV_RECORDING
+    if (!llcv::recording::sessionOptions.folder.empty())
+        request.redactions.emplace_back(llcv::recording::sessionOptions.folder,L"<RECORDING_FOLDER>");
+#endif
+    state->reportQuery = std::make_unique<llcv::settings_ui::SettingsModeCache<llcv::diagnostics::ReportResult>>(
+        [request=std::move(request)](const llcv::settings_ui::ModeQueryKey&,const std::atomic<bool>& stop) {
+            return llcv::diagnostics::CreateDiagnosticReport(request,stop);
+        },[hwnd]{PostMessageW(hwnd,WM_SETTINGS_REPORT_READY,0,0);});
+    state->reportPending = true;
+    EnableWindow(state->guideReportButton,FALSE);
+    SetSettingsText(state->guideReportButton,state->english?L"Creating ZIP…":L"자료 만드는 중…");
+    state->reportQuery->Request({});
+}
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                                          WPARAM wParam, LPARAM lParam) {
     auto* state = reinterpret_cast<SettingsDialogState*>(
@@ -7070,6 +7490,33 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         return 0;
     }
 
+    case WM_SETTINGS_REPORT_READY:
+        if (state && state->reportQuery) {
+            if (auto result=state->reportQuery->Request({})) {
+                state->reportQuery.reset();
+                state->reportPending = false;
+                EnableWindow(state->guideReportButton,TRUE);
+                SetSettingsText(state->guideReportButton,state->english?L"Create report ZIP":L"진단자료 ZIP 만들기");
+                if (SUCCEEDED(result->status)) {
+                    const auto message=(state->english
+                        ? L"Report saved. Extract and review it before attaching manually. Nothing was uploaded.\n\n"
+                        : L"진단자료를 저장했습니다. 압축을 풀어 내용을 확인한 뒤 직접 첨부해 주세요. 자동 전송되지 않습니다.\n\n") + result->path +
+                        (state->english?L"\n\nRecent logs: ":L"\n\n포함된 최근 로그: ") + std::to_wstring(result->logs) +
+                        (result->logs?L"":(state->english?L"\nNo logs: enable log saving, reproduce, then create another ZIP.":
+                            L"\n로그가 없습니다. 로그 저장을 켜고 증상을 재현한 뒤 다시 만들어 주세요."));
+                    MessageBoxW(hwnd,message.c_str(),L"LLCV",MB_OK|MB_ICONINFORMATION);
+                    const auto directory=std::filesystem::path(result->path).parent_path().wstring();
+                    ShellExecuteW(hwnd,L"open",directory.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+                } else {
+                    wchar_t message[256]{};
+                    swprintf_s(message,state->english?L"Could not create the report ZIP (0x%08X). Existing logs and settings were not changed.":
+                        L"진단자료 ZIP을 만들지 못했습니다(0x%08X). 기존 로그와 설정은 변경하지 않았습니다.",
+                        static_cast<unsigned>(result->status));
+                    MessageBoxW(hwnd,message,L"LLCV",MB_OK|MB_ICONWARNING);
+                }
+            }
+        }
+        return 0;
     case WM_EXCLUSIVE_ENDPOINT_PROBE_COMPLETE: {
         if (!state) return 0;
         ConsumeExclusiveEndpointProbeResults(state);
@@ -7184,6 +7631,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         return 0;
     }
 
+    case WM_DESTROY:
+        StopSettingsQueries(state);
+#ifdef LLCV_RECORDING
+        KillTimer(hwnd,2071);
+#endif
+        break;
 #ifdef LLCV_RECORDING
     case WM_TIMER:
         if(state && wParam==2071 && state->activeTab==SettingsTab::Recording){
@@ -7193,10 +7646,6 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             RequestRecordingEncoders(state,hwnd);
         }
         return 0;
-    case WM_DESTROY:
-        KillTimer(hwnd,2071);
-        if(state)state->recordingProbeStop.store(true);
-        break;
     case WM_NCDESTROY:
         if(g_recordingSettingsWindow==hwnd){
             g_recordingSettingsWindow=nullptr;
@@ -7379,6 +7828,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                     hwnd, L"open", directory.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <= 32)
                 MessageBoxW(hwnd, IsEnglishUi() ? L"Could not open the screenshot folder."
                     : L"스크린샷 폴더를 열지 못했습니다.", L"Screenshot", MB_OK | MB_ICONWARNING);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_CREATE_REPORT && HIWORD(wParam) == BN_CLICKED) {
+            if (state && !state->reportQuery && MessageBoxW(hwnd,state->english
+                ? L"Create a local ZIP with up to 5 recent LLCV logs, saved playback/recording settings, app/Windows versions, current selections and startup error details?\n\nKnown device IDs, common USB/endpoint instance IDs and user-profile paths are masked. Review for other personal information before sharing. No videos, screenshots or other apps' files are collected, and nothing is uploaded.\n\nEnable and apply log saving, then reproduce the issue first."
+                : L"최근 LLCV 로그 최대 5개와 저장된 재생·녹화 설정, 앱·Windows 버전, 현재 선택 항목과 시작 오류 정보를 로컬 ZIP으로 모을까요?\n\n확인된 장치 ID와 일반적인 USB·오디오 장치의 고유 식별 부분, 사용자 프로필 경로는 가립니다. 다른 개인정보도 공유 전에 직접 확인해 주세요. 영상·스크린샷·다른 앱의 파일은 수집하거나 자동 전송하지 않습니다.\n\n먼저 로그 저장을 켜고 적용한 뒤 증상을 재현해 주세요.",
+                L"LLCV",MB_OKCANCEL|MB_ICONINFORMATION)==IDOK) RequestSettingsReport(state,hwnd);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_OPEN_LOG_FOLDER &&
@@ -7745,19 +8201,19 @@ static bool ShowSettingsDialog(HINSTANCE hInst,
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
-    state.sharedProbeCache.reset(); // Driver waits only after the HWND closes.
+    StopSettingsQueries(&state); // Also covers a quit message before WM_DESTROY.
+    state.sharedProbeCache.reset(); // Non-blocking; late driver results are discarded.
 #ifdef LLCV_RECORDING
     state.recordingProbeStop.store(true);
     state.recordingProbe.reset();
 #endif
     state.updateCheckTask.CancelAndWait();
     state.exclusiveProbeStop.store(true, std::memory_order_release);
-    // The HWND may have discarded the worker's notifications. Join, drain and
-    // save its completed results through the same path as normal completion.
+    // Drain completed results without waiting for an in-flight driver call.
     CompleteExclusiveEndpointScan(&state);
     state.captureAudioProbeCache.reset();
     state.inventoryCache.reset();
-    state.videoModeCache.reset(); // join once, after the dialog closes, never on an option click
+    state.videoModeCache.reset();
     for (HFONT font : state.uiFonts) DeleteObject(font);
     return state.accepted;
 }
@@ -9496,6 +9952,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         if (wParam == 1) {
+            if (g_audioStartupProbeTimeout.exchange(false) && SUCCEEDED(g_captureFailureHr.load())) {
+                MessageBoxW(hwnd,SettingsProbeTimeoutText(IsEnglishUi()),L"LLCV · Audio",MB_OK|MB_ICONWARNING);
+            }
             llcv::screenshot::Result screenshot;
             if (g_screenshots.TakeResult(screenshot)) {
                 fwprintf(stderr, L"[screenshot] PNG=0x%08X clipboard-requested=%d clipboard=0x%08X "
@@ -9527,6 +9986,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 RefreshHdrDisplayStatus(hwnd);
             }
             FlushAudioDiagnostics();
+            FlushVideoDiagnostics();
             UpdateOsdRates();
             g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
             if (g_settings.audioOnly) {
@@ -10432,7 +10892,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
 #ifdef LLCV_VSR_EXPERIMENT
     if (vsrLiveTest == L"off") g_vsrMode = llcv::vsr::Mode::Off;
 #endif
-    // Allocate a console for prototype diagnostics.
+    // Create the diagnostic console.
 #ifdef LLCV_VSR_EXPERIMENT
     g_settings.checkForUpdates = false;
     g_settings.saveLog = true; // F6 can opt in after a default launch.
@@ -10447,6 +10907,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     CreateDirectoryW(g_hdrFrameAuditDirectory.c_str(), nullptr);
 #endif
     const BOOL allocatedConsole = AllocConsole();
+    if (allocatedConsole) DisableConsoleQuickEdit();
     if (allocatedConsole && !g_settings.showDiagnosticConsole) {
         const HWND console = GetConsoleWindow();
         if (console) ShowWindow(console, SW_HIDE);
@@ -10722,7 +11183,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                                    : L"오디오 only 캡처 초기화에 실패했습니다.\n\n오류: 0x%08X  %s\n\n호환되는 캡처 오디오 장치를 선택하거나 다른 캡처 프로그램을 종료해 주세요.",
                                static_cast<unsigned int>(failure),
                                HrText(failure).c_str());
-                    MessageBoxW(hwnd, message, L"LLCV",
+                    const auto detailMessage = std::wstring(failure==kSettingsProbeTimeout
+                        ? SettingsProbeTimeoutText(IsEnglishUi()) : message) + L"\n\n" + CaptureReportDetails(IsEnglishUi());
+                    MessageBoxW(hwnd, detailMessage.c_str(), L"LLCV",
                                 MB_OK | MB_ICONERROR);
                     g_restartToSettings.store(true,
                                               std::memory_order_release);
@@ -10810,21 +11273,25 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                         static_cast<unsigned>(failure));
                 }
                 std::wstring captureMessage = message;
+                if (failure==kSettingsProbeTimeout) captureMessage=SettingsProbeTimeoutText(IsEnglishUi());
                 if (failure == llcv::video::kRequestedFrameRateMismatch) {
                     captureMessage = IsEnglishUi()
                         ? L"The driver did not apply the requested capture frame rate. Capture was stopped instead of using a different rate."
                         : L"드라이버가 요청한 캡처 FPS를 적용하지 않았습니다. 다른 FPS로 대신 시작하지 않고 중단했습니다.";
                 }
-                if (!g_settings.capture40Fps && RequestsExactCaptureRate()) {
+                if (failure!=kSettingsProbeTimeout && !g_settings.capture40Fps && RequestsExactCaptureRate()) {
                     captureMessage += (IsEnglishUi() ? L"\n\nRequested capture rate: " : L"\n\n요청한 캡처 FPS: ") +
                         std::to_wstring(RequestedVideoFrameRate()) + L" fps.";
                     captureMessage += IsEnglishUi()
                         ? L" A different rate is not used automatically. Select Auto or another supported rate to retry. See the log for the failed startup stage."
                         : L" 다른 FPS로 자동 변경하지 않습니다. 자동 또는 지원되는 다른 FPS로 다시 시도하세요. 실패 단계는 진단 로그에서 확인할 수 있습니다.";
                 }
-                if (g_settings.capture40Fps) captureMessage += IsEnglishUi()
+                if (failure!=kSettingsProbeTimeout && g_settings.capture40Fps) captureMessage += IsEnglishUi()
                     ? L"\n\n40 fps capture is enabled. This device/format may reject 40 fps or report a different rate. Uncheck '40 fps capture' to retry with the normal frame-rate selection. See the diagnostic log to distinguish a format rejection from other startup errors."
                     : L"\n\n40fps 캡처가 켜져 있습니다. 이 장치/형식이 40fps를 거부하거나 다른 FPS를 보고할 수 있습니다. '40fps 캡처'를 해제하면 기존 프레임 선택으로 다시 시도할 수 있습니다. 형식 거부인지 다른 시작 오류인지는 진단 로그에서 확인하세요.";
+                captureMessage += L"\n\n" + CaptureReportDetails(IsEnglishUi());
+                captureMessage += IsEnglishUi() ? L"\n\nSettings → Help / diagnostics → Create report ZIP."
+                    : L"\n\n설정 → 도움말·진단 → 진단자료 ZIP 만들기로 자료를 모을 수 있습니다.";
                 MessageBoxW(hwnd, captureMessage.c_str(), L"LLCV",
                             MB_OK | MB_ICONERROR);
                 g_restartToSettings.store(true, std::memory_order_release);
@@ -10921,6 +11388,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         !smokeTest && g_restartToSettings.exchange(false,
                                                     std::memory_order_acq_rel);
     FlushAudioDiagnostics(true);
+    FlushVideoDiagnostics();
     CloseSavedLog();
     if (restartToSettings) RelaunchWithSettings();
     if (smokeTest && smokeCaptureFailed.load(std::memory_order_acquire))

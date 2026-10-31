@@ -8,6 +8,7 @@
 #ifdef LLCV_RECORDING
 #include "recording/EncoderSupport.h"
 #include "recording/RecordingStatus.h"
+#include "recording/StorageSpaceQuery.h"
 #endif
 
 namespace llcv::settings { enum class VideoPixelFormat; }
@@ -38,8 +39,9 @@ SettingsTab SettingsTabFromNavigationIndex(int index);
 int SettingsNavigationIndex(SettingsTab tab);
 
 // UI-thread-only, non-owning control handles. The dialog owns the HWNDs and
-// deletes uiFonts after its children have been destroyed. Hardware discovery,
-// asynchronous workers and persistent settings deliberately do not belong here.
+// deletes uiFonts after its children have been destroyed. Device discovery and
+// persistent settings belong to the controller. The storage label alone owns
+// a session-local asynchronous query, independent of capture and HWND lifetime.
 struct SettingsControls {
     // Transient UI only: never persisted, and never read by capture/recording.
     bool frameOptionsOpen = false;
@@ -66,8 +68,11 @@ struct SettingsControls {
     bool recordingProbeFailed=false;
     bool recordingStorageReady=false;
     bool recordingStorageFromSnapshot=false;
+    bool recordingStoragePending=false;
     std::wstring recordingStorageFolder;
     std::wstring recordingStoragePath;
+    // Session-owned, lifetime-safe storage query; its worker never sees HWNDs.
+    std::unique_ptr<SettingsModeCache<recording::StorageSpace>> recordingStorageQuery;
     std::vector<HWND> recordingControls;
     std::array<HWND,3> recordingCodecs{};
     HWND recVideoTitle{},recSaveTitle{},recCodecLabel{},recStatus{},recEncoderLabel{},recEncoder{};
@@ -101,6 +106,8 @@ struct SettingsControls {
     HWND guideDiagnosticsTitle = nullptr;
     HWND guideDiagnosticsText = nullptr;
     HWND guideLogFolderButton = nullptr;
+    HWND guideReportButton = nullptr;
+    bool reportPending = false;
     HWND screenshotClipboardCheck = nullptr;
     HWND capture40Check = nullptr;
     HWND unlistedFpsCheck = nullptr;

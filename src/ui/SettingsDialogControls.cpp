@@ -7,7 +7,9 @@
 #include <commctrl.h>
 #include <algorithm>
 #include <cwctype>
+#include <cwchar>
 #include <string>
+#include <vector>
 
 namespace llcv::settings_ui {
 using namespace control_id;
@@ -48,6 +50,30 @@ void PopulateCaptureDevicePicker(HWND picker, std::span<const capture::DeviceInf
         if (devices[i].id == selected) choice = row;
     }
     SendMessageW(picker, CB_SETCURSEL, choice, 0);
+}
+
+void PopulateNisSharpnessPicker(HWND picker, int selectedPercent) {
+    const int selected = std::clamp(selectedPercent, 0, 100);
+    std::vector<int> choices{0, 10, 15, 20, 30, 50, 100};
+    const auto position = std::lower_bound(choices.begin(), choices.end(), selected);
+    // Preserve an exact saved value without restoring the old 101-item list.
+    if (position == choices.end() || *position != selected) choices.insert(position, selected);
+    SendMessageW(picker, CB_RESETCONTENT, 0, 0);
+    for (int percent : choices) {
+        wchar_t label[16]{};
+        swprintf_s(label, L"%.2f", double(percent) / 100.0);
+        const LRESULT row = SendMessageW(picker, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+        if (row < 0) continue;
+        SendMessageW(picker, CB_SETITEMDATA, row, percent);
+        if (percent == selected) SendMessageW(picker, CB_SETCURSEL, row, 0);
+    }
+}
+
+int SelectedNisSharpness(HWND picker) {
+    if (!IsWindow(picker)) return 15;
+    const LRESULT row = SendMessageW(picker, CB_GETCURSEL, 0, 0);
+    const LRESULT value = row == CB_ERR ? CB_ERR : SendMessageW(picker, CB_GETITEMDATA, row, 0);
+    return value >= 0 && value <= 100 ? int(value) : 15;
 }
 
 void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
@@ -462,15 +488,8 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
         initial.settings.cmaaNisEnabled ? 1 : initial.settings.vsrEnabled && !state->vsrGpuUnavailable ? 2 : 0, 0);
     state->nisSharpnessLabel = makeLabel(initial.english ? L"NIS sharpness" : L"NIS 선명도", 600, 448);
     state->nisSharpnessCombo = CreateWindowExW(0, L"COMBOBOX", nullptr, kSettingsDropdownStyle,
-        724, 448, 136, 180, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_NIS_SHARPNESS)), instance, nullptr);
-    // Exact hundredths allow saved values to round-trip without quantization.
-    for (int sharpness=0; sharpness<=100; ++sharpness) {
-        wchar_t label[16]{};
-        swprintf_s(label,L"%.2f",double(sharpness)/100.0);
-        SendMessageW(state->nisSharpnessCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
-    }
-    SendMessageW(state->nisSharpnessCombo,CB_SETCURSEL,
-        std::clamp(initial.settings.nisSharpnessPercent,0,100),0);
+        724, 448, 136, 230, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_NIS_SHARPNESS)), instance, nullptr);
+    PopulateNisSharpnessPicker(state->nisSharpnessCombo, initial.settings.nisSharpnessPercent);
     state->vsrGuideButton = CreateWindowExW(0, L"BUTTON",
         L"?",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
@@ -517,8 +536,8 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
         instance, nullptr);
     state->guideDiagnosticsText = CreateWindowExW(
         0, L"STATIC", initial.english
-            ? L"Enable log saving, then reproduce the issue.\r\nAttach the file from the logs folder when reporting it."
-            : L"로그 저장을 켠 뒤 증상을 다시 재현하세요.\r\n문의할 때 로그 폴더의 파일을 첨부해 주세요.",
+            ? L"Enable log saving and reproduce the issue.\r\nCreate a report ZIP to review and attach manually."
+            : L"로그 저장을 켠 뒤 증상을 다시 재현하세요.\r\n진단자료 ZIP을 확인한 뒤 직접 첨부해 주세요.",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         505, 84, 360, 70, hwnd, nullptr, instance, nullptr);
     state->guideLogFolderButton = CreateWindowExW(
@@ -528,6 +547,10 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
         reinterpret_cast<HMENU>(
             static_cast<INT_PTR>(IDC_SETTINGS_OPEN_LOG_FOLDER)),
         instance, nullptr);
+    state->guideReportButton = CreateWindowExW(
+        0, L"BUTTON", initial.english ? L"Create report ZIP" : L"진단자료 ZIP 만들기",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP, 700, 248, 175, 26, hwnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_CREATE_REPORT)), instance, nullptr);
     std::wstring versionLabel = text(L"현재 버전");
     versionLabel += L"  ";
     versionLabel += initial.versionLabel;
@@ -1029,7 +1052,7 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
         state->guideShortcutsTitle, state->shortcutResetButton, state->guideVideoHint,
         state->guideDiagnosticsTitle, state->guideDiagnosticsText,
         state->saveLogCheck, state->showConsoleCheck, state->guideLogFolderButton,
-        state->guideLsButton,
+        state->guideReportButton, state->guideLsButton,
 
         state->appPreferencesSection, state->languageLabel, state->languageCombo,
         state->themeLabel, state->themeCombo,

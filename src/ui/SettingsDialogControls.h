@@ -76,6 +76,7 @@ inline constexpr int IDC_SETTINGS_SDR_RANGE = 2079;
 inline constexpr int IDC_SETTINGS_SDR_RANGE_HELP = 2080;
 inline constexpr int IDC_SETTINGS_FRAME_OPTIONS = 2081;
 inline constexpr int IDC_SETTINGS_FRAME_OPTIONS_CLOSE = 2082;
+inline constexpr int IDC_SETTINGS_CREATE_REPORT = 2084;
 inline constexpr int IDC_SETTINGS_SHORTCUT_FIRST = 2100;
 } // namespace control_id
 
@@ -110,6 +111,8 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
                                   const SettingsControlPopulation& population);
 void PopulateCaptureDevicePicker(HWND picker, std::span<const capture::DeviceInfo> devices,
                                  const std::wstring& selected, bool audio, bool english);
+void PopulateNisSharpnessPicker(HWND picker, int selectedPercent);
+int SelectedNisSharpness(HWND picker);
 void ApplyResolutionSelections(const SettingsControls& state,
                               std::span<const settings::VideoPresetInfo> presets,
                               settings::AppSettings& settings);

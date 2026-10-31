@@ -5,7 +5,7 @@
 A low-latency Windows viewer for video and audio from HDMI capture devices.
 Use it to play console games without OBS, or listen in audio-only mode.
 
-**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.1.9.md) · [한국어](README.md)
+**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.2.0.md) · [한국어](README.md)
 
 <br>
 
@@ -17,12 +17,12 @@ Use it to play console games without OBS, or listen in audio-only mode.
 
 <br>
 
-## What's new in 2.1.9
+## What's new in 2.2.0
 
-Adds **RGB24 / XRGB (RGB32)** SDR playback, source screenshots, NVIDIA VSR requests and recording.
-RGB recording checks conversion headroom before creating a file and uses bounded frame-buffer memory.
-Format rejection diagnostics and crash-recovery verification have also been strengthened.
-[Video settings](docs/VIDEO.md) · [Full release notes](docs/release-notes-v2.1.9.md)
+Adds **local diagnostic report ZIPs** and improves **upstream crossbar connections** for multi-input devices.
+Help fits without scrolling, and NIS sharpness choices are simplified.
+Settings/recording stability, diagnostic logging and latest-frame selection in VSync are also improved.
+[Diagnostics and logs](docs/DIAGNOSTICS.md) · [Full release notes](docs/release-notes-v2.2.0.md)
 
 <br>
 
@@ -57,6 +57,7 @@ These are the default keys; change them under **Guide & logs**.
 - WASAPI Shared/Exclusive, ASIO, console LPCM 5.1, and audio-only mode
 - NV12/YUY2/MJPEG/RGB SDR/stereo MP4 recording — codec, quality, volume, pause and splitting
 - Source-resolution PNG screenshots with optional clipboard copy
+- Local diagnostic ZIPs with logs/settings and partial privacy masking; no automatic upload
 - Sleep prevention during playback, with display sleep allowed in audio-only mode
 - Dark/light themes, fullscreen, window size locking, volume controls/playback mute, Korean/English UI
 

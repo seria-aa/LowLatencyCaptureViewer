@@ -5,7 +5,7 @@
 HDMI 캡처보드로 들어오는 영상과 소리를 재생하는 Windows용 저지연 뷰어입니다.
 OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리만 들을 수 있습니다.
 
-**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.1.9.md) · [English](README.en.md)
+**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.2.0.md) · [English](README.en.md)
 
 <br>
 
@@ -17,12 +17,12 @@ OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리�
 
 <br>
 
-## 2.1.9 업데이트
+## 2.2.0 업데이트
 
-**RGB24 / XRGB (RGB32)** SDR 재생·원본 스크린샷·NVIDIA VSR 요청·녹화를 추가했습니다.
-RGB 녹화는 시작 전 변환 속도를 확인하고 프레임 버퍼 메모리를 제한합니다.
-입력 형식 거부 원인 안내와 강제 종료 복구 검증도 보완했습니다.
-[영상 설정](docs/VIDEO.ko.md) · [전체 변경 내역](docs/release-notes-v2.1.9.md)
+**진단자료 ZIP 만들기**와 다중 입력 장치의 **크로스바 연결 보완**을 추가했습니다.
+도움말을 스크롤 없이 표시하고 NIS 선명도 선택을 간소화했습니다.
+설정·녹화 안정성과 진단 로그 처리, VSync의 최신 프레임 선택도 개선했습니다.
+[진단·로그](docs/DIAGNOSTICS.ko.md) · [전체 변경 내역](docs/release-notes-v2.2.0.md)
 
 <br>
 
@@ -57,6 +57,7 @@ Windows 10/11 x64와 캡처보드 드라이버가 필요합니다.
 - WASAPI Shared·Exclusive, ASIO, 콘솔 LPCM 5.1, 오디오 전용 모드
 - NV12/YUY2/MJPEG/RGB SDR·스테레오 MP4 녹화 — 코덱·품질·음량, 일시정지, 자동 분할
 - 입력 해상도 PNG 스크린샷과 클립보드 복사
+- 진단자료 ZIP 만들기 — 로그·설정 수집, 일부 개인정보 가림, 자동 전송 없음
 - 재생 중 자동 절전 방지 — 오디오 전용 모드에서는 화면 꺼짐 허용
 - 다크·라이트 테마, 전체화면, 창 크기 고정, 음량 조절·재생 음소거, 한국어·영어
 

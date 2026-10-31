@@ -74,6 +74,7 @@ If encoding affects playback or cannot keep up, lower the recording resolution/f
 ## Storage and file protection
 
 The default folder is **Videos → LLCV**. Choose another folder in settings.
+The idle Recording tab also queries space asynchronously, so a slow or unresponsive location does not hold up the settings window.
 Remaining space updates during recording. If it cannot be checked for the displayed folder, the app shows it as unavailable, not as zero.
 Space queries run asynchronously on the existing storage worker, so encoding does not wait for them. Updates can lag; the finalization reserve and detection of actual write failures remain in place.
 Long storage stalls can still exhaust bounded queues or delay finalization.
@@ -83,6 +84,7 @@ Closing during recording asks for confirmation, then finishes saving. If saving 
 H.264, HEVC and AV1 all use fragmented MP4. Already-written fragments may survive an unexpected exit, but the final fragment, OS write cache and disk failures are not fully protected. Keep the file and check it with a compatible player. This is not automatic recovery or a lossless guarantee.
 
 Playback settings keep their existing location. Recording preferences are separate; the internal filename `recording-prototype.ini` is retained for compatibility with prototype users. Copies of the installation folder share settings within the same Windows account.
+If an individual recording preference is invalid, only that field falls back to its default. Valid folder/codec/encoder choices survive; loading does not rewrite the source file. Legacy files missing resolution/FPS caps retain their original match-capture interpretation.
 
 ---
 

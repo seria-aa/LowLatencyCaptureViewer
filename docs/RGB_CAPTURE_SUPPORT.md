@@ -84,13 +84,9 @@ SDR, settings/profile isolation and recording UI. These overlap the broad run, n
 228 unique tests. Local evidence is in outputs/rgb-vsr-recording/: regression.log/.xml,
 post-audit-tests.log, post-audit.xml, settings-view-direct.log and optimized-converter.log.
 
-Tests used isolated profiles; no new physical capture test or NVIDIA profile write was
-performed. The actual settings.ini SHA256 observed during this work remained
-20AB4EEDB82DCB67D63274BDBCF57A7E26F93842395ECC17400965E4F6D3DF00;
-recording-prototype.ini remained
-2D1C8F5D136F8A812E78C5558C32C9BC690751923AAB20D8A77A0BEB144C406A.
-The work remains uncommitted on the existing feature branch; no release/version bump,
-installation, merge or publication was performed.
+Tests used isolated profiles. SHA-256 comparisons confirmed that the saved user and
+recording profiles were unchanged. This validation did not include a new physical
+capture test or any NVIDIA profile changes.
 
 ## Audit hardening (2026-10-29)
 
@@ -166,8 +162,8 @@ the full integration executable passed (admission-integration.log). This worker
 preflight uses its own textured probe/range/context and is not directly comparable
 to the standalone constant-input converter benchmark above.
 
-The real settings.ini and recording-prototype.ini hashes still match the values
-above; the existing build-v2180-release executable also remains unchanged at
+SHA-256 comparisons confirmed that both saved user profiles were unchanged.
+The existing build-v2180-release executable also remained unchanged at
 24BCC099FABB2544B24EFE97E0C96FB649E8AC524A626CABE7C423C2A8BCD331.
-No new physical capture/VSR activation/RGB32-device validation, release, commit or
-merge was performed. Existing missing-HDR-metadata limitations remain unchanged.
+This audit did not include additional physical capture, VSR activation or RGB32-device
+validation. Existing missing-HDR-metadata limitations remain unchanged.

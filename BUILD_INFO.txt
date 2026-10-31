@@ -1,4 +1,17 @@
-LLCV v2.1.9 x64 (continued from the v0.14.2 rework)
+LLCV v2.2.0 x64 (continued from the v0.14.2 rework)
+
+v2.2.0 Diagnostics, capture compatibility and settings stability
+-------------------------------------------------------------
+- Adds a local diagnostic ZIP with settings/logs, report-local device aliases and no automatic upload.
+- Connects upstream WDM crossbars during playback startup and applicable settings mode queries.
+- Preserves input routing and stops startup if a failed connection cannot restore the graph.
+- Fits F1 help to monitor work areas and reduces NIS sharpness choices while retaining custom values.
+- Bounds waits for outstanding settings probes and keeps recording-space queries off the UI thread.
+- Recovers invalid recording preferences per field, preserving other valid saved selections.
+- Selects the latest frame after DXGI readiness in Flip VSync; default/exclusive output stays unchanged.
+- Defers steady playback diagnostics and disables QuickEdit for the app-created console.
+- Cleans up code and expands regression coverage without changing recording defaults or capture formats.
+- See tests/RELEASE_V2_2_0_AUDIT.md for preparation status and pending release gates.
 
 v2.1.9 RGB input and recording safeguards
 ------------------------------------------

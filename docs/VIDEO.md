@@ -38,6 +38,14 @@ composition, monitor, and input device add latency outside the application.
 
 ## Mode detection
 
+For applicable multi-input WDM devices, settings mode queries and playback startup
+connect the upstream crossbar before using the video pin. Settings uses a temporary
+graph that is never run. The app keeps the existing physical-input routing; this is
+not automatic HDMI/component input selection. Clearly audio-typed pins are excluded,
+and ambiguous input layouts are skipped with a log rather than guessed.
+If a connection fails, newly added filters are removed. An unrestorable graph stops
+playback startup or mode reporting instead of being used as a valid connection.
+
 Changing the capture device or resolution updates the pixel-format and
 frame-rate lists using background queries and cached results. Results are reused
 while settings remain open; **Refresh** requests a fresh device/capability query
@@ -243,6 +251,13 @@ Direct display and a fixed latency improvement are not guaranteed on every syste
 Both low-latency modes may show tearing. **VSync** reduces tearing by
 waiting for display synchronization and can add a refresh interval of latency.
 
+In Flip **VSync** mode, the viewer waits for swapchain readiness before taking the
+latest captured frame for upload. Capture keeps only its latest frame during that wait;
+graph errors and shutdown/power notifications remain serviced. If readiness is unavailable
+or stays unsignaled for two seconds while input is ready, the viewer logs a fallback to the
+original presentation path without changing settings. This does not add a wait to the default
+low-latency, exclusive fullscreen or compatibility paths, and is not a measured latency result.
+
 On desktops with mixed monitor refresh rates, Windows DWM composition can alter
 frame pacing or introduce occasional micro-stutter when the window moves between
 displays. Low-latency presentation avoids an extra VSync wait but cannot remove
@@ -399,6 +414,8 @@ on another monitor does not unexpectedly reopen fullscreen.
 Select **Off / CMAA2 → NIS / NVIDIA VSR** under **Video → Upscaling**.
 CMAA2 → NIS smooths SDR source edges before enlargement up to 2× per axis,
 with default sharpness **0.15**. It is opt-in and mutually exclusive with VSR.
+Sharpness choices are 0.00, 0.10, 0.15, 0.20, 0.30, 0.50, and 1.00.
+An existing saved value outside these presets remains a separate choice without rounding.
 HDR, native-size output, downscaling and enlargement beyond 2× use the original path.
 Increase display size if it currently matches capture.
 Recordings and screenshots are not filtered; OSD is drawn afterward.

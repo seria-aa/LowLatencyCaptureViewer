@@ -50,7 +50,13 @@ See tests/RELEASE_V2_1_8_AUDIT.md for that validation scope.
 The 2.1.9 additions cover RGB negotiation/orientation, source PNGs, GPU repacking,
 VSR routing, recording conversion/color, admission budgets, no-file rejection,
 strict crash-tail classification and package exclusions.
-See tests/RELEASE_V2_1_9_AUDIT.md for the current preparation evidence.
+See tests/RELEASE_V2_1_9_AUDIT.md for that validation scope.
+
+The 2.2.0 additions cover diagnostic ZIP/privacy checks, adaptive help layout,
+settings-query lifetimes and startup deadlines, recording preference recovery,
+VSync readiness and crossbar connection safeguards.
+Current preparation status and pending release gates are recorded in
+tests/RELEASE_V2_2_0_AUDIT.md; earlier development runs are not a final release pass.
 
 NIS/CMAA2/UYVY/RGB24 shaders are compiled into the executable at build time. Runtime shader compilation
 and source files are not required. NIS/CMAA2 sources, modifications and licenses are in
@@ -95,7 +101,7 @@ report that as complete coverage. These programs are never included in packages.
 
 <br>
 
-A playback-only developer build can use `-DLLCV_RECORDING=OFF` without FFmpeg; it is not the 2.1.9 release package.
+A playback-only developer build can use `-DLLCV_RECORDING=OFF` without FFmpeg; it is not the 2.2.0 release package.
 The mux runtime and `ffmpeg-licenses` folder must remain beside the executable.
 
 The held audio-input recovery prototype is **off by default**. For private diagnosis only,
@@ -109,7 +115,7 @@ It is not a confirmed fix for capture-device silence.
 ## Installer and portable ZIP
 
 After the Release build, run these commands from the repository root. These
-examples package v2.1.9 using the `build\Release` output above; the build-directory
+examples package v2.2.0 using the `build\Release` output above; the build-directory
 override is required because the release scripts normally use a versioned
 build directory.
 
@@ -118,11 +124,11 @@ chcp.com 65001 > $null
 & "C:\Program Files\Inno Setup 7\ISCC.exe" `
   "--define=BuildDir=..\build\Release" ".\installer\LowLatencyCaptureViewer.iss"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
-  -Version 2.1.9 -BuildDir ..\build\Release -OutputDir outputs\v2.1.9
+  -Version 2.2.0 -BuildDir ..\build\Release -OutputDir outputs\v2.2.0
 ```
 
-The outputs are `outputs\v2.1.9\LowLatencyCaptureViewer_v2.1.9_Setup.exe`
-and `outputs\v2.1.9\LowLatencyCaptureViewer_v2.1.9_x64.zip`. When preparing
+The outputs are `outputs\v2.2.0\LowLatencyCaptureViewer_v2.2.0_Setup.exe`
+and `outputs\v2.2.0\LowLatencyCaptureViewer_v2.2.0_x64.zip`. When preparing
 another version, update the versioned release files first; changing a ZIP name
 does not update the executable. See the [release checklist](RELEASING.md).
 

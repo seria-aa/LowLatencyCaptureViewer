@@ -1,5 +1,7 @@
 #include "capture/LatestVideoSample.h"
 #include "capture/DirectShowGraphResources.h"
+#include "video/PresentationReadiness.h"
+#include "video/PresentationPolicy.h"
 
 #include <cstdio>
 #include <thread>
@@ -330,7 +332,83 @@ static void TestPartialRunTeardown(bool explicitReset) {
 #include "VideoMailboxStress.inl"
 #include "VideoSampleFormatTests.inl"
 
+static void TestPresentationAdmission() {
+    using Reason = llcv::capture::CaptureGraphEvents::WaitReason;
+    using Mode = llcv::settings::PresentationMode;
+    Check(llcv::presentation::UsesPresentationReadiness(Mode::VSync) &&
+              !llcv::presentation::UsesPresentationReadiness(Mode::AllowTearing) &&
+              !llcv::presentation::UsesPresentationReadiness(Mode::Compatibility) &&
+              !llcv::presentation::UsesPresentationReadiness(Mode::ExclusiveFullscreen),
+          "pacing changes only Flip VSync");
+    HANDLE frame = CreateEventW(nullptr, FALSE, FALSE, nullptr),
+           wake = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE slot = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    auto* source = new TestGraphEvents;
+    llcv::capture::CaptureGraphEvents events;
+    events.Initialize(static_cast<IMediaEvent*>(source));
+    llcv::presentation::Readiness admission;
+    admission.Reset(slot);
+    {
+        llcv::capture::LatestVideoSample latest(128, frame);
+        auto* first = new Sample(128, 1);
+        latest.Push(first);
+        first->Release();
+        Check(events.Wait(frame, 0, wake, admission.WaitHandle()) == S_OK &&
+                  events.LastWaitReason() == Reason::Frame,
+              "capture notification alone is not presentation admission");
+        Check(!admission.Ready(), "input is left in mailbox while DXGI is busy");
+        for (unsigned id = 2; id <= 32; ++id) {
+            auto* sample = new Sample(128, id);
+            latest.Push(sample);
+            sample->Release();
+        }
+        Check(events.Wait(nullptr, 0, wake, admission.WaitHandle()) == S_FALSE,
+              "repeated capture notifications cannot spin or bypass presentation wait");
+        SetEvent(wake);
+        SetEvent(slot);
+        Check(events.Wait(nullptr, 0, wake, slot) == S_OK &&
+                  events.LastWaitReason() == Reason::Wake,
+              "lifecycle wake has priority and leaves presentation token untouched");
+        ResetEvent(wake);
+        source->Push(EC_ERRORABORT, E_ACCESSDENIED);
+        Check(events.Wait(nullptr, 0, wake, slot) == E_ACCESSDENIED,
+              "graph failure wins while waiting for presentation");
+        Check(events.Wait(nullptr, 0, wake, slot) == S_OK &&
+                  events.LastWaitReason() == Reason::PresentationReady,
+              "ready token wakes the graph-aware wait");
+        admission.Signaled();
+        int64_t arrived = 0;
+        auto* selected = latest.TakeLatest(arrived);
+        Check(selected && static_cast<Sample*>(selected)->Sequence() == 32,
+              "sample selected AFTER readiness is newest sequence 32, not stale sequence 1");
+        if (selected)
+            selected->Release();
+        Check(admission.Ready() && !admission.WaitHandle() && admission.Poll() == S_OK,
+              "unused credit survives decoder/no-picture path");
+        admission.Presented();
+        Check(!admission.Ready() && admission.Poll() == S_FALSE,
+              "one real Present consumes one credit");
+        SetEvent(slot);
+        Check(admission.Poll() == S_OK, "readmission consumes a fresh ready token");
+        admission.Bypass();
+        DWORD flags = 0;
+        Check(
+            !admission.Enabled() && admission.Ready() && !admission.WaitHandle() &&
+                GetHandleInformation(slot, &flags),
+            "broken readiness signal can fall back without closing a handle still owned by the chain");
+    }
+    events.Reset();
+    source->Release();
+    admission.Reset();
+    DWORD flags = 0;
+    Check(!GetHandleInformation(slot, &flags), "reset closes owned DXGI readiness handle");
+    Check(admission.Ready() && !admission.WaitHandle(), "disabled modes have no wait or handle");
+    Check(liveSamples == 0, "admission has no leaked sample ownership");
+    CloseHandle(frame);
+    CloseHandle(wake);
+}
 int main(int argc, char** argv) {
+    TestPresentationAdmission();
     if (argc == 2 && std::string(argv[1]) == "--stress") return RunMailboxStress();
     if (argc == 2 && std::string(argv[1]) == "--format") { TestVideoSampleChanges(); return failures ? 1 : 0; }
     if (argc == 2 && std::string(argv[1]) == "--benchmark") return BenchmarkSampleGuard();

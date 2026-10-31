@@ -265,6 +265,7 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
         pages.Check(s->saveLogCheck);
         pages.Check(s->showConsoleCheck);
         pages.Button(s->guideLogFolderButton);
+        pages.Button(s->guideReportButton);
         pages.Button(s->guideLsButton);
         break;
     case SettingsTab::Updates:

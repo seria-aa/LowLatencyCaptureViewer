@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <set>
+#include <future>
 using namespace llcv::settings_ui;
 static void Check(bool value,const char* what){if(!value){printf("FAIL %s\n",what);std::abort();}}
 static std::wstring Text(HWND control){wchar_t text[512]{};GetWindowTextW(control,text,512);return text;}
@@ -14,10 +15,35 @@ static LRESULT CALLBACK Changes(HWND h,UINT m,WPARAM w,LPARAM l,UINT_PTR,DWORD_P
 static LRESULT CALLBACK TextChanges(HWND h,UINT m,WPARAM w,LPARAM l,UINT_PTR,DWORD_PTR data){
     if(m==WM_SETTEXT)++*reinterpret_cast<int*>(data);return DefSubclassProc(h,m,w,l);
 }
+static void TestSlowStorage() {
+    auto owner=CreateWindowW(L"STATIC",L"Async storage test",WS_POPUP,0,0,1000,650,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+    SettingsControls s;CreateRecordingSettings(&s,owner);s.activeTab=SettingsTab::Recording;
+    auto release=std::make_shared<std::promise<void>>();auto released=release->get_future().share();
+    auto calls=std::make_shared<std::atomic<int>>(0);
+    s.recordingStorageQuery=std::make_unique<SettingsModeCache<llcv::recording::StorageSpace>>(
+        [released,calls](const ModeQueryKey& key){++*calls;released.wait();return llcv::recording::StorageSpace{true,key.device==L"new-folder"?42000000000ull:99000000000ull};},[]{});
+    auto start=GetTickCount64();s.recordingOptions.folder=L"old-folder";ShowRecordingSettings(&s);
+    Check(GetTickCount64()-start<100,"slow disk query does not block initial UI refresh");
+    auto deadline=GetTickCount64()+3000;while(!*calls&&GetTickCount64()<deadline)Sleep(1);
+    Check(*calls==1,"injected slow query entered");
+    s.recordingOptions.folder=L"new-folder";ShowRecordingSettings(&s);
+    for(int i=0;i<20;++i)ShowRecordingSettings(&s);
+    Check(*calls==1&&Text(s.recSpace).find(L"GB")==std::wstring::npos,"slow query coalesces and old folder space is not displayed");
+    s.recordingSnapshot.busy=true;s.recordingSnapshot.path=L"new-folder\\session.mp4";
+    s.recordingSnapshot.freeBytesKnown=true;s.recordingSnapshot.freeBytes=31000000000ull;
+    ShowRecordingSettings(&s);release->set_value();Sleep(20);ShowRecordingSettings(&s);
+    Check(Text(s.recSpace).find(L"31.0 GB")!=std::wstring::npos,"late idle result cannot replace busy worker measurement");
+    s.recordingSnapshot.busy=false;ShowRecordingSettings(&s);
+    deadline=GetTickCount64()+3000;
+    while(s.recordingStoragePending&&GetTickCount64()<deadline){Sleep(2);ShowRecordingSettings(&s);}
+    Check(Text(s.recSpace).find(L"42.0 GB")!=std::wstring::npos,"completion refresh applies only current folder result");
+    s.recordingStorageQuery.reset();DestroyWindow(owner);
+}
 int main(){
     setvbuf(stdout,nullptr,_IONBF,0);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES};InitCommonControlsEx(&controls);
+    TestSlowStorage();
     for(bool english:{false,true})for(UINT dpi:{96u,120u,144u,192u}){
         auto owner=CreateWindowW(L"STATIC",L"Recording UI test",WS_OVERLAPPEDWINDOW,0,0,2000,1400,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
         SettingsControls s;s.english=english;s.activeTab=SettingsTab::VideoWindow;
@@ -60,6 +86,12 @@ int main(){
 
         s.activeTab=SettingsTab::Recording;ShowRecordingSettings(&s);
         Check(!Text(s.recSpace).empty(),"opening recording page populates storage information");
+        const auto waitStorage=[&] {
+            const auto deadline=GetTickCount64()+3000;
+            while(s.recordingStoragePending && GetTickCount64()<deadline){Sleep(5);ShowRecordingSettings(&s);}
+            Check(!s.recordingStoragePending,"asynchronous space query completes");
+        };
+        waitStorage();
         SetWindowTextW(s.recSpace,L"Storage query sentinel");
         RefreshRecordingSettings(&s);ShowRecordingSettings(&s);
         Check(Text(s.recSpace)==L"Storage query sentinel","unrelated option refresh does not repeat disk query");
@@ -108,6 +140,7 @@ int main(){
         s.recordingSnapshot.busy=false;ShowRecordingSettings(&s);
         Check(Text(s.recSpace).find(L"987654.0 GB")==std::wstring::npos,
             "recording completion refreshes selected folder instead of stale session storage");
+        waitStorage();
         SetWindowTextW(s.recSpace,L"Idle storage sentinel");
         ShowRecordingSettings(&s);
         Check(Text(s.recSpace)==L"Idle storage sentinel","idle polling preserves cached storage");

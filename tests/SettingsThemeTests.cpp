@@ -485,7 +485,7 @@ void CheckActualTabOrder() {
             case SettingsTab::GuideDiagnostics:
                 expected.push_back(c.shortcutResetButton);
                 expected.insert(expected.end(), c.guideKeys.begin(), c.guideKeys.end());
-                expected.insert(expected.end(), {c.saveLogCheck, c.showConsoleCheck, c.guideLogFolderButton, c.guideLsButton});
+                expected.insert(expected.end(), {c.saveLogCheck, c.showConsoleCheck, c.guideLogFolderButton, c.guideReportButton, c.guideLsButton});
                 break;
             case SettingsTab::Updates:
                 expected.insert(expected.end(), {c.languageCombo, c.themeCombo, c.skipStartupCheck,

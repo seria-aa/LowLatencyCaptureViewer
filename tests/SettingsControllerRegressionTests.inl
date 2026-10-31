@@ -187,9 +187,8 @@ static void TestExplicitCaptureRateSelection() {
     state.nisSharpnessCombo = child(L"COMBOBOX",CBS_DROPDOWNLIST,IDC_SETTINGS_NIS_SHARPNESS);
     for(const auto* label:{L"Off",L"CMAA2 -> NIS",L"NVIDIA VSR"})
         SendMessageW(state.upscalerCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
-    for(int i=0;i<=100;++i)SendMessageW(state.nisSharpnessCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"strength"));
+    llcv::settings_ui::PopulateNisSharpnessPicker(state.nisSharpnessCombo,25);
     SendMessageW(state.upscalerCombo,CB_SETCURSEL,1,0);
-    SendMessageW(state.nisSharpnessCombo,CB_SETCURSEL,25,0);
     state.startButton = child(L"BUTTON", BS_PUSHBUTTON, IDC_SETTINGS_START);
     state.audioOnlyCheck = child(L"BUTTON", BS_AUTOCHECKBOX, IDC_SETTINGS_AUDIO_ONLY);
     state.capture40Check = child(L"BUTTON", BS_AUTOCHECKBOX, IDC_SETTINGS_CAPTURE_40);
@@ -682,9 +681,8 @@ static void TestSettingsBufferModeTransitions() {
         0,0,200,150,hwnd,nullptr,wc.hInstance,nullptr);
     for(const auto* label:{L"Off",L"CMAA2 -> NIS",L"NVIDIA VSR"})
         SendMessageW(state.upscalerCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
-    for(int i=0;i<=100;++i)SendMessageW(state.nisSharpnessCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"strength"));
+    llcv::settings_ui::PopulateNisSharpnessPicker(state.nisSharpnessCombo,25);
     SendMessageW(state.upscalerCombo,CB_SETCURSEL,1,0);
-    SendMessageW(state.nisSharpnessCombo,CB_SETCURSEL,25,0);
     SendMessageW(state.preventSleepCheck, BM_SETCHECK, BST_UNCHECKED, 0);
     FinishSettingsDialog(hwnd, &state, true);
     Require(g_settings.cmaaNisEnabled && !g_settings.vsrEnabled && g_settings.nisSharpnessPercent==25 &&
