@@ -420,6 +420,7 @@ LoadResult LoadFromIni(const std::wstring& path) {
     settings.cmaaNisEnabled = ReadBool(path, L"Video", L"CmaaNisEnabled");
     const int nisSharpness = ReadInt(path, L"Video", L"NisSharpness", 15);
     settings.nisSharpnessPercent = nisSharpness >= 0 && nisSharpness <= 100 ? nisSharpness : 15;
+    settings.cmaaPreserve = ReadInt(path, L"Video", L"CmaaPreserve", 0) == 1;
     if (settings.cmaaNisEnabled) settings.vsrEnabled = false;
     settings.preferredUpscaler = ReadInt(path, L"Video", L"PreferredUpscaler", 1) == 0
         ? UpscalingMethod::NvidiaVsr : UpscalingMethod::CmaaNis;
@@ -598,6 +599,7 @@ static DWORD WriteSettings(const std::wstring& file, const AppSettings& settings
     WriteInt(path, L"Video", L"CmaaNisEnabled", settings.cmaaNisEnabled ? 1 : 0);
     WriteInt(path, L"Video", L"PreferredUpscaler", static_cast<int>(SelectedUpscaler(settings)));
     WriteInt(path, L"Video", L"NisSharpness", std::clamp(settings.nisSharpnessPercent, 0, 100));
+    WriteInt(path, L"Video", L"CmaaPreserve", settings.cmaaPreserve ? 1 : 0);
     WriteInt(path, L"Diagnostics", L"ShowConsole",
              settings.showDiagnosticConsole ? 1 : 0);
     return path.error;

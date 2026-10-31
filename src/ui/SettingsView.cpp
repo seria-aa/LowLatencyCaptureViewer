@@ -56,9 +56,7 @@ void RefreshShortcutCaptions(SettingsControls* state) {
         : L"키 버튼을 눌러 변경\n* 영상 모드 전용");
     for (const auto& [control,source]:state->shortcutCaptionTemplates)
         SetSettingsText(control,shortcuts::Expand(source.c_str(),state->shortcutBindings).c_str());
-    SetSettingsText(state->vsrStatus, SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)==1
-        ? (state->english ? L"SDR only" : L"SDR 전용")
-        : shortcuts::Expand(L"SDR / HDR10 · VSR: F6",state->shortcutBindings).c_str());
+    SetSettingsText(state->vsrStatus,shortcuts::Expand(L"SDR / HDR10 · VSR: F6",state->shortcutBindings).c_str());
     if (!state->uiFonts.empty()) LayoutSettingsControls(state,state->layoutDpi);
 }
 ShortcutLayout MeasureShortcutLayout(const SettingsControls* state,UINT dpi,int rowWidth) {
@@ -368,12 +366,12 @@ void ApplySettingsFont(SettingsControls* state, HWND hwnd,
 // Checkbox captions vary substantially between Korean and English.  Measure
 // the actual current UI font so a neighbouring help button stays attached to
 // its option at every DPI instead of relying on a fragile hard-coded x value.
-static int SettingsCheckboxWidthDip(HWND checkbox, UINT dpi) {
-    if (!checkbox) return 250;
+int SettingsCaptionWidthDip(HWND checkbox, UINT dpi) {
+    if (!checkbox) return 0;
     wchar_t text[512]{};
     GetWindowTextW(checkbox, text, ARRAYSIZE(text));
     HDC hdc = GetDC(checkbox);
-    if (!hdc) return 250;
+    if (!hdc) return 0;
     const HFONT font = reinterpret_cast<HFONT>(
         SendMessageW(checkbox, WM_GETFONT, 0, 0));
     const HGDIOBJ oldFont = font ? SelectObject(hdc, font) : nullptr;
@@ -381,13 +379,27 @@ static int SettingsCheckboxWidthDip(HWND checkbox, UINT dpi) {
     GetTextExtentPoint32W(hdc, text, static_cast<int>(wcslen(text)), &size);
     if (oldFont) SelectObject(hdc, oldFont);
     ReleaseDC(checkbox, hdc);
-    const int textWidthDip = MulDiv(
-        size.cx, USER_DEFAULT_SCREEN_DPI,
-        dpi ? dpi : USER_DEFAULT_SCREEN_DPI);
+    dpi=dpi ? dpi : USER_DEFAULT_SCREEN_DPI;
+    return static_cast<int>((size.cx*96+dpi-1)/dpi);
+}
+static int SettingsCheckboxWidthDip(HWND checkbox, UINT dpi) {
     // Checkbox glyph plus caption.  Keeping the HWND no wider than this is
     // important: a wide checkbox would overlap a nearby help button and
     // steal its clicks even when the button looks visually separate.
-    return std::min(29 + textWidthDip, 430);
+    return std::min(29 + SettingsCaptionWidthDip(checkbox,dpi), 430);
+}
+
+static void LayoutVideoHeadingControls(SettingsControls* state,UINT dpi) {
+    if(SettingsCompactLayout(state))return;
+    const auto heading=[dpi](HWND label,HWND help,int y,int helpY) {
+        PlaceSettingsControl(label,600,y,340,20,dpi);
+        PlaceSettingsControl(help,952,helpY,24,24,dpi);
+    };
+    heading(state->presentationLabel,state->presentationHelp,136,134);
+    // Center the 24-DIP button between the preceding field (ends at 386)
+    // and its own field (starts at 420), leaving five DIPs on either side.
+    heading(state->upscalerLabel,state->vsrGuideButton,392,391);
+    PlaceSettingsControl(state->vsrStatus,600,460,376,30,dpi);
 }
 
 static bool WindowBehaviorWarningNeeded(const SettingsControls* state) {
@@ -520,33 +532,22 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     place(state->frameOptionsHint, 200, 462, 344, 48);
 
     place(state->videoDisplaySection, 600, 108, 376, 20);
-    place(state->presentationLabel, 600, 136, 340, 20);
-    place(state->presentationHelp, 952, 134, 24, 24);
     place(state->presentationCombo, 600, 164, 376, 120);
     place(state->displayMonitorLabel, 600, 200, 376, 20);
     place(state->displayMonitorCombo, 600, 228, 376, 180);
     SendMessageW(state->displayMonitorCombo, CB_SETDROPPEDWIDTH, SettingsPixels(560, dpi), 0);
-    place(state->pixelCheck, 800, 262, 176, 24);
-    place(state->scalingLabel, 600, 264, 188, 20);
+    place(state->pixelCheck, 800, 326, 176, 24);
+    place(state->scalingLabel, 600, 264, 376, 20);
     place(state->scalingCombo, 600, 292, 376, 120);
-    // Continue the same 64-DIP label/field rhythm as capture and monitor.
-    // Keep conditional details in a reserved row so switching filters never
-    // moves the screenshot actions or changes the dialog's height.
-    place(state->displayResolutionLabel, 600, 328, 376, 20);
+    // Keep the existing field rhythm; tuning details have their own row.
+    place(state->displayResolutionLabel, 600, 328, 188, 20);
     place(state->displayResolutionCombo, 600, 356, 376, 150);
-    place(state->upscalerLabel, 600, 392, 340, 20);
     place(state->upscalerCombo, 600, 420, 376, 150);
-    place(state->nisSharpnessLabel, 600, 460, 132, 30);
-    place(state->nisSharpnessCombo, 740, 460, 88, 230);
-    place(state->vsrGuideButton, 952, 390, 24, 24);
-    const bool cmaaDetail=SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)==1;
-    place(state->vsrStatus, cmaaDetail ? 844 : 600, 460, cmaaDetail ? 132 : 376, 30);
-    // Raise the intact screenshot group, retaining clearance from the optional
-    // sharpness row and a 16-DIP footer margin without shrinking controls.
-    place(state->screenshotTitle, 600, 496, 376, 20);
-    place(state->screenshotClipboardCheck, 600, 522, 182, 26);
-    place(state->screenshotFolderButton, 794, 520, 182, 30);
-    place(state->screenshotHelp, 600, 556, 376, 18);
+    place(state->cmaaQualityLabel, 600, 456, 180, 20);
+    place(state->cmaaQualityCombo, 600, 484, 180, 140);
+    place(state->nisSharpnessLabel, 796, 456, 180, 20);
+    place(state->nisSharpnessCombo, 796, 484, 180, 230);
+    LayoutVideoHeadingControls(state,dpi);
 
     // Window behavior has its own page, avoiding a packed video/options wall.
     LayoutWindowBehaviorControls(state);
@@ -587,17 +588,23 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     place(state->skipStartupHint, 212, 244, 348, 56);
     place(state->preventSleepCheck, 600, 204, 376, 32);
     place(state->preventSleepHint, 628, 244, 348, 56);
-    place(state->updateTitle, 184, 328, 792, 24);
-    place(state->updateText, 184, 360, 730, 44);
-    place(state->checkForUpdatesCheck, 184, 416, 760, 32);
-    place(state->updateNowButton, 184, 460, 185, 32);
+    place(state->updateTitle, 184, 328, 376, 24);
+    place(state->updateText, 184, 360, 376, 44);
+    place(state->checkForUpdatesCheck, 184, 416, 376, 32);
+    place(state->updateNowButton, 184, 460, 180, 32);
+    place(state->releaseNotesButton, 380, 460, 180, 32);
     place(state->updateStatus, 184, 504, 792, 48);
+    // Screenshot preferences belong to the app page, not the display pipeline.
+    place(state->screenshotTitle, 600, 328, 376, 24);
+    place(state->screenshotClipboardCheck, 600, 362, 182, 26);
+    place(state->screenshotFolderButton, 794, 360, 182, 30);
+    place(state->screenshotHelp, 600, 408, 376, 18);
     for (HWND combo : {state->audioCombo, state->audioOutputCombo,
                         state->bufferCombo, state->volumeHudCombo,
                         state->driftCombo, state->pcmQueueCombo,
                         state->captureDeviceCombo, state->captureAudioDeviceCombo,
                         state->videoCombo, state->displayResolutionCombo, state->frameRateCombo,
-                        state->upscalerCombo, state->nisSharpnessCombo,
+                        state->upscalerCombo, state->cmaaQualityCombo, state->nisSharpnessCombo,
                         state->pixelFormatCombo, state->presentationCombo,
                         state->displayMonitorCombo, state->scalingCombo,
                         state->hdrChromaCombo, state->sdrRangeCombo, state->mjpegColorCombo,
@@ -791,20 +798,37 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     SetSettingsControlVisible(state->guideDiagnosticsText, guide);
     SetSettingsControlVisible(state->guideLogFolderButton, guide);
     SetSettingsControlVisible(state->guideReportButton, guide, !state->reportPending);
-    SetSettingsControlVisible(state->screenshotTitle, video);
+    SetSettingsControlVisible(state->screenshotTitle, updates);
     if (state->vsrGpuUnavailable && SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)==2)
         SendMessageW(state->upscalerCombo,CB_SETCURSEL,0,0);
     const bool cmaaNis=SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)==1;
-    if (!SettingsCompactLayout(state))
-        PlaceSettingsControl(state->vsrStatus, cmaaNis ? 844 : 600, 460,
-            cmaaNis ? 132 : 376, 30, state->layoutDpi);
+    // Keep option indices and the saved SDR preference stable across formats.
+    // Do not report CMAA2 as active when HDR runs NIS without AA.
+    wchar_t method[128]{};
+    SendMessageW(state->upscalerCombo,CB_GETLBTEXT,1,reinterpret_cast<LPARAM>(method));
+    const wchar_t* methodLabel=p010Selected?L"NIS (HDR10)":L"CMAA2 → NIS";
+    if(std::wcscmp(method,methodLabel)!=0) {
+        const auto selection=SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0);
+        SendMessageW(state->upscalerCombo,WM_SETREDRAW,FALSE,0);
+        SendMessageW(state->upscalerCombo,CB_DELETESTRING,1,0);
+        SendMessageW(state->upscalerCombo,CB_INSERTSTRING,1,reinterpret_cast<LPARAM>(methodLabel));
+        SendMessageW(state->upscalerCombo,CB_SETCURSEL,selection,0);
+        SendMessageW(state->upscalerCombo,WM_SETREDRAW,TRUE,0);
+        InvalidateRect(state->upscalerCombo,nullptr,FALSE);
+    }
+    SetSettingsText(state->cmaaQualityLabel,p010Selected
+        ? (state->english?L"CMAA2 (SDR)":L"CMAA2 보정 (SDR)")
+        : (state->english?L"CMAA2 correction":L"CMAA2 보정"));
+    LayoutVideoHeadingControls(state,state->layoutDpi);
     SetSettingsControlVisible(state->upscalerLabel, video);
     SetSettingsControlVisible(state->upscalerCombo, video);
+    SetSettingsControlVisible(state->cmaaQualityLabel, video && cmaaNis);
+    SetSettingsControlVisible(state->cmaaQualityCombo, video && cmaaNis, !p010Selected);
     SetSettingsControlVisible(state->nisSharpnessLabel, video && cmaaNis);
     SetSettingsControlVisible(state->nisSharpnessCombo, video && cmaaNis);
     SetSettingsControlVisible(state->vsrGuideButton, video);
     SetSettingsControlVisible(state->vsrStatus, video &&
-        (cmaaNis || SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)==2 || state->vsrGpuUnavailable));
+        !cmaaNis && (SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)==2 || state->vsrGpuUnavailable));
     SetSettingsControlVisible(state->displayResolutionLabel, video);
     SetSettingsControlVisible(state->displayResolutionCombo, video);
     SetSettingsText(state->videoLabel,
@@ -812,18 +836,19 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     SetSettingsText(state->pixelCheck, HasSplitResolution(*state)
         ? (state->english ? L"Lock display size" : L"표시 크기 고정")
         : L"Pixel-perfect (1:1)");
-    SetSettingsText(state->vsrStatus, cmaaNis ? (state->english ? L"SDR only" : L"SDR 전용") : shortcuts::Expand(state->vsrGpuUnavailable
+    SetSettingsText(state->vsrStatus, shortcuts::Expand(state->vsrGpuUnavailable
         ? (state->english ? L"VSR requires an NVIDIA GPU" : L"VSR은 NVIDIA GPU가 필요합니다")
         : L"SDR / HDR10 · VSR: F6", state->shortcutBindings).c_str());
-    SetSettingsControlVisible(state->screenshotClipboardCheck, video);
-    SetSettingsControlVisible(state->screenshotHelp, video);
-    SetSettingsControlVisible(state->screenshotFolderButton, video);
+    SetSettingsControlVisible(state->screenshotClipboardCheck, updates);
+    SetSettingsControlVisible(state->screenshotHelp, updates);
+    SetSettingsControlVisible(state->screenshotFolderButton, updates);
     SetSettingsControlVisible(state->saveLogCheck, guide);
     SetSettingsControlVisible(state->showConsoleCheck, guide);
     SetSettingsControlVisible(state->updateTitle, updates);
     SetSettingsControlVisible(state->updateText, updates);
     SetSettingsControlVisible(state->checkForUpdatesCheck, updates);
     SetSettingsControlVisible(state->updateNowButton, updates);
+    SetSettingsControlVisible(state->releaseNotesButton, updates);
     SetSettingsControlVisible(state->updateStatus, updates);
     UpdateScalingControlVisibility(state);
     UpdateWindowBehaviorVisibility(state);

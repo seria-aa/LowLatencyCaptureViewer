@@ -6,12 +6,19 @@
 #include "cmaaArgs.h"
 #include "cmaaCandidates.h"
 #include "cmaaApply.h"
+#include "cmaaPreserveEdges.h"
+#include "cmaaPreserveArgs.h"
+#include "cmaaPreserveCandidates.h"
+#include "cmaaPreserveApply.h"
 #include "transferVertex.h"
 #include "decode709.h"
 #include "encode709.h"
+#include "copyHdr.h"
 #include "copyPixel.h"
 #include "nis128.h"
 #include "nis256.h"
+#include "nisPq128.h"
+#include "nisPq256.h"
 namespace llcv::upscaling {
 using Microsoft::WRL::ComPtr;
 bool Eligible(bool enabled, unsigned w, unsigned h, const RECT& r) {
@@ -21,7 +28,7 @@ bool Eligible(bool enabled, unsigned w, unsigned h, const RECT& r) {
     return dw>=w && dh>=h && (dw>w || dh>h) && dw<=2*w && dh<=2*h;
 }
 void Pipeline::Reset() { *this=Pipeline{}; }
-HRESULT CmaaPipeline::Configure(ID3D11Device* d,UINT w,UINT h) {
+HRESULT CmaaPipeline::Configure(ID3D11Device* d,UINT w,UINT h,bool preserve) {
     *this=CmaaPipeline{};if(!d || !w || !h || w>4096 || h>4096)return E_INVALIDARG;
     width_=w;height_=h;
     auto texture=[&](UINT tw,UINT th,DXGI_FORMAT format,UINT flags,ID3D11Texture2D** tex) {
@@ -61,12 +68,19 @@ HRESULT CmaaPipeline::Configure(ID3D11Device* d,UINT w,UINT h) {
     hr=buffer(6,16,4,true,false);if(FAILED(hr))return hr;
     hr=buffer(7,4,4,true,true);if(FAILED(hr))return hr;
     struct Code { const BYTE* data; size_t size; };
-    const Code codes[] = {
+    const Code highCodes[] = {
         {cmaaEdges, sizeof(cmaaEdges)},
         {cmaaArgs, sizeof(cmaaArgs)},
         {cmaaCandidates, sizeof(cmaaCandidates)},
         {cmaaApply, sizeof(cmaaApply)}
     };
+    const Code preserveCodes[] = {
+        {cmaaPreserveEdges, sizeof(cmaaPreserveEdges)},
+        {cmaaPreserveArgs, sizeof(cmaaPreserveArgs)},
+        {cmaaPreserveCandidates, sizeof(cmaaPreserveCandidates)},
+        {cmaaPreserveApply, sizeof(cmaaPreserveApply)}
+    };
+    const Code* codes=preserve?preserveCodes:highCodes;
     for (unsigned i=0;i<4;i++) {
         hr=d->CreateComputeShader(codes[i].data,codes[i].size,nullptr,&compute_[i]);if(FAILED(hr))return hr;
     }
@@ -112,21 +126,19 @@ ID3D11ShaderResourceView* CmaaPipeline::Draw(ID3D11DeviceContext* c,ID3D11Shader
 }
 
 HRESULT Pipeline::Configure(ID3D11Device* d,ID3D11VideoDevice* vd,ID3D11VideoProcessorEnumerator* e,
-                            bool enabled,bool hdr,UINT w,UINT h,const RECT& r,UINT vendor,float nisSharpness) {
+                            bool enabled,bool hdr,UINT w,UINT h,const RECT& r,UINT vendor,float nisSharpness,bool preserve) {
     Reset();
-    // Preserve the requested SDR setting, but never allocate or run this
-    // display filter for HDR. The renderer retains its original HDR path.
-    if(hdr) return S_FALSE;
     if(!std::isfinite(nisSharpness) || nisSharpness<0 || nisSharpness>1) return E_INVALIDARG;
     if(!Eligible(enabled,w,h,r)) return S_FALSE;
     if(!d || !vd || !e) return E_POINTER;
+    hdr_=hdr;
     width_=w; height_=h; destination_=r; scaledWidth_=r.right-r.left; scaledHeight_=r.bottom-r.top;
     auto texture=[&](UINT tw,UINT th,DXGI_FORMAT format,UINT flags,ID3D11Texture2D** out) {
         D3D11_TEXTURE2D_DESC desc{};desc.Width=tw;desc.Height=th;desc.Format=format;
         desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;desc.BindFlags=flags;
         return d->CreateTexture2D(&desc,nullptr,out);
     };
-    HRESULT hr=texture(w,h,DXGI_FORMAT_B8G8R8A8_UNORM,D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE,&input_);
+    HRESULT hr=texture(w,h,hdr?DXGI_FORMAT_R10G10B10A2_UNORM:DXGI_FORMAT_B8G8R8A8_UNORM,D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE,&input_);
     if(FAILED(hr)) return hr;
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC ov{};ov.ViewDimension=D3D11_VPOV_DIMENSION_TEXTURE2D;
     hr=vd->CreateVideoProcessorOutputView(input_.Get(),e,&ov,&inputOutput_);
@@ -136,9 +148,10 @@ HRESULT Pipeline::Configure(ID3D11Device* d,ID3D11VideoDevice* vd,ID3D11VideoPro
         D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS,&intermediate_);if(FAILED(hr))return hr;
     hr=d->CreateShaderResourceView(intermediate_.Get(),nullptr,&intermediateView_);if(FAILED(hr))return hr;
     hr=d->CreateUnorderedAccessView(intermediate_.Get(),nullptr,&intermediateUav_);if(FAILED(hr))return hr;
-    hr=d->CreatePixelShader(copyPixel,sizeof(copyPixel),nullptr,&pixel_);if(FAILED(hr))return hr;
+    hr=d->CreatePixelShader(hdr?copyHdr:copyPixel,hdr?sizeof(copyHdr):sizeof(copyPixel),nullptr,&pixel_);if(FAILED(hr))return hr;
     struct alignas(16) Constants { float placement[4]{}; } c;
     c.placement[0]=float(r.left);c.placement[1]=float(r.top);
+    c.placement[2]=float(scaledWidth_);c.placement[3]=float(scaledHeight_);
     auto buffer=[&](const void* data,UINT size,ID3D11Buffer** out) {
         D3D11_BUFFER_DESC b{};b.ByteWidth=size;b.Usage=D3D11_USAGE_IMMUTABLE;b.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         D3D11_SUBRESOURCE_DATA initial{data,0,0};return d->CreateBuffer(&b,&initial,out);
@@ -151,11 +164,11 @@ HRESULT Pipeline::Configure(ID3D11Device* d,ID3D11VideoDevice* vd,ID3D11VideoPro
     hr=d->CreateRasterizerState(&raster,&rasterizer_);if(FAILED(hr)) return hr;
     {
         const bool nvidia=vendor==0x10de;
-        const BYTE* code=nvidia?nis128:nis256;
-        const size_t size=nvidia?sizeof(nis128):sizeof(nis256);
+        const BYTE* code=hdr?(nvidia?nisPq128:nisPq256):(nvidia?nis128:nis256);
+        const size_t size=hdr?(nvidia?sizeof(nisPq128):sizeof(nisPq256)):(nvidia?sizeof(nis128):sizeof(nis256));
         hr=d->CreateComputeShader(code,size,nullptr,&compute_);if(FAILED(hr))return hr;
         NISConfig config{};
-        if(!NVScalerUpdateConfig(config,nisSharpness,0,0,w,h,w,h,0,0,scaledWidth_,scaledHeight_,scaledWidth_,scaledHeight_,NISHDRMode::None)) return E_INVALIDARG;
+        if(!NVScalerUpdateConfig(config,nisSharpness,0,0,w,h,w,h,0,0,scaledWidth_,scaledHeight_,scaledWidth_,scaledHeight_,hdr?NISHDRMode::PQ:NISHDRMode::None)) return E_INVALIDARG;
         hr=buffer(&config,sizeof(config),&nisConstants_);if(FAILED(hr)) return hr;
         for(int i=0;i<2;i++) {
             D3D11_TEXTURE2D_DESC desc{};desc.Width=2;desc.Height=64;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
@@ -165,7 +178,11 @@ HRESULT Pipeline::Configure(ID3D11Device* d,ID3D11VideoDevice* vd,ID3D11VideoPro
             hr=d->CreateShaderResourceView(tex.Get(),nullptr,&coefficients_[i]);if(FAILED(hr)) return hr;
         }
     }
-    hr=cmaa_.Configure(d,w,h);if(FAILED(hr))return hr;
+    // HDR stays in PQ: no linear-light AA textures, lists, or transfer passes.
+    // Keep the saved SDR correction preference, but do not apply it in HDR.
+    hr=hdr ? d->CreateVertexShader(transferVertex,sizeof(transferVertex),nullptr,&hdrVertex_)
+           : cmaa_.Configure(d,w,h,preserve);
+    if(FAILED(hr))return hr;
     enabled_=true;return S_OK;
 }
 
@@ -184,9 +201,9 @@ HRESULT Pipeline::Draw(ID3D11DeviceContext* c,ID3D11VideoContext* vc,ID3D11Video
     c->OMSetBlendState(nullptr,nullptr,0xffffffff);c->OMSetDepthStencilState(nullptr,0);
     c->RSSetState(rasterizer_.Get());c->IASetInputLayout(nullptr);
     c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    // CmaaPipeline::Draw binds the shared transfer vertex shader for every draw.
+    // SDR AA binds its transfer vertex shader; HDR has no AA resources.
     c->GSSetShader(nullptr,nullptr,0);
-    ID3D11ShaderResourceView* nisInput=cmaa_.Draw(c,inputView_.Get());
+    ID3D11ShaderResourceView* nisInput=hdr_?inputView_.Get():cmaa_.Draw(c,inputView_.Get());
     ID3D11ShaderResourceView* srvs[]={nisInput,coefficients_[0].Get(),coefficients_[1].Get()};
     c->CSSetShader(compute_.Get(),nullptr,0);c->CSSetShaderResources(0,3,srvs);
     c->CSSetSamplers(0,1,sampler_.GetAddressOf());c->CSSetConstantBuffers(0,1,nisConstants_.GetAddressOf());
@@ -197,8 +214,14 @@ HRESULT Pipeline::Draw(ID3D11DeviceContext* c,ID3D11VideoContext* vc,ID3D11Video
     D3D11_VIEWPORT viewport{float(destination_.left),float(destination_.top),float(scaledWidth_),float(scaledHeight_),0,1};
     c->RSSetViewports(1,&viewport);c->OMSetRenderTargets(1,&target,nullptr);
     c->PSSetConstantBuffers(0,1,constants_.GetAddressOf());
-    c->PSSetShader(pixel_.Get(),nullptr,0);c->PSSetShaderResources(0,1,intermediateView_.GetAddressOf());c->Draw(3,0);
-    c->PSSetShaderResources(0,1,empty);c->OMSetRenderTargets(0,nullptr,nullptr);
+    c->PSSetShader(pixel_.Get(),nullptr,0);c->PSSetShaderResources(0,1,intermediateView_.GetAddressOf());
+    if(hdr_) {
+        c->VSSetShader(hdrVertex_.Get(),nullptr,0);
+        c->PSSetShaderResources(1,1,inputView_.GetAddressOf());
+        c->PSSetSamplers(0,1,sampler_.GetAddressOf());
+    }
+    c->Draw(3,0);
+    c->PSSetShaderResources(0,hdr_?2:1,empty);c->OMSetRenderTargets(0,nullptr,nullptr);
     c->RSSetState(nullptr);
     return S_OK;
 }

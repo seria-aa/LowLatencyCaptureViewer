@@ -1371,7 +1371,7 @@ static void TestLiveToggle(HWND window, int width, int height, const std::vector
                 TransientHudContent::VsrOff, TransientHudContent::VsrUnavailable,
                 TransientHudContent::VsrRejected, TransientHudContent::VsrFailed,
                 TransientHudContent::CmaaNisPending, TransientHudContent::CmaaNisOn,
-                TransientHudContent::CmaaNisOff, TransientHudContent::CmaaNisHdrBypass,
+                TransientHudContent::CmaaNisOff,
                 TransientHudContent::CmaaNisScaleBypass, TransientHudContent::CmaaNisFailed}) {
             ShowTransientHud(content);
             Check(renderer.refreshOverlayLayouts(), "bilingual VSR overlay");

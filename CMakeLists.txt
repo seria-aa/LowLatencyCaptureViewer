@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 2.2.0 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 2.2.1 LANGUAGES CXX)
 
 include(cmake/MsvcDependencies.cmake)
 
@@ -631,10 +631,13 @@ if (BUILD_TESTING)
     get_target_property(audio_callback_sources LowLatencyCaptureViewer SOURCES)
     list(FILTER audio_callback_sources EXCLUDE REGEX "src/(main.cpp|app.rc|audio/AsioOutput.cpp)$")
     add_executable(CmaaNisTests tests/CmaaNisTests.cpp ${audio_callback_sources})
+    include(tests/HdrUpscalingReference.cmake)
     target_include_directories(CmaaNisTests PRIVATE $<TARGET_PROPERTY:LowLatencyCaptureViewer,INCLUDE_DIRECTORIES>)
     target_compile_definitions(CmaaNisTests PRIVATE LLCV_SETTINGS_MODE_TEST
         $<TARGET_PROPERTY:LowLatencyCaptureViewer,COMPILE_DEFINITIONS>)
     target_link_libraries(CmaaNisTests PRIVATE $<TARGET_PROPERTY:LowLatencyCaptureViewer,LINK_LIBRARIES>)
+    # Synthetic text/edge comparisons are manual test-only operations.
+    target_link_libraries(CmaaNisTests PRIVATE gdiplus)
     target_compile_options(CmaaNisTests PRIVATE /W4 /EHsc /permissive- /utf-8)
     set_target_properties(CmaaNisTests PROPERTIES WIN32_EXECUTABLE FALSE)
     set_property(SOURCE tests/CmaaNisTests.cpp APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
@@ -1537,6 +1540,9 @@ if(BUILD_TESTING AND LLCV_RECORDING)
 endif()
 # Fail-safe profile separation applies to direct .exe launches too, not only
 # CTest wrappers. Never propagate this definition into the normal application.
+if(BUILD_TESTING)
+    include(tests/CmaaLatency.cmake)
+endif()
 get_property(llcv_profile_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(llcv_target IN LISTS llcv_profile_targets)
     get_target_property(llcv_type ${llcv_target} TYPE)

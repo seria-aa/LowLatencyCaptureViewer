@@ -146,6 +146,7 @@ struct AppSettings {
     bool cmaaNisEnabled = false;
     UpscalingMethod preferredUpscaler = UpscalingMethod::CmaaNis;
     int nisSharpnessPercent = 15; // 0..100; default 0.15. Display processing only.
+    bool cmaaPreserve = false; // Retain the existing HIGH default for old profiles.
     bool showDiagnosticConsole = false;
     bool skipStartupSettings = false;
     bool checkForUpdates = true;

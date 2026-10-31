@@ -77,6 +77,8 @@ inline constexpr int IDC_SETTINGS_SDR_RANGE_HELP = 2080;
 inline constexpr int IDC_SETTINGS_FRAME_OPTIONS = 2081;
 inline constexpr int IDC_SETTINGS_FRAME_OPTIONS_CLOSE = 2082;
 inline constexpr int IDC_SETTINGS_CREATE_REPORT = 2084;
+inline constexpr int IDC_SETTINGS_CMAA_QUALITY = 2085;
+inline constexpr int IDC_SETTINGS_RELEASE_NOTES = 2086;
 inline constexpr int IDC_SETTINGS_SHORTCUT_FIRST = 2100;
 } // namespace control_id
 

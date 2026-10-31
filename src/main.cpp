@@ -167,11 +167,11 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
 #if defined(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
-constexpr wchar_t kAppVersionLabel[] = L"v2.2.0-audio-recovery-diagnostic";
+constexpr wchar_t kAppVersionLabel[] = L"v2.2.1-audio-recovery-diagnostic";
 #elif defined(LLCV_VSR_EXPERIMENT)
-constexpr wchar_t kAppVersionLabel[] = L"v2.2.0-vsr-test";
+constexpr wchar_t kAppVersionLabel[] = L"v2.2.1-vsr-test";
 #else
-constexpr wchar_t kAppVersionLabel[] = L"v2.2.0";
+constexpr wchar_t kAppVersionLabel[] = L"v2.2.1";
 #endif
 
 constexpr int kRecommendedCaptureBufferMs = 20;
@@ -434,7 +434,7 @@ enum class TransientHudContent { Volume, OneToOne, OneToOneUnavailable,
     ScreenshotClipboardFailed, ScreenshotFailed, ScreenshotTimeout
 #ifdef LLCV_VSR_FEATURE
     , VsrPending, VsrOn, VsrOff, VsrUnavailable, VsrRejected, VsrFailed
-    , CmaaNisPending, CmaaNisOn, CmaaNisOff, CmaaNisHdrBypass, CmaaNisScaleBypass, CmaaNisFailed
+    , CmaaNisPending, CmaaNisOn, CmaaNisOff, CmaaNisScaleBypass, CmaaNisFailed
 #endif
 };
 static void ShowTransientHud(TransientHudContent content);
@@ -488,7 +488,7 @@ static bool HandleVsrTestKey(WPARAM key, LPARAM flags, unsigned modifiers=keys::
         g_settings.vsrEnabled = false;
         ShowTransientHud(TransientHudContent::CmaaNisPending);
         g_cmaaNisRequest.store(llcv::upscaling::Request(g_settings.cmaaNisEnabled,
-            g_settings.nisSharpnessPercent), std::memory_order_release);
+            g_settings.nisSharpnessPercent,g_settings.cmaaPreserve), std::memory_order_release);
         return true;
     }
     if (!llcv::vsr::NvidiaAdapter(g_vsrGpuVendor.load(std::memory_order_acquire))) {
@@ -2509,12 +2509,20 @@ struct DirectD3D11Renderer {
     std::wstring vsrOsdLine() const {
         if (cmaaNisAppliedRequest != -1) {
             wchar_t line[192]{};
-            swprintf_s(line,L"CMAA2 → NIS   %s · %.2f · %s\n",
+            const wchar_t* status=
                 cmaaNisAppliedRequest < 0 ? L"OFF" : cmaaNisPipeline.Enabled()?L"ON":FAILED(cmaaNisStatus)
                     ? (IsEnglishUi()?L"Unavailable / OFF":L"사용 불가 / OFF")
-                    : hdrOutput ? (IsEnglishUi()?L"Bypass (SDR only)":L"적용 제외 (SDR 전용)")
-                    : (IsEnglishUi()?L"Bypass (scale limit)":L"적용 제외 (배율 범위)"),
-                double(llcv::upscaling::RequestSharpness(cmaaNisAppliedRequest))/100.0,hdrOutput?L"HDR10":L"SDR");
+                    : (IsEnglishUi()?L"Bypass (scale limit)":L"적용 제외 (배율 범위)");
+            if(hdrOutput) {
+                swprintf_s(line,L"NIS   %s · %.2f · HDR10\n",status,
+                    double(llcv::upscaling::RequestSharpness(cmaaNisAppliedRequest))/100.0);
+                return line;
+            }
+            swprintf_s(line,L"CMAA2 → NIS   %s · %s · %.2f · %s\n",
+                status,
+                llcv::upscaling::RequestPreserve(cmaaNisAppliedRequest)
+                    ? (IsEnglishUi()?L"Preserve":L"보존형") : (IsEnglishUi()?L"High":L"높음"),
+                double(llcv::upscaling::RequestSharpness(cmaaNisAppliedRequest))/100.0,L"SDR");
             return line;
         }
         const bool english = IsEnglishUi();
@@ -3565,14 +3573,16 @@ struct DirectD3D11Renderer {
 #endif
         cmaaNisStatus=cmaaNisPipeline.Configure(device,videoDevice,enumerator,cmaaNisRequested,
             hdrOutput,static_cast<UINT>(width),static_cast<UINT>(height),videoRect,adapterVendor,
-            float(std::max(0,cmaaNisAppliedRequest))/100.0f);
+            float(std::max(0,llcv::upscaling::RequestSharpness(cmaaNisAppliedRequest)))/100.0f,
+            llcv::upscaling::RequestPreserve(cmaaNisAppliedRequest));
         if(FAILED(cmaaNisStatus)) {
             cmaaNisPipeline.Reset();
             fwprintf(stderr,L"[upscaling] CMAA2/NIS unavailable 0x%08X; using Video Processor\n",unsigned(cmaaNisStatus));
         }
         if(cmaaNisRequested)
-            fwprintf(stderr,L"[upscaling] CMAA2 -> NIS active=%d HDR=%d sharpness=%.2f\n",
-                cmaaNisPipeline.Enabled(),hdrOutput,double(cmaaNisAppliedRequest)/100.0);
+            fwprintf(stderr,L"[upscaling] %s active=%d HDR=%d sharpness=%.2f saved-preserve=%d\n",
+                hdrOutput?L"NIS + contour guard":L"CMAA2 -> NIS",cmaaNisPipeline.Enabled(),hdrOutput,double(llcv::upscaling::RequestSharpness(cmaaNisAppliedRequest))/100.0,
+                llcv::upscaling::RequestPreserve(cmaaNisAppliedRequest));
         cachedOverlayGeneration=0;
         if(cmaaNisPipeline.Enabled() || sharpScalingActive) {
             videoContext->VideoProcessorSetStreamFilter(processor,0,
@@ -3813,12 +3823,11 @@ struct DirectD3D11Renderer {
                 case TransientHudContent::VsrUnavailable: ko=L"VSR 적용 불가\n입력·표시 조건 확인"; en=L"VSR unavailable\nCheck format / size"; break;
                 case TransientHudContent::VsrRejected: ko=L"VSR 요청 거부\nOFF로 복귀"; en=L"VSR rejected\nBack to OFF"; break;
                 case TransientHudContent::VsrFailed: ko=L"VSR 전환 실패\n진단 로그 확인"; en=L"VSR switch failed\nSee diagnostic log"; break;
-                case TransientHudContent::CmaaNisPending: ko=L"CMAA2 → NIS\n전환 대기"; en=L"CMAA2 → NIS\nSwitch pending"; break;
-                case TransientHudContent::CmaaNisOn: ko=L"CMAA2 → NIS ON\nF6: 끄기"; en=L"CMAA2 → NIS ON\nF6: OFF"; break;
-                case TransientHudContent::CmaaNisOff: ko=L"CMAA2 → NIS OFF\nF6: 켜기"; en=L"CMAA2 → NIS OFF\nF6: ON"; break;
-                case TransientHudContent::CmaaNisHdrBypass: ko=L"CMAA2 → NIS 적용 제외\nSDR 전용"; en=L"CMAA2 → NIS bypass\nSDR only"; break;
-                case TransientHudContent::CmaaNisScaleBypass: ko=L"CMAA2 → NIS 적용 제외\n확대 배율 확인"; en=L"CMAA2 → NIS bypass\nCheck scale"; break;
-                case TransientHudContent::CmaaNisFailed: ko=L"CMAA2 → NIS 사용 불가\n기본 출력 유지"; en=L"CMAA2 → NIS unavailable\nUsing original output"; break;
+                case TransientHudContent::CmaaNisPending: ko=hdrOutput?L"NIS\n전환 대기":L"CMAA2 → NIS\n전환 대기"; en=hdrOutput?L"NIS\nSwitch pending":L"CMAA2 → NIS\nSwitch pending"; break;
+                case TransientHudContent::CmaaNisOn: ko=hdrOutput?L"NIS ON\nF6: 끄기":L"CMAA2 → NIS ON\nF6: 끄기"; en=hdrOutput?L"NIS ON\nF6: OFF":L"CMAA2 → NIS ON\nF6: OFF"; break;
+                case TransientHudContent::CmaaNisOff: ko=hdrOutput?L"NIS OFF\nF6: 켜기":L"CMAA2 → NIS OFF\nF6: 켜기"; en=hdrOutput?L"NIS OFF\nF6: ON":L"CMAA2 → NIS OFF\nF6: ON"; break;
+                case TransientHudContent::CmaaNisScaleBypass: ko=hdrOutput?L"NIS 적용 제외\n확대 배율 확인":L"CMAA2 → NIS 적용 제외\n확대 배율 확인"; en=hdrOutput?L"NIS bypass\nCheck scale":L"CMAA2 → NIS bypass\nCheck scale"; break;
+                case TransientHudContent::CmaaNisFailed: ko=hdrOutput?L"NIS 사용 불가\n기본 출력 유지":L"CMAA2 → NIS 사용 불가\n기본 출력 유지"; en=hdrOutput?L"NIS unavailable\nUsing original output":L"CMAA2 → NIS unavailable\nUsing original output"; break;
                 default: break;
                 }
                 wcscpy_s(volumeText, keys::Expand(IsEnglishUi() ? en : ko,g_settings.shortcuts).c_str());
@@ -4347,7 +4356,6 @@ struct DirectD3D11Renderer {
             ShowTransientHud(cmaaNisAppliedRequest < 0 ? TransientHudContent::CmaaNisOff
                 : FAILED(cmaaNisStatus) ? TransientHudContent::CmaaNisFailed
                 : cmaaNisPipeline.Enabled() ? TransientHudContent::CmaaNisOn
-                : hdrOutput ? TransientHudContent::CmaaNisHdrBypass
                 : TransientHudContent::CmaaNisScaleBypass);
         }
 #endif
@@ -7172,6 +7180,8 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             g_settings.preferredUpscaler = upscaler==1 ? llcv::settings::UpscalingMethod::CmaaNis
                 : llcv::settings::UpscalingMethod::NvidiaVsr;
         g_settings.nisSharpnessPercent = llcv::settings_ui::SelectedNisSharpness(state->nisSharpnessCombo);
+        if(state->cmaaQualityCombo)
+            g_settings.cmaaPreserve = SendMessageW(state->cmaaQualityCombo,CB_GETCURSEL,0,0)==1;
         g_settings.showDiagnosticConsole = SendMessageW(
             state->showConsoleCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.skipStartupSettings = SendMessageW(
@@ -7761,12 +7771,18 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             // This is guidance, not a hardware capability/activation check.
             // Request acceptance alone cannot establish NVIDIA's active state.
             const std::wstring guide = IsEnglishUi()
-                ? L"CMAA2 → NIS reduces jagged edges before upscaling. Default sharpness: 0.15.\n"
-                  L"SDR only, up to 2× per axis. HDR, native size and downscaling use the normal path.\n"
+                ? L"SDR: CMAA2 reduces jagged edges before NIS upscaling. Default sharpness: 0.15.\n"
+                  L"CMAA2 High smooths more edges; Preserve retains more text and thin-line detail.\n"
+                  L"SDR and HDR10, up to 2× per axis. Native size and downscaling use the normal path.\n"
+                  L"HDR10 uses NIS alone, retaining PQ/BT.2020 and limiting contour changes against the unfiltered image.\n"
+                  L"CMAA2 correction is saved for SDR and does not apply in HDR10.\n"
                   L"F6 toggles the selected method without changing it or its sharpness.\n"
                   L"Display only: recordings/screenshots keep the capture source; OSD is drawn afterward.\n\n"
-                : L"CMAA2로 계단 현상을 보정한 뒤 NIS로 확대합니다. 기본 선명도는 0.15입니다.\n"
-                  L"SDR에서만 가로·세로 최대 2배 확대를 지원합니다. HDR·원본 크기·축소는 기존 경로를 사용합니다.\n"
+                : L"SDR은 CMAA2로 계단현상을 보정한 뒤 NIS로 확대합니다. 기본 선명도는 0.15입니다.\n"
+                  L"높음은 경계를 더 적극적으로 보정하고, 보존형은 글씨·얇은 선의 원래 형태를 더 유지합니다.\n"
+                  L"SDR·HDR10에서 가로·세로 최대 2배 확대를 지원합니다. 원본 크기·축소는 기존 경로를 사용합니다.\n"
+                  L"HDR10은 NIS만 사용하며 PQ·BT.2020을 유지하고 원본 보간 영상 기준으로 과한 윤곽 변화를 제한합니다.\n"
+                  L"CMAA2 보정 선택은 SDR용으로 저장되며 HDR10에는 적용하지 않습니다.\n"
                   L"F6은 선택한 방식과 선명도를 유지하면서 켜고 끕니다.\n"
                   L"화면 표시에만 적용되며 녹화·스크린샷 원본은 유지합니다. OSD는 처리 후 표시합니다.\n\n";
             MessageBoxW(hwnd, (guide+keys::Expand(llcv::ui_text::VsrSetupGuide(IsEnglishUi()),state->shortcutBindings)).c_str(),
@@ -7817,6 +7833,15 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         if (LOWORD(wParam) == IDC_SETTINGS_UPDATE_NOW &&
             HIWORD(wParam) == BN_CLICKED && state) {
             StartSettingsUpdateCheck(state, hwnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SETTINGS_RELEASE_NOTES &&
+            HIWORD(wParam) == BN_CLICKED && state) {
+            const auto url=llcv::update::ReleaseNotesUrl(kAppVersionLabel);
+            if(reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd,L"open",url.c_str(),
+                    nullptr,nullptr,SW_SHOWNORMAL))<=32)
+                MessageBoxW(hwnd,state->english?L"Could not open the release notes in your browser."
+                    :L"브라우저에서 릴리스 노트를 열지 못했습니다.",L"LLCV",MB_OK|MB_ICONWARNING);
             return 0;
         }
         if (LOWORD(wParam) == IDC_SETTINGS_SCREENSHOT_FOLDER &&
@@ -10884,7 +10909,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
             capture.width, capture.height, display.width, display.height);
     }
     g_cmaaNisRequest.store(llcv::settings::SelectedUpscaler(g_settings)==llcv::settings::UpscalingMethod::CmaaNis
-        ? llcv::upscaling::Request(g_settings.cmaaNisEnabled,g_settings.nisSharpnessPercent) : -1,
+        ? llcv::upscaling::Request(g_settings.cmaaNisEnabled,g_settings.nisSharpnessPercent,g_settings.cmaaPreserve) : -1,
         std::memory_order_release);
     g_vsrMode.store(g_settings.vsrEnabled && !g_settings.cmaaNisEnabled ? llcv::vsr::Mode::On
                                          : llcv::vsr::Mode::Disabled,

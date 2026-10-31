@@ -5,7 +5,7 @@
 A low-latency Windows viewer for video and audio from HDMI capture devices.
 Use it to play console games without OBS, or listen in audio-only mode.
 
-**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.2.0.md) · [한국어](README.md)
+**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.2.1.md) · [한국어](README.md)
 
 <br>
 
@@ -17,12 +17,12 @@ Use it to play console games without OBS, or listen in audio-only mode.
 
 <br>
 
-## What's new in 2.2.0
+## What's new in 2.2.1
 
-Adds **local diagnostic report ZIPs** and improves **upstream crossbar connections** for multi-input devices.
-Help fits without scrolling, and NIS sharpness choices are simplified.
-Settings/recording stability, diagnostic logging and latest-frame selection in VSync are also improved.
-[Diagnostics and logs](docs/DIAGNOSTICS.md) · [Full release notes](docs/release-notes-v2.2.0.md)
+Adds **High/Preserve CMAA2 correction for SDR** and **NIS with contour protection for HDR10**.
+Places upscaling controls side by side and moves screenshot preferences to App settings.
+Refines spacing, alignment and keyboard order, and adds a **Release notes** button in App settings.
+[Full release notes](docs/release-notes-v2.2.1.md)
 
 <br>
 
@@ -53,7 +53,7 @@ These are the default keys; change them under **Guide & logs**.
 - Optional 40 fps capture and unlisted 30 fps requests, subject to driver acceptance
 - SDR range Auto/Limited/Full, shared by playback, screenshots and recording
 - NVIDIA VSR (experimental), with separate or capture-matched display resolutions
-- CMAA2 → NIS upscaling for SDR enlargement; HDR retains the original output. Select Off/VSR, default sharpness 0.15
+- Upscaling: CMAA2 → NIS (High/Preserve) for SDR, NIS + contour protection for HDR10; Off/VSR selection, default sharpness 0.15
 - WASAPI Shared/Exclusive, ASIO, console LPCM 5.1, and audio-only mode
 - NV12/YUY2/MJPEG/RGB SDR/stereo MP4 recording — codec, quality, volume, pause and splitting
 - Source-resolution PNG screenshots with optional clipboard copy
