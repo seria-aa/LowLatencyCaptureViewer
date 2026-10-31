@@ -49,7 +49,12 @@ Release 구성은 정적 MSVC 런타임을 사용하므로 패키지 실행에 �
 
 2.1.9에는 RGB 형식·방향·GPU 재배열·원본 PNG·VSR 경로·녹화 색·부하·메모리 검사와
 파일 미생성 거부·복구 판정·패키지 제외 회귀를 추가했습니다.
-현재 준비 검증 기록은 tests/RELEASE_V2_1_9_AUDIT.md에 있습니다.
+해당 검증 범위는 tests/RELEASE_V2_1_9_AUDIT.md에 있습니다.
+
+2.2.0에는 진단자료 ZIP·개인정보 가림, 도움말 배치, 설정 조회 수명·시작 대기 제한,
+녹화 설정 항목별 복원, VSync 준비 대기와 크로스바 연결 안전장치 관련 검사를 보완했습니다.
+현재 준비 상태와 남은 릴리스 게이트는 tests/RELEASE_V2_2_0_AUDIT.md에 기록합니다.
+이전 개발 중 검사를 최종 릴리스 검증 통과로 간주하지 않습니다.
 
 NIS·CMAA2·UYVY·RGB24 변환 셰이더는 빌드할 때 실행 파일에 포함합니다. 실행 시 별도 셰이더 컴파일러나
 소스 파일은 필요하지 않습니다. NIS/CMAA2 소스·수정 내역과 라이선스는 third_party/upscaling에,
@@ -89,7 +94,7 @@ PATH에 두거나 CMake의 `LLCV_TEST_FFMPEG`·`LLCV_TEST_FFPROBE`로 지정하�
 
 <br>
 
-재생 전용 개발 빌드는 `-DLLCV_RECORDING=OFF`로 FFmpeg 없이 만들 수 있지만 2.1.9 배포본과는 다릅니다.
+재생 전용 개발 빌드는 `-DLLCV_RECORDING=OFF`로 FFmpeg 없이 만들 수 있지만 2.2.0 배포본과는 다릅니다.
 실행 파일 옆의 저장 라이브러리 DLL과 `ffmpeg-licenses` 폴더를 패키지에 유지하세요.
 
 보류한 오디오 입력 자동 복구 시제품은 **기본 꺼짐**입니다. 비공개 진단이 필요할 때만 별도 빌드 폴더에서
@@ -102,7 +107,7 @@ PATH에 두거나 CMake의 `LLCV_TEST_FFMPEG`·`LLCV_TEST_FFPROBE`로 지정하�
 ## 설치 프로그램과 포터블 ZIP
 
 Release 빌드 뒤 저장소 루트에서 아래 명령을 실행합니다. 다음은 위에서 만든
-`build\Release` 실행 파일을 v2.1.9으로 패키징하는 예시입니다. 릴리스 스크립트의
+`build\Release` 실행 파일을 v2.2.0으로 패키징하는 예시입니다. 릴리스 스크립트의
 기본 경로는 버전별 빌드 폴더이므로 아래 빌드 경로 재정의가 필요합니다.
 
 ```powershell
@@ -110,11 +115,11 @@ chcp.com 65001 > $null
 & "C:\Program Files\Inno Setup 7\ISCC.exe" `
   "--define=BuildDir=..\build\Release" ".\installer\LowLatencyCaptureViewer.iss"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
-  -Version 2.1.9 -BuildDir ..\build\Release -OutputDir outputs\v2.1.9
+  -Version 2.2.0 -BuildDir ..\build\Release -OutputDir outputs\v2.2.0
 ```
 
-생성 파일은 `outputs\v2.1.9\LowLatencyCaptureViewer_v2.1.9_Setup.exe`와
-`outputs\v2.1.9\LowLatencyCaptureViewer_v2.1.9_x64.zip`입니다. 다른 버전은
+생성 파일은 `outputs\v2.2.0\LowLatencyCaptureViewer_v2.2.0_Setup.exe`와
+`outputs\v2.2.0\LowLatencyCaptureViewer_v2.2.0_x64.zip`입니다. 다른 버전은
 먼저 릴리스 관련 버전 표기를 맞춰야 합니다. ZIP 이름만 바꿔도 실행 파일 버전이
 바뀌지는 않습니다. 자세한 절차는 [릴리스 체크리스트](RELEASING.ko.md)를 따릅니다.
 

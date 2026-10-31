@@ -5,6 +5,9 @@
 #include "../src/audio/AsioOutput.cpp"
 #include <limits>
 #include <fstream>
+#include <future>
+
+#include "SettingsProbeFixtures.h"
 
 #ifndef LLCV_VSR_EXPERIMENT
 template<class Renderer>
@@ -169,6 +172,155 @@ static LRESULT CALLBACK SettingsControllerTestProc(HWND hwnd, UINT message, WPAR
     // hardware enumeration or background workers. The fixture supplies controls.
     if (message == WM_CREATE) return 0;
     return SettingsWndProc(hwnd,message,wParam,lParam);
+}
+static void TestPendingQueriesClose() {
+    struct Block {
+        std::atomic<int> entered{0}, finished{0}, notifications{0};
+        std::promise<void> release;
+    };
+    auto block=std::make_shared<Block>();auto released=block->release.get_future().share();
+    auto state=std::make_unique<SettingsDialogState>();
+    const auto query=[block,released]<class T>(T result) {
+        return [block,released,result](const llcv::settings_ui::ModeQueryKey&) {
+            ++block->entered;released.wait();++block->finished;return result;
+        };
+    };
+    const auto notify=[block] { ++block->notifications; };
+    state->videoModeCache=std::make_unique<llcv::settings_ui::SettingsModeCache<SettingsVideoModes>>(query(SettingsVideoModes{}),notify);
+    state->sharedProbeCache=std::make_unique<llcv::settings_ui::SettingsModeCache<AudioClient3Support>>(query(AudioClient3Support{}),notify);
+    state->captureAudioProbeCache=std::make_unique<llcv::settings_ui::SettingsModeCache<InternalCaptureAudioProbe>>(query(InternalCaptureAudioProbe{}),notify);
+    state->inventoryCache=std::make_unique<llcv::settings_ui::SettingsModeCache<SettingsDeviceInventory>>(query(SettingsDeviceInventory{}),notify);
+    state->videoModeCache->Request({});state->sharedProbeCache->Request({});
+    state->captureAudioProbeCache->Request({});state->inventoryCache->Request({});
+    int expected=4;
+#ifdef LLCV_RECORDING
+    state->recordingProbe=std::make_unique<llcv::settings_ui::SettingsModeCache<llcv::recording::EncoderProbeResult>>(query(llcv::recording::EncoderProbeResult{}),notify);
+    state->recordingStorageQuery=std::make_unique<llcv::settings_ui::SettingsModeCache<llcv::recording::StorageSpace>>(query(llcv::recording::StorageSpace{}),notify);
+    state->recordingProbe->Request({});state->recordingStorageQuery->Request({});expected+=2;
+#endif
+    state->reportQuery=std::make_unique<llcv::settings_ui::SettingsModeCache<llcv::diagnostics::ReportResult>>(query(llcv::diagnostics::ReportResult{}),notify);
+    state->reportQuery->Request({});++expected;
+    WNDCLASSW wc{};wc.hInstance=GetModuleHandleW(nullptr);wc.lpfnWndProc=SettingsControllerTestProc;wc.lpszClassName=L"LLCV_QUERY_CLOSE_TEST";
+    Require(RegisterClassW(&wc)!=0,"register query close fixture");
+    const auto hwnd=CreateWindowW(wc.lpszClassName,L"Pending query fixture",WS_POPUP,-32000,-32000,1000,650,nullptr,nullptr,wc.hInstance,state.get());
+    Require(hwnd!=nullptr,"create query close fixture without hardware enumeration");
+    auto work=std::make_shared<ExclusiveScanWork>();work->owner=hwnd;state->exclusiveWork=work;
+    state->exclusiveScanRunning=true;
+    state->exclusiveProbeThread=std::thread([work,block,released] {
+        ++block->entered;released.wait();
+        std::lock_guard lock(work->mutex);
+        if(work->owner)++block->notifications;
+        work->done=true;++block->finished;
+    });
+    ++expected;
+    auto deadline=GetTickCount64()+3000;while(block->entered<expected&&GetTickCount64()<deadline)Sleep(1);
+    Require(block->entered==expected,"all injected workers entered without devices");
+    const auto begin=GetTickCount64();DestroyWindow(hwnd);CompleteExclusiveEndpointScan(state.get());state.reset();
+    Require(GetTickCount64()-begin<100,"real WM_DESTROY and owner cleanup never wait for blocked queries");
+    Require(work->stop&&!work->owner,"exclusive worker loses owner before destruction");
+    block->release.set_value();deadline=GetTickCount64()+3000;
+    while(block->finished<expected&&GetTickCount64()<deadline)Sleep(1);
+    Require(block->finished==expected&&block->notifications==0,"owned workers finish without touching destroyed state or posting late notifications");
+    UnregisterClassW(wc.lpszClassName,wc.hInstance);
+    const auto running=g_running.load();g_running=true;
+    {
+        auto gate=SettingsCaptureProbeGate();std::unique_lock hold(*gate);
+        std::atomic<bool> entered=false,finished=false;
+        std::thread capture([&]{entered=true;CaptureInitializationLease lease;
+            Require(!lease.lock.owns_lock(),"stopped startup does not reopen device while a cancelled query owns it");finished=true;});
+        while(!entered)Sleep(1);
+        Sleep(25);Require(!finished,"capture startup is serialized with an in-flight settings query");
+        const auto cancelled=GetTickCount64();g_running=false;capture.join();
+        Require(finished&&GetTickCount64()-cancelled<100,"shutdown cancels startup wait without joining the driver query");
+    }
+    g_running=true;
+    {
+        auto gate=SettingsExclusiveProbeGate();std::unique_lock hold(*gate);
+        std::atomic<bool> entered=false,finished=false;
+        std::thread audio([&]{entered=true;SettingsInitializationLease lease(SettingsExclusiveProbeGate());
+            Require(!lease.lock.owns_lock(),"stopped audio startup cannot seize an endpoint under a cancelled scan");finished=true;});
+        while(!entered)Sleep(1);
+        Sleep(25);Require(!finished,"audio startup is serialized with a closing exclusive scan");
+        const auto cancelled=GetTickCount64();g_running=false;audio.join();
+        Require(finished&&GetTickCount64()-cancelled<100,"audio startup wait is cancellable without opening an endpoint");
+    }
+    g_running=running;
+}
+static void TestCaptureReportDetails() {
+    const auto settings=g_settings;const auto* stage=g_captureFailureStage.load();
+    std::wstring requested,connected;
+    {std::lock_guard lock(g_captureReportMutex);requested=g_captureRequestedDetail;connected=g_captureConnectedDetail;}
+    g_settings.capture40Fps=false;g_settings.videoFrameRate=30;g_settings.audioOnly=false;
+    BeginCaptureReport();
+    Require(CaptureReportDetails(true).find(L"not confirmed")!=std::wstring::npos,"new attempt clears previous connected layout");
+    ConfirmCaptureReport(VideoPixelFormat::Nv12,1920,1080,60,1920);
+    g_captureFailureStage=L"validate active video layout";
+    const auto details=CaptureReportDetails(true);
+    Require(details.find(L"30 fps")!=std::wstring::npos&&details.find(L"60 fps")!=std::wstring::npos&&
+        details.find(L"validate active video layout")!=std::wstring::npos,"failure details distinguish requested and validated rate, retaining the exact failed stage");
+    g_settings.videoFrameRate=0;BeginCaptureReport();
+    Require(CaptureReportDetails(true).find(L"Auto fps")!=std::wstring::npos,"automatic request is not described as a fixed rate");
+    g_settings.audioOnly=true;BeginCaptureReport();
+    Require(CaptureReportDetails(true).find(L"not applicable (audio-only)")!=std::wstring::npos,"audio-only mode does not claim a failed video layout");
+    g_settings=settings;g_captureFailureStage=stage;
+    {std::lock_guard lock(g_captureReportMutex);g_captureRequestedDetail=std::move(requested);g_captureConnectedDetail=std::move(connected);}
+}
+static void TestStartupProbeTimeouts() {
+    const auto running = g_running.load();
+    const auto error = g_captureFailureHr.load();
+    const auto* stage = g_captureFailureStage.load();
+    const auto* hdr = g_hdrFailureDetail.load();
+    const auto warning = g_audioStartupProbeTimeout.load();
+    const auto output = ActiveAudioOutputName();
+    std::wstring requested, connected;
+    {
+        std::lock_guard lock(g_captureReportMutex);
+        requested = g_captureRequestedDetail;
+        connected = g_captureConnectedDetail;
+    }
+    const auto blocked = [&](auto gate, auto start) {
+        std::promise<void> entered, release;
+        auto released = release.get_future();
+        std::thread driver([&] {
+            std::unique_lock hold(*gate);
+            entered.set_value();
+            released.wait();
+        });
+        entered.get_future().wait();
+        g_running = true;
+        const auto begin = GetTickCount64();
+        start();
+        const auto elapsed = GetTickCount64() - begin;
+        Require(elapsed >= 4900 && elapsed < 10000,
+                "production startup has a five-second limit without entering a device API");
+        release.set_value();
+        driver.join();
+    };
+    blocked(SettingsExclusiveProbeGate(), [] { AudioRenderThread(); });
+    Require(
+        g_audioStartupProbeTimeout.load() && ActiveAudioOutputName() != output,
+        "audio timeout publishes a UI warning and visible output status rather than silently returning");
+    blocked(SettingsCaptureProbeGate(), [] {
+        Require(!UnifiedCaptureRenderLoop(nullptr),
+                "blocked video startup fails before opening hardware");
+    });
+    Require(
+        g_captureFailureHr.load() == kSettingsProbeTimeout &&
+            CaptureReportDetails(true).find(L"previous capture device query") != std::wstring::npos,
+        "video timeout reports its own failure code/stage rather than stale success or no-input timeout");
+    Require(std::wstring(SettingsProbeTimeoutText(true)).find(L"5 seconds") != std::wstring::npos,
+            "timeout has actionable user guidance");
+    g_running = running;
+    g_captureFailureHr = error;
+    g_captureFailureStage = stage;
+    g_hdrFailureDetail = hdr;
+    g_audioStartupProbeTimeout = warning;
+    SetActiveAudioOutputName(output);
+    {
+        std::lock_guard lock(g_captureReportMutex);
+        g_captureRequestedDetail = std::move(requested);
+        g_captureConnectedDetail = std::move(connected);
+    }
 }
 static void TestExclusiveScanLifecycle() {
     const auto savedSettings = g_settings;
@@ -441,23 +593,28 @@ static void TestSettingsController() {
         HWND hwnd=CreateWindowW(wc.lpszClassName,L"Probe close fixture",WS_POPUP,
             -32000,-32000,100,100,nullptr,nullptr,wc.hInstance,&state);
         Require(hwnd!=nullptr,"encoder probe close fixture");
-        std::atomic<bool> started{false},cancelled{false};
+        struct Flags { std::atomic<bool> started{false},cancelled{false}; };
+        auto flags=std::make_shared<Flags>();
         state.recordingProbe=std::make_unique<llcv::settings_ui::SettingsModeCache<llcv::recording::EncoderProbeResult>>(
-            [&](const auto&){
-                started=true;
+            [flags](const llcv::settings_ui::ModeQueryKey&, const std::atomic<bool>& stop){
+                flags->started=true;
                 const auto deadline=GetTickCount64()+2000;
-                while(!state.recordingProbeStop && GetTickCount64()<deadline)Sleep(1);
-                cancelled=state.recordingProbeStop.load();
+                while(!stop && GetTickCount64()<deadline)Sleep(1);
+                flags->cancelled=stop.load();
                 return llcv::recording::EncoderProbeResult{};
             },[]{});
         state.recordingProbe->Request({});
         const auto deadline=GetTickCount64()+2000;
-        while(!started && GetTickCount64()<deadline)Sleep(1);
-        Require(started,"fixture probe started");
+        while(!flags->started && GetTickCount64()<deadline)Sleep(1);
+        Require(flags->started,"fixture probe started");
+        const auto closing=GetTickCount64();
         FinishSettingsDialog(hwnd,&state,false);
         Require(!IsWindow(hwnd)&&state.recordingProbeStop,"settings close hides window and cancels pending encoder work");
         state.recordingProbe.reset();
-        Require(cancelled,"closing does not join the probe before cancellation reaches it");
+        Require(GetTickCount64()-closing<100,"closing never joins the encoder probe");
+        const auto cancelledDeadline=GetTickCount64()+2000;
+        while(!flags->cancelled && GetTickCount64()<cancelledDeadline)Sleep(1);
+        Require(flags->cancelled,"owned cancellation token reaches the probe after non-blocking close");
     }
 #endif
     auto create = [&](SettingsDialogState& state) {
@@ -1230,6 +1387,46 @@ static void TestLiveToggle(HWND window, int width, int height, const std::vector
     g_vsrMode = llcv::vsr::Mode::Disabled;
 }
 
+static void TestVsyncReadinessResources(HWND window) {
+    const auto settings = g_settings;
+    const auto mode = g_vsrMode.load();
+    const auto request = g_cmaaNisRequest.load();
+    const auto fullscreen = g_fullscreen.load();
+    g_settings.pixelPerfect = false;
+    g_fullscreen = false;
+    g_vsrMode = llcv::vsr::Mode::Disabled;
+    g_cmaaNisRequest = -1;
+    for (auto presentation : {PresentationMode::AllowTearing, PresentationMode::VSync,
+                              PresentationMode::Compatibility}) {
+        g_settings.presentationMode = presentation;
+        DirectD3D11Renderer renderer;
+        Check(renderer.initialize(window, 640, 360, 60, VideoPixelFormat::Nv12),
+              "native readiness resource initialization");
+        const bool paced = presentation == PresentationMode::VSync;
+        Require(renderer.presentationReadiness.Enabled() == paced,
+                "only native Flip VSync obtains a readiness handle");
+        if (paced) {
+            const auto handle = renderer.presentationReadiness.WaitHandle();
+            DWORD flags = 0;
+            Require(handle && GetHandleInformation(handle, &flags),
+                    "DXGI returns a valid owned waitable handle");
+            renderer.presentationReadiness.Signaled();
+            Check(renderer.resizeOutput(window), "VSync resize with existing admission credit");
+            Require(
+                renderer.presentationReadiness.Ready() &&
+                    !renderer.presentationReadiness.WaitHandle() &&
+                    GetHandleInformation(handle, &flags),
+                "ResizeBuffers/reconfiguration preserves the same chain's owned handle and unused admission credit");
+        }
+        renderer.reset();
+        Require(!renderer.presentationReadiness.Enabled(),
+                "renderer reset drops readiness ownership");
+    }
+    g_settings = settings;
+    g_vsrMode = mode;
+    g_cmaaNisRequest = request;
+    g_fullscreen = fullscreen;
+}
 static void TestCenteredPixelPerfect(HWND window) {
     const int width = 1280, height = 720; // An actual selectable display size.
     std::vector<BYTE> pixels(static_cast<size_t>(width) * height * 3 / 2, 128);
@@ -1422,6 +1619,7 @@ static void TestPlaybackPowerBroadcastRouting() {
 }
 
 int main(int argc, char** argv) {
+    if(argc==2&&std::string(argv[1])=="--startup-probe-timeouts") {TestStartupProbeTimeouts();return 0;}
     // Every entry point is synthetic. Individual persistence tests explicitly
     // opt in only after redirecting SettingsPath to their own temporary folder.
     g_suppressSettingsSave = true;
@@ -1497,6 +1695,8 @@ int main(int argc, char** argv) {
         TestSettingsBufferModeTransitions();
         TestSettingsSharedRefreshAcrossModes();
         TestSettingsAudioIdentityAndRefresh();
+        TestPendingQueriesClose();
+        TestCaptureReportDetails();
         TestExclusiveScanLifecycle();
         TestSettingsModeFlow();
         TestUnsupportedVideoModeStatus();
@@ -1697,6 +1897,7 @@ int main(int argc, char** argv) {
             }
             for(bool full:{false,true})TestLiveToggle(window,width,height,rgbPixels,format,full);
         }
+        TestVsyncReadinessResources(window);
         TestCenteredPixelPerfect(window);
         TestSplitResolutionRenderer(window);
     }

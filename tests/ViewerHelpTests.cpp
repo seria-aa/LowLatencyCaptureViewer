@@ -1,4 +1,5 @@
 #include "ui/ViewerHelpWindow.h"
+#include "ui/ViewerHelpGeometry.h"
 #include "ui/AppPalette.h"
 #include "ui/SettingsFonts.h"
 #include <cstdio>
@@ -11,6 +12,17 @@
 #include <filesystem>
 #include <vector>
 #include <imm.h>
+namespace llcv::viewer_help {
+struct WindowTestAccess {
+    static void LayoutAtDpi(Window& window,UINT dpi) { window.Layout(dpi); }
+    static void Fit(Window& window,const RECT& work,const RECT* preferred=nullptr) { window.FitToWorkArea(work,preferred); }
+    static SIZE Minimum(const Window& window,const RECT& work) { return window.MinimumTrackSize(work); }
+    static UINT Dpi(HWND body) {
+        const auto* window=reinterpret_cast<Window*>(GetWindowLongPtrW(body,GWLP_USERDATA));
+        return window ? window->layoutDpi_ : GetDpiForWindow(body);
+    }
+};
+}
 using namespace llcv::viewer_help;
 namespace {
 void Check(bool ok,const char* what) {
@@ -124,10 +136,21 @@ void CheckPalette(HWND body,bool light) {
 }
 void CheckFields(HWND body) {
     RECT bounds{}; GetClientRect(body,&bounds);
+    Check(!(GetWindowLongPtrW(body,GWL_STYLE)&(WS_VSCROLL|WS_HSCROLL)),"guide has no scrollbars");
+    std::vector<RECT> fields;
     HDC dc=GetDC(body);
     for (HWND child=GetWindow(body,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT)) {
         RECT r{}; GetWindowRect(child,&r); MapWindowPoints(nullptr,body,reinterpret_cast<POINT*>(&r),2);
         Check(r.left>=0 && r.right<=bounds.right,"text stays within body width");
+        if (r.top<0 || r.bottom>bounds.bottom-MulDiv(16,WindowTestAccess::Dpi(body),96))
+            std::fwprintf(stderr,L"Offscreen help field: %ls at %ld..%ld, body %ld\n",Text(child).c_str(),r.top,r.bottom,bounds.bottom);
+        Check(r.top>=0 && r.bottom<=bounds.bottom-MulDiv(16,WindowTestAccess::Dpi(body),96),
+              "all guide text is visible at once with bottom margin");
+        for (const auto& other:fields) {
+            RECT overlap{};
+            Check(!IntersectRect(&overlap,&r,&other),"guide text controls never overlap");
+        }
+        fields.push_back(r);
         const auto font=reinterpret_cast<HFONT>(SendMessageW(child,WM_GETFONT,0,0));
         HGDIOBJ old=SelectObject(dc,font);
         RECT needed{0,0,r.right-r.left,0};
@@ -145,8 +168,16 @@ void CheckFields(HWND body) {
         RECT key{},action{};
         GetWindowRect(GetDlgItem(body,205+2*i),&key);
         GetWindowRect(GetDlgItem(body,206+2*i),&action);
-        Check(key.right<action.left && abs(key.top-action.top)<8,"aligned key/action columns");
+        Check(key.right<action.left && abs((key.top+key.bottom)-(action.top+action.bottom))<=1,
+              "key/action text is vertically centered on the same row");
     }
+}
+void ResizeClient(HWND window,int width,int height) {
+    const UINT dpi=GetDpiForWindow(window);
+    RECT r{0,0,MulDiv(width,dpi,96),MulDiv(height,dpi,96)};
+    Check(AdjustWindowRectExForDpi(&r,static_cast<DWORD>(GetWindowLongPtrW(window,GWL_STYLE)),FALSE,
+          static_cast<DWORD>(GetWindowLongPtrW(window,GWL_EXSTYLE)),dpi)!=FALSE,"client-size test frame");
+    SetWindowPos(window,nullptr,0,0,r.right-r.left,r.bottom-r.top,SWP_NOMOVE|SWP_NOACTIVATE|SWP_NOZORDER);
 }
 void Snapshot(HWND window,const std::filesystem::path& path) {
     RECT r{}; GetWindowRect(window,&r); HDC dc=GetDC(window),memory=CreateCompatibleDC(dc);
@@ -154,6 +185,31 @@ void Snapshot(HWND window,const std::filesystem::path& path) {
     HGDIOBJ old=SelectObject(memory,bitmap);
     SendMessageW(window,WM_PRINT,reinterpret_cast<WPARAM>(memory),PRF_NONCLIENT|PRF_CLIENT|PRF_CHILDREN|PRF_ERASEBKGND);
     SelectObject(memory,old);
+    const int width=r.right-r.left,height=r.bottom-r.top;
+    BITMAPINFO info{}; info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth=width; info.bmiHeader.biHeight=-height;
+    info.bmiHeader.biPlanes=1; info.bmiHeader.biBitCount=32; info.bmiHeader.biCompression=BI_RGB;
+    std::vector<DWORD> pixels(size_t(width)*height);
+    Check(GetDIBits(dc,bitmap,0,height,pixels.data(),&info,DIB_RGB_COLORS)==height,"help preview pixels readable");
+    const HWND body=GetDlgItem(window,100);
+    HDC textDc=GetDC(body);
+    for(HWND child=GetWindow(body,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT)) {
+        RECT field{}; GetWindowRect(child,&field); OffsetRect(&field,-r.left,-r.top);
+        SendMessageW(body,WM_CTLCOLORSTATIC,reinterpret_cast<WPARAM>(textDc),reinterpret_cast<LPARAM>(child));
+        const COLORREF ink=GetTextColor(textDc);
+        bool found=false;
+        for(int y=std::max(0L,field.top);y<std::min(LONG(height),field.bottom) && !found;++y)
+            for(int x=std::max(0L,field.left);x<std::min(LONG(width),field.right);++x) {
+                const DWORD pixel=pixels[size_t(y)*width+x];
+                if(abs(int((pixel>>16)&255)-GetRValue(ink))<16 &&
+                   abs(int((pixel>>8)&255)-GetGValue(ink))<16 && abs(int(pixel&255)-GetBValue(ink))<16) {
+                    found=true; break;
+                }
+            }
+        if(!found) std::fwprintf(stderr,L"Missing help preview text: %ls\n",Text(child).c_str());
+        Check(found,"every guide field has visible text in rendered preview");
+    }
+    ReleaseDC(body,textDc);
     UINT count=0,bytes=0; Gdiplus::GetImageEncodersSize(&count,&bytes);
     std::vector<BYTE> codecs(bytes); auto* list=reinterpret_cast<Gdiplus::ImageCodecInfo*>(codecs.data());
     Gdiplus::GetImageEncoders(count,bytes,list); bool saved=false;
@@ -223,13 +279,98 @@ void TestSettingsKeyRouting(TestWindow& help,HWND owner) {
     }
     DestroyWindow(combo); DestroyWindow(button); help.SetBindings(keys::Defaults);
 }
+void CheckInside(const RECT& rect,const RECT& work) {
+    if(rect.left<work.left || rect.top<work.top || rect.right>work.right || rect.bottom>work.bottom)
+        std::fprintf(stderr,"Outside work area: frame %ld,%ld..%ld,%ld work %ld,%ld..%ld,%ld\n",
+            rect.left,rect.top,rect.right,rect.bottom,work.left,work.top,work.right,work.bottom);
+    Check(rect.left>=work.left && rect.top>=work.top && rect.right<=work.right && rect.bottom<=work.bottom,
+          "guide frame stays inside monitor work area");
+    Check(rect.right>rect.left && rect.bottom>rect.top,"fitted guide has a positive size");
+}
+void TestDisplayLayouts(TestWindow& help,HWND owner,const char* snapshots) {
+    namespace keys=llcv::shortcuts;
+    unsigned cases=0;
+    const SIZE displays[]{{800,600},{1280,720},{1366,768},{1920,1080},{2560,1440},{3840,2160},{1080,1920}};
+    for(bool english:{false,true}) for(bool light:{false,true}) for(int bindings:{0,1,2}) {
+        auto custom=keys::Defaults;
+        if(bindings) {
+            if(bindings==2) for(size_t i=0;i<custom.size();++i)
+                custom[i]=keys::Ctrl|keys::Alt|keys::Shift|(VK_F13+unsigned(i));
+            custom[0]=keys::Ctrl|keys::Alt|keys::Shift|VK_RIGHT;
+            custom[8]=keys::Ctrl|keys::Alt|keys::Shift|VK_HOME;
+        }
+        Check(keys::Valid(custom),"display cases use valid bindings");
+        help.SetBindings(custom); help.Toggle(owner,english,L"v-test",SW_HIDE,light);
+        const HWND dialog=help.Handle(),body=GetDlgItem(dialog,100);
+        for(const auto display:displays) for(UINT dpi:{96u,120u,144u,168u,192u,240u,288u}) for(bool negative:{false,true}) {
+            const LONG x=negative ? -display.cx : 40, y=negative ? -120 : 24;
+            // Model a taskbar at either the top or bottom, including a monitor
+            // left of/above the primary. No OS display/DPI settings are changed.
+            const RECT work{x,y+32,x+display.cx,y+display.cy-32};
+            RECT preferred{work.right-100,work.bottom-100,work.right-100+MulDiv(820,dpi,96),
+                work.bottom-100+MulDiv(680,dpi,96)};
+            const RECT fitted=detail::FitToWorkArea(preferred,work);
+            CheckInside(fitted,work);
+            const auto again=detail::FitToWorkArea(fitted,work);
+            Check(EqualRect(&fitted,&again)!=FALSE,"work-area fitting is idempotent");
+            WindowTestAccess::Fit(help,work,&preferred);
+            WindowTestAccess::LayoutAtDpi(help,dpi);
+            RECT actual{},client{}; GetWindowRect(dialog,&actual); GetClientRect(dialog,&client);
+            CheckInside(actual,work);
+            const UINT effective=WindowTestAccess::Dpi(body);
+            Check(effective<=dpi && effective==detail::ContentDpi(dpi,client.right,client.bottom),
+                  "guide content never exceeds window DPI and fits small clients");
+            LOGFONTW font{};
+            Check(GetObjectW(reinterpret_cast<HFONT>(SendMessageW(body,WM_GETFONT,0,0)),sizeof(font),&font)!=0 &&
+                  font.lfHeight==-std::max(1,MulDiv(10,effective,72)),
+                  "font pixels follow the fitted guide DPI, not a stale monitor DPI");
+            Check(MulDiv(detail::kMinimumClientWidth,effective,96)<=client.right &&
+                  MulDiv(detail::kMinimumClientHeight,effective,96)<=client.bottom,
+                  "fitted logical minimum cannot exceed the physical client");
+            const SIZE minimum=WindowTestAccess::Minimum(help,work);
+            Check(minimum.cx<=work.right-work.left && minimum.cy<=work.bottom-work.top,
+                  "minimum tracking size never exceeds available work area");
+            CheckFields(body); CheckFooter(dialog); CheckPalette(body,light);
+            // Return to normal DPI and fit a different monitor. This also
+            // checks font replacement when both scaling up and scaling down.
+            const RECT normal{100,80,100+1920,80+1040};
+            WindowTestAccess::Fit(help,normal,&preferred);
+            WindowTestAccess::LayoutAtDpi(help,96);
+            CheckFields(body); CheckFooter(dialog);
+            ++cases;
+            if(snapshots && !negative && !light && bindings!=1 && display.cx==1920 && dpi==288) {
+                WindowTestAccess::Fit(help,work,&preferred);
+                WindowTestAccess::LayoutAtDpi(help,dpi);
+                Snapshot(dialog,std::filesystem::path(snapshots)/(std::string("help-1080p-300-")+
+                    (english ? "en" : "ko")+(bindings ? "-long.png" : ".png")));
+            }
+        }
+        // Exercise the actual notification handlers on only this hidden test
+        // window. The real monitor layout and viewer window are not touched.
+        for(UINT message:{UINT(WM_DISPLAYCHANGE),UINT(WM_SETTINGCHANGE),UINT(WM_EXITSIZEMOVE),UINT(WM_DPICHANGED)}) {
+            RECT offscreen{-30000,-30000,-28000,-28000};
+            SetWindowPos(dialog,nullptr,offscreen.left,offscreen.top,900,700,SWP_NOZORDER|SWP_NOACTIVATE);
+            SendMessageW(dialog,message,message==WM_DPICHANGED ? MAKELONG(192,192) :
+                message==WM_SETTINGCHANGE ? SPI_SETWORKAREA : 0,
+                message==WM_DPICHANGED ? reinterpret_cast<LPARAM>(&offscreen) : 0);
+            MONITORINFO monitor{sizeof(monitor)};
+            Check(GetMonitorInfoW(MonitorFromWindow(dialog,MONITOR_DEFAULTTONEAREST),&monitor)!=FALSE,"notification monitor");
+            RECT actual{}; GetWindowRect(dialog,&actual); CheckInside(actual,monitor.rcWork);
+            Check(help.Handle()==dialog && IsWindowEnabled(owner),"display changes preserve guide and viewer owner");
+            CheckFields(body); CheckFooter(dialog);
+        }
+        help.Close();
+    }
+    std::printf("%u monitor work-area / DPI / language / theme / binding layouts and live notification paths passed.\n",cases);
+}
 }
 int main(int argc,char** argv) {
     // Diagnostic mode records a complete resource trajectory without changing
     // the normal regression assertion. It is not a passing leak certification.
     const bool resourceDiagnostics=argc>1 && std::strcmp(argv[1],"--resource-diagnostics")==0;
+    const bool displayLayouts=argc>1 && std::strcmp(argv[1],"--display-layout")==0;
     const bool nativeIme=resourceDiagnostics || (argc>1 && std::strcmp(argv[1],"--with-ime")==0);
-    const bool saveSnapshots=argc>1 && !nativeIme;
+    const bool saveSnapshots=displayLayouts ? argc>2 : argc>1 && !nativeIme;
     // Isolate the strict process-wide GDI assertion from Windows' IME
     // service, which lazily creates persistent UI after focus/key messages.
     // This affects only this test thread, never the app or user IME settings.
@@ -254,6 +395,12 @@ int main(int argc,char** argv) {
     HWND owner=CreateWindowW(L"STATIC",L"Hidden help-test owner",WS_POPUP,
         0,0,640,480,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
     Check(owner!=nullptr,"owner");
+    if(displayLayouts) {
+        TestDisplayLayouts(help,owner,saveSnapshots ? argv[2] : nullptr);
+        DestroyWindow(owner);
+        if(token) Gdiplus::GdiplusShutdown(token);
+        return 0;
+    }
     Check(kHelpKey==VK_F1 && kScreenshotKey==VK_F12,"public shortcut bindings");
     DWORD stableGdi=0,stableUser=0,lastUserDiagnostic=0;
     for (bool light:{false,true}) for (bool english:{false,true}) {
@@ -291,18 +438,17 @@ int main(int argc,char** argv) {
             const auto stem=std::string(light ? "help-light-" : "help-dark-")+(english ? "en" : "ko");
             if (saveSnapshots && !trial) Snapshot(dialog,std::filesystem::path(argv[1])/(stem+".png"));
             RECT initial{}; GetWindowRect(dialog,&initial);
-            const UINT dpi=GetDpiForWindow(dialog);
-            SetWindowPos(dialog,nullptr,0,0,MulDiv(400,dpi,96),MulDiv(400,dpi,96),SWP_NOMOVE|SWP_NOACTIVATE|SWP_NOZORDER);
+            ResizeClient(dialog,760,640);
             CheckFields(edit);
+            RECT beforeWheel{}; GetWindowRect(GetDlgItem(edit,204),&beforeWheel);
             SendMessageW(edit,WM_VSCROLL,SB_BOTTOM,0);
-            SCROLLINFO scroll{sizeof(scroll),SIF_ALL}; GetScrollInfo(edit,SB_VERT,&scroll);
-            Check(scroll.nPos>0,"narrow layout scrolls to last section");
+            SendMessageW(edit,WM_MOUSEWHEEL,MAKEWPARAM(0,-WHEEL_DELTA),0);
+            RECT afterWheel{}; GetWindowRect(GetDlgItem(edit,204),&afterWheel);
+            Check(EqualRect(&beforeWheel,&afterWheel)!=FALSE,"wheel/scroll messages cannot shift guide content");
             CheckFields(edit);
             if (saveSnapshots && !trial) Snapshot(dialog,std::filesystem::path(argv[1])/(stem+"-narrow.png"));
             SetWindowPos(dialog,nullptr,0,0,initial.right-initial.left,initial.bottom-initial.top,SWP_NOMOVE|SWP_NOACTIVATE|SWP_NOZORDER);
             CheckFields(edit);
-            GetScrollInfo(edit,SB_VERT,&scroll);
-            Check(scroll.nPos<=std::max(0,scroll.nMax-int(scroll.nPage)+1),"resize clamps scroll offset");
             auto shot=Key(edit,VK_F12);
             const bool consumed=help.ProcessMessage(shot,owner,english,L"v-test",light);
             const bool requested=IsScreenshotRequest(shot,false);
@@ -438,20 +584,30 @@ int main(int argc,char** argv) {
           "Alt combination reaches custom help through WM_SYSKEYDOWN");
     help.SetBindings(llcv::shortcuts::Defaults);
     TestSettingsKeyRouting(help,owner);
-    for(bool english:{false,true}) for(bool light:{false,true}) for(bool remapped:{false,true}) {
+    for(bool english:{false,true}) for(bool light:{false,true}) for(int remapped:{0,1,2}) {
         auto custom=llcv::shortcuts::Defaults;
         if(remapped) {
+            if(remapped==2) for(size_t i=0;i<custom.size();++i)
+                custom[i]=llcv::shortcuts::Ctrl|llcv::shortcuts::Alt|llcv::shortcuts::Shift|(VK_F13+unsigned(i));
             custom[0]=llcv::shortcuts::Ctrl|llcv::shortcuts::Alt|llcv::shortcuts::Shift|VK_RIGHT;
             custom[8]=llcv::shortcuts::Ctrl|llcv::shortcuts::Alt|llcv::shortcuts::Shift|VK_HOME;
         }
         Check(llcv::shortcuts::Valid(custom),"footer uses valid longest bindings");
         help.SetBindings(custom); help.Toggle(owner,english,L"v-test",SW_HIDE,light);
         const UINT dpi=GetDpiForWindow(help.Handle());
-        for(int height:{500,300}) for(int width:{820,600,380,820}) {
-            SetWindowPos(help.Handle(),nullptr,0,0,MulDiv(width,dpi,96),MulDiv(height,dpi,96),
-                SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+        MINMAXINFO minimum{}; SendMessageW(help.Handle(),WM_GETMINMAXINFO,0,reinterpret_cast<LPARAM>(&minimum));
+        RECT frame{0,0,MulDiv(760,dpi,96),MulDiv(640,dpi,96)};
+        AdjustWindowRectExForDpi(&frame,static_cast<DWORD>(GetWindowLongPtrW(help.Handle(),GWL_STYLE)),FALSE,
+            static_cast<DWORD>(GetWindowLongPtrW(help.Handle(),GWL_EXSTYLE)),dpi);
+        MONITORINFO monitor{sizeof(monitor)};
+        Check(GetMonitorInfoW(MonitorFromWindow(help.Handle(),MONITOR_DEFAULTTONEAREST),&monitor)!=FALSE,"minimum-size monitor");
+        Check(minimum.ptMinTrackSize.x==std::min(frame.right-frame.left,monitor.rcWork.right-monitor.rcWork.left) &&
+              minimum.ptMinTrackSize.y==std::min(frame.bottom-frame.top,monitor.rcWork.bottom-monitor.rcWork.top),
+              "native minimum keeps two-column guide readable without scrolling");
+        for(int height:{640,680,768}) for(int width:{760,820,1024,820}) {
+            ResizeClient(help.Handle(),width,height);
             CheckFooter(help.Handle()); CheckFields(GetDlgItem(help.Handle(),100));
-            if(saveSnapshots && remapped && width==380 && height==500)
+            if(saveSnapshots && remapped && width==760 && height==640)
                 Snapshot(help.Handle(),std::filesystem::path(argv[1])/(std::string("help-long-")+
                     (english?"en":"ko")+(light?"-light.png":"-dark.png")));
         }

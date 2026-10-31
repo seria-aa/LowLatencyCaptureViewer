@@ -215,6 +215,10 @@ if you want normal idle sleep during playback.
 
 ## Collecting a useful report
 
+After reproducing the issue, use **Settings → Guide & logs → Create report ZIP** to
+collect recent logs, saved settings and error details. It is not uploaded automatically;
+extract and review it before attaching. See [collection and privacy masking](DIAGNOSTICS.md#log-files).
+
 Enable **Save diagnostic log file**, reproduce the failure once, and attach the
 newest file from:
 

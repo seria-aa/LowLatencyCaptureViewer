@@ -7,13 +7,15 @@
 
 namespace llcv::audio {
 
-// One audio producer (WASAPI owner or ASIO callback), one UI consumer.
-// Backend handover happens only after ASIO Stop has joined its callbacks.
+// One producer thread, one UI consumer. For audio the producer is the WASAPI
+// owner or ASIO callback; backend handover happens only after ASIO Stop has
+// joined its callbacks. The video render thread uses a separate instance.
 // Never allocate, lock, or perform I/O on the producer. If the UI is busy,
-// discard new diagnostics rather than delaying audio, and report that loss.
-class RealtimeLogQueue {
+// discard new diagnostics rather than delaying playback, and report that loss.
+template<size_t Capacity>
+class BasicRealtimeLogQueue {
 public:
-    static constexpr size_t kCapacity = 16;
+    static constexpr size_t kCapacity = Capacity;
     static constexpr size_t kMessageCharacters = 2048;
     using Message = std::array<wchar_t, kMessageCharacters>;
 
@@ -48,11 +50,18 @@ public:
         return dropped_.exchange(0, std::memory_order_relaxed);
     }
 
+    bool Empty() const noexcept {
+        return read_.load(std::memory_order_acquire) ==
+            write_.load(std::memory_order_acquire);
+    }
+
 private:
     std::array<Message, kCapacity + 1> messages_{};
     std::atomic<size_t> write_{0};
     std::atomic<size_t> read_{0};
     std::atomic<uint64_t> dropped_{0};
 };
+
+using RealtimeLogQueue = BasicRealtimeLogQueue<16>;
 
 } // namespace llcv::audio

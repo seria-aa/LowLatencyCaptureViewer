@@ -42,7 +42,7 @@
 - GPU regression suite: **10/10 passed**, covering SDR/HDR/VSR rendering,
   overlays, resize, MJPEG playback/recording and HEVC timestamp/arrival-clock
   sync. Together with the non-GPU suite: **157/157 tests passed**.
-- Evidence: build folder `C:/Users/P_vi/Documents/Codex/recording-input-switch-build`,
+- Evidence: build folder `recording-input-switch-build`,
   files `inline-video-regression.xml`, `inline-gpu-regression.xml`, `inline-final-view.log`,
   `inline-final-theme.log`; visual captures in
   `outputs/inline-video-ui-20261023/`.

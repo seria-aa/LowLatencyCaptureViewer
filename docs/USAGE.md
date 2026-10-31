@@ -63,6 +63,10 @@ returns to settings; **No** keeps playback and the current recording state.
 
 ### App information and shortcuts (default: F1)
 
+Keyboard shortcuts, mouse controls, and screenshot help fit on one screen without scrolling.
+The window stays inside the monitor work area, scaling its text and spacing together when space is limited.
+Position and layout adapt to resolution/DPI changes and moves between monitors while the guide is open.
+
 <details>
 <summary>View the app information window</summary>
 
@@ -76,7 +80,7 @@ Video contains capture/display settings, upscaling and screenshot options. **Mor
 to Frame rate contains unlisted FPS requests and 40 fps capture.
 Audio contains output devices, buffers, volume options, audio-only mode, and LPCM 5.1.
 Window controls placement, resizing, borders, and cursor behavior.
-Guide & logs groups shortcut editing and reset, 40 fps capture guidance, and diagnostic logging; App contains language,
+Guide & logs groups shortcut editing/reset, 40 fps guidance, logging and [report ZIP creation](DIAGNOSTICS.md#log-files); App contains language,
 theme, startup, sleep prevention, and update preferences.
 
 On small screens or at high display scales, settings fit within the desktop work

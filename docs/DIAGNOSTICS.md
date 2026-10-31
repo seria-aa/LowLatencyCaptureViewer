@@ -121,6 +121,31 @@ needed. Raise the target one step at a time if errors recur; try 30 ms if 25 ms 
 
 ## Log files
 
+Startup failure notices include the failed stage, requested capture mode and last
+validated input layout. If validation did not finish, the input is marked unconfirmed.
+
+**Guide & logs → Create report ZIP** collects up to five recent LLCV logs, saved
+playback/recording settings, app/Windows versions, current selections and startup error details. A confirmation
+lists what will be included. Creation runs in the background without probing devices or
+changing settings. The completed ZIP is stored under the application data folder's
+`reports` directory, which opens afterward. Recordings, screenshots and other apps'
+files are not collected; nothing is uploaded automatically.
+
+User-profile paths, the current recording folder, known device IDs and common USB instance/
+audio endpoint identifiers are masked in the ZIP. Device models and format information remain
+useful for diagnosis. Unrecognized identifiers or personal text can still remain; extract and
+review the contents before sharing. This masking does not alter the original logs or settings.
+If logs are missing, enable
+and apply log saving, reproduce the issue, then create another report. Include reproduction
+steps/time, capture-card and driver versions, the HDMI source's actual resolution/FPS/HDR
+and other running capture apps. A ZIP cannot guarantee a definitive diagnosis for every device.
+
+Settings can close during device queries; late results cannot update a destroyed window.
+An unresponsive driver call is not forcibly terminated. Playback startup waits up to five
+seconds for an in-flight query to release its device; a timeout is logged and shown instead
+of waiting indefinitely. Retry after the query finishes. If the driver remains stuck, restart
+LLCV and check the device/driver. Application shutdown can cancel the startup wait.
+
 Enable **Save diagnostic log file** in the **Guide & logs** tab. Logs are
 written to:
 
@@ -151,6 +176,12 @@ reporting a problem.
 
 **Show diagnostic console** displays the same live diagnostic output in a
 console window. It is disabled by default and is not required for file logging.
+QuickEdit is disabled for a console created by LLCV so an ordinary click does not
+enter text-selection mode. This does not control an inherited terminal or every
+manual selection mode. Steady playback video messages and queued audio diagnostics
+are written later by the UI; queues are bounded and may drop messages. UI flushing
+still performs synchronous output, and some startup/failure records remain direct,
+so this is not complete isolation from a blocked console or slow disk.
 
 When reporting a problem, include the complete log and state the capture device,
 source resolution/FPS, selected pixel format, capture audio device, and output

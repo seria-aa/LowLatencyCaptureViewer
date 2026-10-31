@@ -428,7 +428,7 @@ static int TestRawSdr() {
     return 0;
 }
 
-// RGB32/BGRX stage-2 GPU fidelity: asymmetric per-channel pattern (not just
+// RGB32/BGRX GPU fidelity: asymmetric per-channel pattern (not just
 // luma), top-down vs bottom-up orientation (VideoProcessorSetStreamMirror),
 // Full vs Limited RGB range, the garbage X byte never leaking into the
 // output, and a resize + repeated draw. Skips cleanly (77) if the driver

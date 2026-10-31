@@ -537,7 +537,7 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     place(state->upscalerLabel, 600, 392, 340, 20);
     place(state->upscalerCombo, 600, 420, 376, 150);
     place(state->nisSharpnessLabel, 600, 460, 132, 30);
-    place(state->nisSharpnessCombo, 740, 460, 88, 180);
+    place(state->nisSharpnessCombo, 740, 460, 88, 230);
     place(state->vsrGuideButton, 952, 390, 24, 24);
     const bool cmaaDetail=SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)==1;
     place(state->vsrStatus, cmaaDetail ? 844 : 600, 460, cmaaDetail ? 132 : 376, 30);
@@ -574,6 +574,7 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     place(state->saveLogCheck, 600, 196, 376, 32);
     place(state->showConsoleCheck, 600, 236, 376, 32);
     place(state->guideLogFolderButton, 600, 284, 185, 32);
+    place(state->guideReportButton, 801, 284, 175, 32);
     place(state->guideLsButton, 600, 348, 376, 32);
 
     // App-wide preferences no longer dominate every page.
@@ -789,6 +790,7 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     SetSettingsControlVisible(state->guideDiagnosticsTitle, guide);
     SetSettingsControlVisible(state->guideDiagnosticsText, guide);
     SetSettingsControlVisible(state->guideLogFolderButton, guide);
+    SetSettingsControlVisible(state->guideReportButton, guide, !state->reportPending);
     SetSettingsControlVisible(state->screenshotTitle, video);
     if (state->vsrGpuUnavailable && SendMessageW(state->upscalerCombo,CB_GETCURSEL,0,0)==2)
         SendMessageW(state->upscalerCombo,CB_SETCURSEL,0,0);

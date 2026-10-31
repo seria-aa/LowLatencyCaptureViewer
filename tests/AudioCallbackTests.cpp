@@ -153,6 +153,17 @@ void TestRealtimeDiagnosticQueue() {
             std::wcslen(message.data()) == message.size() - 1,
             "oversized diagnostics are bounded and terminated");
 
+    llcv::audio::BasicRealtimeLogQueue<64> videoQueue;
+    Require(videoQueue.Empty(), "render diagnostic queue starts empty");
+    for (size_t index = 0; index < 64; ++index)
+        Require(videoQueue.Push(std::to_wstring(index).c_str()), "render queue accepts a recovery burst");
+    Require(!videoQueue.Empty() && !videoQueue.Push(L"overflow") && videoQueue.TakeDropped() == 1,
+            "render queue stays bounded and reports drops");
+    for (size_t index = 0; index < 64; ++index)
+        Require(videoQueue.Pop(message) && message.data() == std::to_wstring(index),
+                "render queue preserves FIFO order");
+    Require(videoQueue.Empty(), "drained render queue reports empty");
+
     constexpr unsigned count = 100000;
     std::atomic<bool> finished{false};
     std::thread producer([&] {
@@ -557,6 +568,7 @@ void TestSettingsCapabilityRefresh() {
     std::puts("Settings capability refresh: asynchronous completion, 1000 cache hits, 64 failure/recovery pairs passed.");
 }
 
+#include "SettingsProbeFixtures.h"
 void TestExclusiveScanResultLifetime() {
     SettingsDialogState state;
     state.audioEndpoints.resize(2);
@@ -574,17 +586,17 @@ void TestExclusiveScanResultLifetime() {
     });
     state.exclusiveProbeThread.join();
     Require(state.exclusiveScanRunning.load() &&
-                state.pendingExclusiveProbeResults.size() == 1 &&
+                state.exclusiveWork->pending.size() == 1 &&
                 state.exclusiveScanCompleted == 0,
             "finished scan must retain unread results and stay busy until UI completion");
     StartExclusiveEndpointScan(&state, nullptr, true);
     Require(!state.exclusiveProbeThread.joinable() &&
-                state.pendingExclusiveProbeResults.size() == 1 &&
+                state.exclusiveWork->pending.size() == 1 &&
                 state.exclusiveScanCompleted == 0,
             "queued old scan completion must block restart without opening any endpoint");
     CompleteExclusiveEndpointScan(&state);
     Require(!state.exclusiveScanRunning.load() &&
-                state.pendingExclusiveProbeResults.empty() &&
+                state.exclusiveWork->pending.empty() &&
                 state.exclusiveScanCompleted == 1 &&
                 state.exclusiveEndpointResults[0].state ==
                     ExclusiveEndpointState::Supported &&
@@ -610,6 +622,9 @@ void TestExclusiveScanResultLifetime() {
     StartExclusiveEndpointScan(&empty, nullptr, true);
     Require(empty.exclusiveProbeThread.joinable(),
             "a fresh scan must be allowed after the previous UI completion");
+    const auto deadline=GetTickCount64()+3000;
+    while(!empty.exclusiveWork->done && GetTickCount64()<deadline)Sleep(1);
+    Require(empty.exclusiveWork->done,"worker publishes completion before UI joins");
     CompleteExclusiveEndpointScan(&empty);
     Require(!empty.exclusiveScanRunning.load() &&
                 !empty.exclusiveProbeThread.joinable(),
@@ -621,7 +636,7 @@ void TestExclusiveScanResultLifetime() {
     ExclusiveEndpointProbeResult unread;
     unread.probe.summary.assign(4096, L'x');
     QueueExclusiveEndpointProbeResult(&discarded, std::move(unread));
-    Require(discarded.pendingExclusiveProbeResults.size() == 1,
+    Require(discarded.exclusiveWork->pending.size() == 1,
             "dialog state must own results that will never receive a UI notification");
 }
 

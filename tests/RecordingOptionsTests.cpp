@@ -70,6 +70,27 @@ int main(){
     for(auto mode:{SplitMode::None,SplitMode::Time,SplitMode::Size}){o.splitMode=mode;Check(SaveOptions(o,path.wstring())&&LoadOptions(path.wstring())==o,"split policy round trip");}
     o.rateControl=RateControl::Bitrate;o.quality=llcv::recording::Quality::High;
     Check(SaveOptions(o,path.wstring())&&LoadOptions(path.wstring())==o,"both rate modes round trip");
+    const auto corrupt = [&](const wchar_t* key, const wchar_t* value, auto member, auto fallback) {
+        Check(SaveOptions(o,path.wstring()),"reset isolated corruption fixture");
+        Check(WritePrivateProfileStringW(L"Recording",key,value,path.c_str())!=FALSE,"inject one invalid field");
+        auto expected=o; expected.*member=fallback;
+        Check(LoadOptions(path.wstring())==expected,"only invalid field recovers; all other preferences survive");
+    };
+    corrupt(L"Codec",L"3",&Options::codec,Codec::H264);
+    corrupt(L"MaxFps",L"90",&Options::maxFps,60);
+    corrupt(L"MaxHeight",L"900",&Options::maxHeight,1080);
+    corrupt(L"SplitMode",L"-1",&Options::splitMode,SplitMode::None);
+    corrupt(L"SplitSeconds",L"0",&Options::splitSeconds,1800);
+    corrupt(L"SplitMiB",L"1048577",&Options::splitMiB,4096);
+    corrupt(L"VideoMbps",L"101",&Options::videoMbps,20);
+    corrupt(L"AudioKbps",L"256",&Options::audioKbps,192);
+    corrupt(L"AudioVolumePercent",L"101",&Options::audioVolumePercent,100);
+    corrupt(L"Quality",L"7",&Options::quality,llcv::recording::Quality::Balanced);
+    corrupt(L"RateControl",L"2",&Options::rateControl,RateControl::Bitrate);
+    corrupt(L"Encoder",L"not-an-encoder",&Options::encoder,std::wstring{});
+    for(const auto* value:{L"abc",L"30junk",L"0x1e",L"-1",L"9999999999999999999999999999999999999999999999999999999999999999999999"})
+        corrupt(L"MaxFps",value,&Options::maxFps,60);
+    Check(SaveOptions(o,path.wstring()),"restore legacy migration fixture");
     Check(WritePrivateProfileStringW(L"Recording",L"RateControl",nullptr,path.c_str())!=FALSE,"make legacy profile");
     Check(LoadOptions(path.wstring()).rateControl==RateControl::Bitrate,"legacy bitrate profile is not silently switched to CQP");
     Check(WritePrivateProfileStringW(L"Recording",L"AudioVolumePercent",nullptr,path.c_str())!=FALSE,"make legacy recording gain profile");

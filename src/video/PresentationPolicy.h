@@ -10,6 +10,7 @@ using Mode = settings::PresentationMode;
 constexpr bool IsExclusive(Mode mode) { return mode == Mode::ExclusiveFullscreen; }
 constexpr bool UsesVSync(Mode mode) { return mode == Mode::VSync || mode == Mode::Compatibility; }
 constexpr bool IsCompatibility(Mode mode) { return mode == Mode::Compatibility; }
+constexpr bool UsesPresentationReadiness(Mode mode) { return mode == Mode::VSync; }
 // P010 is HDR-only even when Force HDR10 is off. Audio-only has no video output.
 constexpr bool SupportsCapture(Mode mode, settings::VideoPixelFormat format,
                                bool audioOnly = false) {

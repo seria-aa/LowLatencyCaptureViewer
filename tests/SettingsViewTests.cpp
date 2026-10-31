@@ -68,6 +68,7 @@ static constexpr Member kMembers[] = {
     {&SettingsControls::guideDiagnosticsTitle, "guideDiagnosticsTitle"},
     {&SettingsControls::guideDiagnosticsText, "guideDiagnosticsText"},
     {&SettingsControls::guideLogFolderButton, "guideLogFolderButton"},
+    {&SettingsControls::guideReportButton, "guideReportButton"},
     {&SettingsControls::screenshotClipboardCheck, "screenshotClipboardCheck"},
     {&SettingsControls::screenshotTitle, "screenshotTitle"},
     {&SettingsControls::screenshotHelp, "screenshotHelp"},
@@ -227,6 +228,7 @@ static constexpr Geometry kGeometry[] = {
     {&SettingsControls::saveLogCheck, "saveLogCheck", 600, 196, 196, 376, 32},
     {&SettingsControls::showConsoleCheck, "showConsoleCheck", 600, 236, 236, 376, 32},
     {&SettingsControls::guideLogFolderButton, "guideLogFolderButton", 600, 284, 284, 185, 32},
+    {&SettingsControls::guideReportButton, "guideReportButton", 801, 284, 284, 175, 32},
     {&SettingsControls::updateNowButton, "updateNowButton", 184, 460, 460, 185, 32},
 };
 static RECT ClientRectOf(HWND parent, HWND child) {
@@ -1040,6 +1042,7 @@ static void TestActualControlCreation() {
     {&SettingsControls::preventSleepCheck, 2056},
     {&SettingsControls::checkForUpdatesCheck, 2035},
     {&SettingsControls::guideLogFolderButton, 2039},
+    {&SettingsControls::guideReportButton, 2084},
     {&SettingsControls::screenshotClipboardCheck, 2047},
     {&SettingsControls::capture40Check, 2057},
     {&SettingsControls::unlistedFpsCheck, 2078},
@@ -1142,8 +1145,10 @@ static void TestActualControlCreation() {
         CreateSettingsDialogControls(&state, parent, GetModuleHandleW(nullptr), initial, population);
         Check(probe.stage == 3, "each population callback invoked exactly once");
         for (const auto& member : kMembers) Check(IsWindow(state.*member.handle) != FALSE, member.name);
-        for (const auto& item : controlIds)
+        for (const auto& item : controlIds) {
             Check(GetDlgCtrlID(state.*item.handle) == item.id, "original control/event ID retained");
+            Check(GetDlgItem(parent,item.id)==state.*item.handle,"control/event IDs uniquely identify their intended control");
+        }
         const auto selection = [](HWND combo) { return SendMessageW(combo, CB_GETCURSEL, 0, 0); };
         Check(SendMessageW(state.tabControl, LB_GETCOUNT, 0, 0) == kSettingsNavigationCount &&
               SendMessageW(state.tabControl, LB_GETCURSEL, 0, 0) == SettingsNavigationIndex(state.activeTab),
@@ -1208,7 +1213,9 @@ static void TestActualControlCreation() {
                   "upscaler selection preserves capture and display");
             Check(Visible(state.nisSharpnessCombo)==(mode==1 && state.activeTab==SettingsTab::VideoWindow),
                   "sharpness appears only for CMAA/NIS on video page");
-            Check(SendMessageW(state.nisSharpnessCombo,CB_GETCURSEL,0,0)==15,"NIS default is 0.15");
+            Check(SelectedNisSharpness(state.nisSharpnessCombo)==15,"NIS default is 0.15");
+            Check(SendMessageW(state.nisSharpnessCombo,CB_GETCOUNT,0,0)==7,
+                  "NIS lists seven presets instead of 101 hundredths");
             auto applied = settings;
             ApplyResolutionSelections(state, presets, applied);
             Check(applied.fullscreenVideoPosition == settings.fullscreenVideoPosition,
@@ -1692,7 +1699,7 @@ static void TestCompactWorkAreas() {
             state.audioCombo,state.audioOutputCombo,state.bufferCombo,state.exclusiveTestButton,
             state.volumeHudCombo,state.volumeBoostCheck,state.muteBackgroundCheck,state.audioOnlyCheck,state.surround51Check,
             state.driftCombo,state.pcmQueueCombo,state.relativeSizeCheck,state.borderlessCheck,state.roundedCornersCheck,
-            state.windowSnapCheck,state.fullscreenCursorCombo,state.saveLogCheck,state.showConsoleCheck,state.guideLogFolderButton,
+            state.windowSnapCheck,state.fullscreenCursorCombo,state.saveLogCheck,state.showConsoleCheck,state.guideLogFolderButton,state.guideReportButton,
             state.languageCombo,state.themeCombo,state.skipStartupCheck,state.preventSleepCheck,state.checkForUpdatesCheck,state.updateNowButton})
             Check(seen.contains(required),"all settings remain reachable across compact section pages");
         for(HWND description:{state.videoCapabilityStatus,state.screenshotTitle,state.screenshotHelp,
@@ -1714,10 +1721,56 @@ static void TestCompactWorkAreas() {
     std::puts("Compact work areas: 8 sizes/scales, Korean/English, every option, fixed font, no scroll passed.");
 }
 
+static void TestNisSharpnessChoices() {
+    HWND owner = CreateWindowW(L"STATIC", L"Sharpness choice fixture", WS_POPUP,
+        0, 0, 400, 300, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    HWND picker = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST,
+        0, 0, 120, 230, owner, nullptr, GetModuleHandleW(nullptr), nullptr);
+    Check(owner && picker, "create isolated sharpness picker");
+    const std::set<int> presets{0, 10, 15, 20, 30, 50, 100};
+    for (int saved = 0; saved <= 100; ++saved) {
+        PopulateNisSharpnessPicker(picker, saved);
+        const LRESULT count = SendMessageW(picker, CB_GETCOUNT, 0, 0);
+        Check(count == (presets.contains(saved) ? 7 : 8), "only presets and one saved custom value are listed");
+        Check(SelectedNisSharpness(picker) == saved, "all existing hundredth values restore exactly");
+        int previous = -1;
+        for (LRESULT row = 0; row < count; ++row) {
+            const int value = int(SendMessageW(picker, CB_GETITEMDATA, row, 0));
+            Check(value > previous && value <= 100 && (presets.contains(value) || value == saved),
+                "sharpness choices are sorted and never duplicated");
+            wchar_t label[32]{}, expected[32]{};
+            SendMessageW(picker, CB_GETLBTEXT, row, reinterpret_cast<LPARAM>(label));
+            swprintf_s(expected, L"%.2f", double(value) / 100.0);
+            Check(!std::wcscmp(label, expected), "sharpness label represents its actual value");
+            SendMessageW(picker, CB_SETCURSEL, row, 0);
+            Check(SelectedNisSharpness(picker) == value, "saving uses item value, never its reduced-list index");
+            previous = value;
+        }
+    }
+    PopulateNisSharpnessPicker(picker, 37);
+    PopulateNisSharpnessPicker(picker, 15);
+    Check(SendMessageW(picker, CB_GETCOUNT, 0, 0) == 7 && SelectedNisSharpness(picker) == 15,
+        "reopening with a preset does not accumulate old custom choices");
+    for (const auto [invalid, expected] : {std::pair{-1, 0}, std::pair{101, 100}}) {
+        PopulateNisSharpnessPicker(picker, invalid);
+        Check(SelectedNisSharpness(picker) == expected, "out-of-range initialization remains bounded");
+    }
+    SendMessageW(picker, CB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+    Check(SelectedNisSharpness(picker) == 15, "empty selection falls back to the existing default");
+    SendMessageW(picker, CB_SETCURSEL, 0, 0);
+    SendMessageW(picker, CB_SETITEMDATA, 0, 101);
+    Check(SelectedNisSharpness(picker) == 15 && SelectedNisSharpness(nullptr) == 15,
+        "invalid selection metadata cannot become a render strength");
+    DestroyWindow(owner);
+    std::puts("NIS choices: 7 presets, all 101 saved values, item-value mapping and fallback passed.");
+}
+
 int main(int argc, char** argv) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX init{sizeof(init), ICC_WIN95_CLASSES};
     Check(InitCommonControlsEx(&init) != FALSE, "initialize tooltip controls");
+    TestNisSharpnessChoices();
+    if(argc==2 && std::strcmp(argv[1],"--nis-only")==0) return EXIT_SUCCESS;
     if(argc==2 && std::strcmp(argv[1],"--compact-only")==0) {
         TestCompactWorkAreas();
         return EXIT_SUCCESS;
@@ -1843,6 +1896,7 @@ int main(int argc, char** argv) {
             ExpectVisible(state.windowSnapCheck, tab == SettingsTab::Window);
             ExpectVisible(state.roundedCornersCheck, tab == SettingsTab::Window);
             ExpectVisible(state.guideLogFolderButton, tab == SettingsTab::GuideDiagnostics);
+            ExpectVisible(state.guideReportButton, tab == SettingsTab::GuideDiagnostics);
             Check((IsWindowEnabled(state.guideKeys.back())!=FALSE)==(tab==SettingsTab::GuideDiagnostics),
                   "exit remains editable on the guide page");
             ExpectVisible(state.screenshotTitle, tab == SettingsTab::VideoWindow);

@@ -9,7 +9,7 @@ namespace llcv::capture {
 // alongside the frame event avoids per-frame COM polling and device rescans.
 class CaptureGraphEvents {
 public:
-    enum class WaitReason { Notification, Frame, Timeout, Wake, Completed, Error };
+    enum class WaitReason { Notification, Frame, Timeout, Wake, Completed, Error, PresentationReady };
 
     HRESULT Initialize(IGraphBuilder* graph) {
         Reset();
@@ -42,15 +42,17 @@ public:
     // S_FALSE means a normal timeout; LastWaitReason distinguishes successful
     // frame/notification/wake/completion results. No-input timeouts alone are
     // not device-loss evidence. A completed graph stays completed until reset.
-    HRESULT Wait(HANDLE frame, DWORD timeout, HANDLE wake = nullptr) {
+    HRESULT Wait(HANDLE frame, DWORD timeout, HANDLE wake = nullptr, HANDLE presentation = nullptr) {
         if (completed_) return FinishWait(S_OK, WaitReason::Completed);
         if (!handle_) return FailWait(E_UNEXPECTED);
-        HANDLE handles[3]{handle_};
+        HANDLE handles[4]{handle_};
         DWORD handleCount = 1;
         const DWORD wakeIndex = wake ? handleCount++ : MAXDWORD;
         if (wake) handles[wakeIndex] = wake;
         const DWORD frameIndex = frame ? handleCount++ : MAXDWORD;
         if (frame) handles[frameIndex] = frame;
+        const DWORD presentationIndex = presentation ? handleCount++ : MAXDWORD;
+        if (presentation) handles[presentationIndex] = presentation;
         // Graph events win over lifecycle wakeups, which win over ready video.
         // With no wake handle this remains the original graph/frame wait.
         const DWORD status = WaitForMultipleObjects(handleCount, handles, FALSE, timeout);
@@ -58,6 +60,8 @@ public:
         if (status == WAIT_FAILED) return FailWait(HRESULT_FROM_WIN32(GetLastError()));
         if (wake && status == WAIT_OBJECT_0 + wakeIndex) return FinishWait(S_OK, WaitReason::Wake);
         if (frame && status == WAIT_OBJECT_0 + frameIndex) return FinishWait(S_OK, WaitReason::Frame);
+        if (presentation && status == WAIT_OBJECT_0 + presentationIndex)
+            return FinishWait(S_OK, WaitReason::PresentationReady);
         if (status != WAIT_OBJECT_0) return FailWait(E_UNEXPECTED);
         // Bound a notification burst. The graph keeps its event signaled until
         // all queued events are consumed, so the next wait continues draining.
