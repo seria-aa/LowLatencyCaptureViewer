@@ -52,6 +52,8 @@ using HresultLogCallback = void (*)(
 struct Host {
     void* context = nullptr;
     const std::atomic<bool>* running = nullptr;
+    // Optional. Closes this output while the application keeps running.
+    const std::atomic<bool>* stop = nullptr;
     FillCallback fill = nullptr;
     EndpointCallback endpointChanged = nullptr;
     BufferCallback bufferChanged = nullptr;

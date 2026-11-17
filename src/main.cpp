@@ -53,6 +53,7 @@
 #include "capture/AudioInputRecovery.h"
 #endif
 #include "capture/DirectShowGraphResources.h"
+#include "capture/VideoOnlyStart.h"
 #include "capture/LatestVideoSample.h"
 #include "diagnostics/CaptureFrameRateMonitor.h"
 #ifdef LLCV_RECORDING
@@ -1196,6 +1197,46 @@ static PcmRing g_ring{kRingFrames, &g_audioRingFrames,
                       OnPcmRingOverrun, nullptr};
 static bool Surround51Active() { return g_ring.Channels() == 6; }
 static std::atomic<bool> g_captureAudioRejected{false};
+// Set once a session is confirmed as video only: the output thread then
+// releases its endpoint (an Exclusive or ASIO device would otherwise stay
+// claimed while playing nothing).
+static std::atomic<bool> g_audioOutputClosed{false};
+static bool AudioOutputWanted() {
+    return g_running.load(std::memory_order_acquire) &&
+        !g_audioOutputClosed.load(std::memory_order_acquire);
+}
+// Session-only: the user declined to start without capture audio, so the
+// generic startup-failure dialog must not repeat the same question.
+static std::atomic<bool> g_videoOnlyStartDeclined{false};
+static std::atomic<bool> g_unattendedStart{false};
+// Capture thread, before the graph runs. Asks whether a device whose audio
+// branch could not be built should be viewed without sound.
+static bool ConfirmVideoOnlyStart(HWND owner, const wchar_t* stage, HRESULT failure, bool surround) {
+#ifdef LLCV_SETTINGS_MODE_TEST
+    (void)owner; (void)stage; (void)failure; (void)surround;
+    return false;
+#else
+    // No prompt without a user, or above an exclusive fullscreen output.
+    if (llcv::capture::OnCaptureAudioFailure(g_unattendedStart.load(std::memory_order_acquire),
+            ExclusiveOutputSelected()) != llcv::capture::AudioFailureAction::AskVideoOnly) return false;
+    wchar_t message[900]{};
+    swprintf_s(message, IsEnglishUi()
+        ? L"Capture audio could not be connected.\n\nStage: %s\nError: 0x%08X  %s\n%s\n"
+          L"Start with video only?\n\nThere will be no sound, and recording is unavailable until capture is restarted with audio. "
+          L"Choose No to return to Settings."
+        : L"캡처 오디오를 연결하지 못했습니다.\n\n단계: %s\n오류: 0x%08X  %s\n%s\n"
+          L"영상만 시작할까요?\n\n소리가 나지 않으며, 오디오와 함께 다시 시작하기 전까지 녹화할 수 없습니다. "
+          L"아니요를 누르면 설정으로 돌아갑니다.",
+        stage, static_cast<unsigned>(failure), HrText(failure).c_str(),
+        !surround ? L"" : IsEnglishUi()
+            ? L"\nConsole LPCM 5.1 needs a 48 kHz 5.1/7.1 PCM capture input; Dolby/DTS bitstreams are not supported.\n"
+            : L"\n콘솔 LPCM 5.1에는 48 kHz 5.1/7.1 PCM 캡처 입력이 필요하며 Dolby/DTS 비트스트림은 지원하지 않습니다.\n");
+    const auto answer = llcv::capture::AfterVideoOnlyPrompt(MessageBoxW(owner, message, L"LLCV",
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1 | MB_SETFOREGROUND) == IDYES);
+    if (answer.returnToSettingsQuietly) g_videoOnlyStartDeclined.store(true, std::memory_order_release);
+    return answer.startVideoOnly;
+#endif
+}
 #ifdef LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC
 static std::atomic<bool> g_audioInputRecoveryExhausted{false};
 #endif
@@ -1882,6 +1923,7 @@ static llcv::wasapi::RunResult AudioRenderThreadWasapi(
     llcv::wasapi::Host host{};
     host.context = &state;
     host.running = &g_running;
+    host.stop = &g_audioOutputClosed;
     host.fill = &FillWasapiPcm;
     host.endpointChanged = &OnWasapiEndpointChanged;
     host.bufferChanged = &OnWasapiBufferChanged;
@@ -1905,10 +1947,10 @@ static llcv::wasapi::RunResult AudioRenderThreadWasapi(
 
 static bool WaitForAudioRetry(unsigned milliseconds) {
     const uint64_t until = GetTickCount64() + milliseconds;
-    while (g_running.load(std::memory_order_acquire) && GetTickCount64() < until) {
+    while (AudioOutputWanted() && GetTickCount64() < until) {
         Sleep(25);
     }
-    return g_running.load(std::memory_order_acquire);
+    return AudioOutputWanted();
 }
 
 static bool AudioRenderThreadAsio() {
@@ -1964,7 +2006,7 @@ static bool AudioRenderThreadAsio() {
                        : L"off (unaltered PCM samples)");
     llcv::audio::RecoveryPolicy recovery;
     bool restartFailed = false;
-    while (g_running.load(std::memory_order_acquire)) {
+    while (AudioOutputWanted()) {
         if (!output.RestartRequested()) {
             Sleep(50);
             continue;
@@ -1975,7 +2017,7 @@ static bool AudioRenderThreadAsio() {
         g_asioAudioStarted.store(false, std::memory_order_release);
         g_audioActualBufferFrames.store(0, std::memory_order_release);
         bool restarted = false;
-        while (g_running.load(std::memory_order_acquire)) {
+        while (AudioOutputWanted()) {
             const unsigned delay = recovery.NextDelay();
             if (!delay) {
                 fwprintf(stderr, L"[audio] ASIO recovery limit reached.\n");
@@ -2019,7 +2061,7 @@ static bool AudioRenderThreadAsio() {
     return !restartFailed;
 }
 
-static void AudioRenderThread() {
+static void RunAudioOutput() {
     // A closing settings scan can still own an exclusive endpoint. Wait on the
     // audio worker, not the UI, and let shutdown cancel this wait. Hold the
     // lease for the session so no late scan can seize the active output.
@@ -2038,7 +2080,7 @@ static void AudioRenderThread() {
     bool reinitializingEndpoint = false;
     AudioMode mode = ActiveAudioMode();
     if (mode == AudioMode::Asio) {
-        if (AudioRenderThreadAsio()) return;
+        if (AudioRenderThreadAsio() || !AudioOutputWanted()) return;
         // A broken/unavailable ASIO driver must not leave the viewer silent.
         // Fall back to the unchanged WASAPI Shared path for this session.
         fwprintf(stderr,
@@ -2052,13 +2094,13 @@ static void AudioRenderThread() {
         reinitializingEndpoint = true;
     }
     llcv::audio::RecoveryPolicy recovery;
-    while (g_running.load(std::memory_order_acquire)) {
+    while (AudioOutputWanted()) {
         uint64_t successfulRuntimeMilliseconds = 0;
         const auto result = AudioRenderThreadWasapi(
             mode, reinitializingEndpoint,
             &successfulRuntimeMilliseconds);
         recovery.ObserveSuccessfulRuntime(successfulRuntimeMilliseconds);
-        if (!g_running.load(std::memory_order_acquire) ||
+        if (!AudioOutputWanted() ||
             result == llcv::wasapi::RunResult::Stopped) break;
         if (result == llcv::wasapi::RunResult::Failed) {
             SetActiveAudioOutputName(keys::Expand(UI_TEXT(L"WASAPI: 출력 사용 불가 · F2로 설정 확인"),g_settings.shortcuts));
@@ -2086,6 +2128,18 @@ static void AudioRenderThread() {
         g_audioWasapiPaddingFrames.store(0, std::memory_order_release);
         if (!WaitForAudioRetry(delay)) break;
         reinitializingEndpoint = true;
+    }
+}
+
+static void AudioRenderThread() {
+    RunAudioOutput();
+    if (g_running.load(std::memory_order_acquire) &&
+        g_audioOutputClosed.load(std::memory_order_acquire)) {
+        SetActiveAudioOutputName(IsEnglishUi() ? L"Video only · audio output closed"
+                                               : L"영상만 재생 · 오디오 출력 닫힘");
+        g_audioActualBufferFrames.store(0, std::memory_order_release);
+        g_audioWasapiPaddingFrames.store(0, std::memory_order_release);
+        QueueAudioDiagnostic(L"[audio] output closed for this video-only session.\n");
     }
 }
 
@@ -5123,104 +5177,130 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
         callback = new llcv::capture::VideoSampleGrabberCallback(&latest, nullptr, sampleFormat);
         hr = grabber->SetCallback(callback, 0);
         if (FAILED(hr)) break;
-        // Prefer an audio pin on the selected video filter. Many USB UVC
-        // capture devices instead expose their capture audio as a separate
-        // DirectShow audio-input filter, which is added to this same graph.
-        IBaseFilter* audioSource = capture;
-        g_activeCaptureAudioDeviceName = g_activeCaptureDeviceName;
-        initializationStage = L"find audio output pin on video capture filter";
-        hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-        if (g_settings.captureAudioDeviceId.empty()) {
-            hr = Surround51Active()
-                ? llcv::capture_audio::FindSurroundPin(capture, &audioPin)
-                : FindOutputPinByName(capture, kAudioPinName, &audioPin);
-            if (FAILED(hr) && !Surround51Active()) {
-                hr = FindOutputPinByMajorType(capture, MEDIATYPE_Audio, &audioPin);
+        // A device whose audio branch cannot be built can still be viewed.
+        // The graph is not running yet, so the branch can be detached.
+        const auto connectCaptureAudio = [&]() -> HRESULT {
+            // Prefer an audio pin on the selected video filter. Many USB UVC
+            // capture devices instead expose their capture audio as a separate
+            // DirectShow audio-input filter, which is added to this same graph.
+            IBaseFilter* audioSource = capture;
+            g_activeCaptureAudioDeviceName = g_activeCaptureDeviceName;
+            initializationStage = L"find audio output pin on video capture filter";
+            hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+            if (g_settings.captureAudioDeviceId.empty()) {
+                hr = Surround51Active()
+                    ? llcv::capture_audio::FindSurroundPin(capture, &audioPin)
+                    : FindOutputPinByName(capture, kAudioPinName, &audioPin);
+                if (FAILED(hr) && !Surround51Active()) {
+                    hr = FindOutputPinByMajorType(capture, MEDIATYPE_Audio, &audioPin);
+                }
+                if (Surround51Active()) g_captureAudioRejected.store(FAILED(hr));
             }
-            if (Surround51Active()) g_captureAudioRejected.store(FAILED(hr));
-        }
-        if (FAILED(hr)) {
-            initializationStage = g_settings.captureAudioDeviceId.empty()
-                ? L"find matching separate capture audio filter"
-                : L"find selected separate capture audio filter";
-            hr = FindCaptureAudioFilter(g_settings.captureAudioDeviceId,
-                                        g_activeCaptureDeviceName,
-                                        &audioCapture,
-                                        &g_activeCaptureAudioDeviceName);
-            if (FAILED(hr)) break;
-            initializationStage = L"add separate capture audio filter";
-            hr = graph->AddFilter(audioCapture, L"Selected Capture Audio Device");
-            if (FAILED(hr)) break;
-            audioSource = audioCapture;
-            initializationStage = L"find audio output pin on separate capture filter";
-            hr = Surround51Active()
-                ? llcv::capture_audio::FindSurroundPin(audioSource, &audioPin)
-                : FindOutputPinByMajorType(audioSource, MEDIATYPE_Audio, &audioPin);
-            if (Surround51Active()) g_captureAudioRejected.store(FAILED(hr));
-        }
-        if (FAILED(hr)) break;
-        g_captureAudioAvailable.store(true, std::memory_order_release);
+            if (FAILED(hr)) {
+                initializationStage = g_settings.captureAudioDeviceId.empty()
+                    ? L"find matching separate capture audio filter"
+                    : L"find selected separate capture audio filter";
+                hr = FindCaptureAudioFilter(g_settings.captureAudioDeviceId,
+                                            g_activeCaptureDeviceName,
+                                            &audioCapture,
+                                            &g_activeCaptureAudioDeviceName);
+                if (FAILED(hr)) return hr;
+                initializationStage = L"add separate capture audio filter";
+                hr = graph->AddFilter(audioCapture, L"Selected Capture Audio Device");
+                if (FAILED(hr)) return hr;
+                audioSource = audioCapture;
+                initializationStage = L"find audio output pin on separate capture filter";
+                hr = Surround51Active()
+                    ? llcv::capture_audio::FindSurroundPin(audioSource, &audioPin)
+                    : FindOutputPinByMajorType(audioSource, MEDIATYPE_Audio, &audioPin);
+                if (Surround51Active()) g_captureAudioRejected.store(FAILED(hr));
+            }
+            if (FAILED(hr)) return hr;
+            g_captureAudioAvailable.store(true, std::memory_order_release);
 
-        initializationStage = L"negotiate supported capture audio format";
-        llcv::capture_audio::Rejection audioFormatRejection =
-            llcv::capture_audio::Rejection::Malformed;
-        selectedAudioType = llcv::capture_audio::SelectSupportedType(
-            audioPin, selectedAudioFormat, &audioFormatRejection, Surround51Active());
-        if (!selectedAudioType) {
+            initializationStage = L"negotiate supported capture audio format";
+            llcv::capture_audio::Rejection audioFormatRejection =
+                llcv::capture_audio::Rejection::Malformed;
+            selectedAudioType = llcv::capture_audio::SelectSupportedType(
+                audioPin, selectedAudioFormat, &audioFormatRejection, Surround51Active());
+            if (!selectedAudioType) {
+                if (Surround51Active()) g_captureAudioRejected.store(true);
+                fwprintf(stderr, L"[audio] capture input rejected: %s\n",
+                         llcv::capture_audio::DescribeRejection(
+                             audioFormatRejection).c_str());
+                hr = VFW_E_TYPE_NOT_ACCEPTED;
+                return hr;
+            }
+            fwprintf(stderr, L"[audio] capture input: %s\n",
+                     llcv::capture_audio::Describe(selectedAudioFormat).c_str());
+            SuggestCaptureBuffer(audioPin, selectedAudioFormat.blockAlign);
+
+            initializationStage = L"build supported PCM/float audio sample path";
+            hr = CoCreateInstance(kSampleGrabberClassId, nullptr,
+                                  CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&audioGrabberFilter));
+            if (FAILED(hr)) return hr;
+            hr = graph->AddFilter(audioGrabberFilter, L"PCM Latest Audio");
+            if (FAILED(hr)) return hr;
+            hr = audioGrabberFilter->QueryInterface(
+                __uuidof(ISampleGrabber),
+                reinterpret_cast<void**>(&audioGrabber));
+            if (FAILED(hr)) return hr;
+
+            hr = audioGrabber->SetMediaType(selectedAudioType);
+            if (FAILED(hr)) return hr;
+            audioGrabber->SetOneShot(FALSE);
+            audioGrabber->SetBufferSamples(FALSE);
+            audioCallback = CreateAudioSampleCallback(selectedAudioFormat);
+            hr = audioGrabber->SetCallback(audioCallback, 0);
+            if (FAILED(hr)) return hr;
+
+            hr = CoCreateInstance(kNullRendererClassId, nullptr,
+                                  CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&audioNullRenderer));
+            if (FAILED(hr)) return hr;
+            hr = graph->AddFilter(audioNullRenderer, L"Audio Null Renderer");
+            if (FAILED(hr)) return hr;
+            if (FAILED(hr = GetFirstPin(audioGrabberFilter, PINDIR_INPUT,
+                                        &audioGrabberIn))) return hr;
+            if (FAILED(hr = GetFirstPin(audioGrabberFilter, PINDIR_OUTPUT,
+                                        &audioGrabberOut))) return hr;
+            if (FAILED(hr = GetFirstPin(audioNullRenderer, PINDIR_INPUT,
+                                        &audioNullIn))) return hr;
             if (Surround51Active()) g_captureAudioRejected.store(true);
-            fwprintf(stderr, L"[audio] capture input rejected: %s\n",
-                     llcv::capture_audio::DescribeRejection(
-                         audioFormatRejection).c_str());
-            hr = VFW_E_TYPE_NOT_ACCEPTED;
-            break;
-        }
-        fwprintf(stderr, L"[audio] capture input: %s\n",
-                 llcv::capture_audio::Describe(selectedAudioFormat).c_str());
-        SuggestCaptureBuffer(audioPin, selectedAudioFormat.blockAlign);
-
-        initializationStage = L"build supported PCM/float audio sample path";
-        hr = CoCreateInstance(kSampleGrabberClassId, nullptr,
-                              CLSCTX_INPROC_SERVER,
-                              IID_PPV_ARGS(&audioGrabberFilter));
-        if (FAILED(hr)) break;
-        hr = graph->AddFilter(audioGrabberFilter, L"PCM Latest Audio");
-        if (FAILED(hr)) break;
-        hr = audioGrabberFilter->QueryInterface(
-            __uuidof(ISampleGrabber),
-            reinterpret_cast<void**>(&audioGrabber));
-        if (FAILED(hr)) break;
-
-        hr = audioGrabber->SetMediaType(selectedAudioType);
-        if (FAILED(hr)) break;
-        audioGrabber->SetOneShot(FALSE);
-        audioGrabber->SetBufferSamples(FALSE);
-        audioCallback = CreateAudioSampleCallback(selectedAudioFormat);
-        hr = audioGrabber->SetCallback(audioCallback, 0);
-        if (FAILED(hr)) break;
-
-        hr = CoCreateInstance(kNullRendererClassId, nullptr,
-                              CLSCTX_INPROC_SERVER,
-                              IID_PPV_ARGS(&audioNullRenderer));
-        if (FAILED(hr)) break;
-        hr = graph->AddFilter(audioNullRenderer, L"Audio Null Renderer");
-        if (FAILED(hr)) break;
-        if (FAILED(hr = GetFirstPin(audioGrabberFilter, PINDIR_INPUT,
-                                    &audioGrabberIn))) break;
-        if (FAILED(hr = GetFirstPin(audioGrabberFilter, PINDIR_OUTPUT,
-                                    &audioGrabberOut))) break;
-        if (FAILED(hr = GetFirstPin(audioNullRenderer, PINDIR_INPUT,
-                                    &audioNullIn))) break;
-        if (Surround51Active()) g_captureAudioRejected.store(true);
-        if (FAILED(hr = graph->ConnectDirect(audioPin, audioGrabberIn,
-                                             selectedAudioType))) break;
-        if (Surround51Active()) {
-            hr = llcv::capture_audio::VerifySurroundConnection(audioGrabberIn, selectedAudioFormat);
-            g_captureAudioRejected.store(FAILED(hr));
+            if (FAILED(hr = graph->ConnectDirect(audioPin, audioGrabberIn,
+                                                 selectedAudioType))) return hr;
+            if (Surround51Active()) {
+                hr = llcv::capture_audio::VerifySurroundConnection(audioGrabberIn, selectedAudioFormat);
+                g_captureAudioRejected.store(FAILED(hr));
+                if (FAILED(hr)) return hr;
+            }
+            ReportConnectedAudioAllocator(audioGrabberIn,
+                                          selectedAudioFormat.blockAlign);
+            if (FAILED(hr = graph->Connect(audioGrabberOut, audioNullIn))) return hr;
+            return S_OK;
+        };
+        hr = connectCaptureAudio();
+        if (FAILED(hr)) {
+            const HRESULT audioFailure = hr;
+            fwprintf(stderr, L"[audio] capture audio unavailable at stage: %s\n", initializationStage);
+            LogHr(L"Capture audio branch", audioFailure);
+            if (!g_captureGraphStopped.load(std::memory_order_acquire) &&
+                audioCapture && audioCapture != capture)
+                LogFilterPins(audioCapture, L"separate capture audio filter");
+            if (!ConfirmVideoOnlyStart(GetAncestor(host, GA_ROOT), initializationStage,
+                                       audioFailure, Surround51Active())) break;
+            initializationStage = L"remove failed capture audio branch";
+            hr = resources.RemoveAudioBranch();
             if (FAILED(hr)) break;
+            selectedAudioFormat = {};
+            // The output thread may already hold an Exclusive or ASIO device.
+            g_audioOutputClosed.store(true, std::memory_order_release);
+            g_captureAudioAvailable.store(false, std::memory_order_release);
+            g_captureAudioRejected.store(false, std::memory_order_release);
+            g_activeCaptureAudioDeviceName = L"none (video only)";
+            fwprintf(stderr, L"[audio] continuing with video only; no sound, recording unavailable.\n");
         }
-        ReportConnectedAudioAllocator(audioGrabberIn,
-                                      selectedAudioFormat.blockAlign);
-        if (FAILED(hr = graph->Connect(audioGrabberOut, audioNullIn))) break;
 
         initializationStage = L"connect and start capture graph";
 #ifdef LLCV_RECORDING
@@ -5269,7 +5349,8 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
                  g_activeCaptureAudioDeviceName.c_str(),
                  PixelFormatName(configuredFormat), preset.width,
                  preset.height, configuredFps,
-                 llcv::capture_audio::Describe(selectedAudioFormat).c_str(),
+                 selectedAudioFormat.channels
+                     ? llcv::capture_audio::Describe(selectedAudioFormat).c_str() : L"no capture audio",
                  stride, imageBytes,
                  tearingActive ? L"Tearing"
                      : llcv::presentation::ModeName(g_settings.presentationMode));
@@ -11135,6 +11216,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     g_ring.ConfigureChannels(g_settings.consoleSurround51 &&
         g_settings.audioMode == AudioMode::WasapiShared ? 6 : 2);
     g_captureAudioRejected.store(false, std::memory_order_release);
+    g_videoOnlyStartDeclined.store(false, std::memory_order_release);
+    g_audioOutputClosed.store(false, std::memory_order_release);
+    g_unattendedStart.store(smokeTest, std::memory_order_release);
     std::thread renderThread(AudioRenderThread);
     std::atomic<bool> smokeCaptureFailed{false};
     g_videoOutputThreadActive.store(!g_settings.audioOnly, std::memory_order_release);
@@ -11167,7 +11251,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                          ? L"[capture] audio-only graph stopped.\n"
                          : L"[capture] single capture graph stopped.\n");
             if (!smokeTest) {
-                if (g_captureGraphStopped.load(std::memory_order_acquire)) {
+                if (g_videoOnlyStartDeclined.exchange(false, std::memory_order_acq_rel)) {
+                    g_restartToSettings.store(true, std::memory_order_release);
+                } else if (g_captureGraphStopped.load(std::memory_order_acquire)) {
                     MessageBoxW(hwnd, IsEnglishUi()
                         ? L"The capture device was disconnected or its input path stopped.\n\nReconnect the device, close other capture applications if necessary, then start again from Settings. LLCV will not repeatedly rescan the device. If this repeats, attach the diagnostic log."
                         : L"캡처 장치 연결이 끊어졌거나 입력 경로가 중단되었습니다.\n\n장치를 다시 연결하고 필요한 경우 다른 캡처 프로그램을 종료한 뒤 설정에서 다시 시작해 주세요. 장치를 반복해서 재검색하지 않습니다. 반복되면 진단 로그를 첨부해 주세요.",

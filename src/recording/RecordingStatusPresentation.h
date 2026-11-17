@@ -70,6 +70,15 @@ inline View Build(const Snapshot& snapshot,bool english) {
         result.canOpenVideo=false;result.canOpenFolder=false;
         return result;
     }
+    if(snapshot.phase==Phase::Failed && snapshot.failure==Failure::InvalidInput &&
+       snapshot.result==NoCaptureAudioRecording && !snapshot.busy && !snapshot.playable) {
+        result.title=english?L"Recording unavailable":L"녹화할 수 없음";
+        result.description=english?
+            L"Capture was started with video only, so there is no audio to record.\r\nRestart capture with a working capture audio device to record.":
+            L"영상만으로 시작해 녹화할 오디오가 없습니다.\r\n녹화하려면 캡처 오디오 장치가 연결된 상태로 다시 시작하세요.";
+        result.canOpenVideo=false;result.canOpenFolder=false;
+        return result;
+    }
     if(snapshot.failure!=Failure::None || snapshot.phase==Phase::Failed) {
         if(snapshot.phase==Phase::Saved && snapshot.playable && !snapshot.busy)
             result.title=english?L"Recording stopped · file saved":L"녹화 중단 · 파일 저장됨";

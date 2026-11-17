@@ -46,6 +46,12 @@ devices can expose separate video and audio devices; in that case, choose the
 matching audio input manually. If the app shows “Internal audio detected · use
 automatically,” no separate selection is needed.
 
+If capture audio cannot be connected, startup asks whether to **start with video
+only**. Yes plays video without sound and closes the audio output device (including
+WASAPI Exclusive and ASIO); recording is unavailable in that state.
+No returns to Settings. Exclusive fullscreen presentation does not ask and reports
+the error as before.
+
 <br>
 
 ## Finding your settings

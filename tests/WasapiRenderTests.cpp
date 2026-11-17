@@ -188,5 +188,21 @@ int main() {
                 Check(trace.destroyed[i] == 1, "every activated client released");
         }
     }
+    for (bool exclusive : {true, false}) {
+        // A second owner closes the output while the application keeps running.
+        Trace trace; trace.exclusive = exclusive; activeTrace = &trace; running = true;
+        std::atomic<bool> stop{true};
+        llcv::wasapi::Configuration config;
+        config.mode = exclusive ? llcv::wasapi::Mode::Exclusive : llcv::wasapi::Mode::Shared;
+        config.endpointId = L"mock";
+        llcv::wasapi::Host host; host.context = &trace; host.running = &running; host.stop = &stop;
+        host.fill = Fill; host.paddingChanged = Padding; host.log = QuietLog;
+        const auto result = llcv::wasapi::Run(config, host);
+        Check(result == llcv::wasapi::RunResult::Stopped && trace.fills == 0 && running.load(),
+              "a stop request ends the output without any fill while the app stays running");
+        Check(trace.renderCalls == trace.releases && !trace.started, "stopped output releases buffers and the client");
+        for (unsigned i = 0; i < trace.activated; ++i)
+            Check(trace.destroyed[i] == 1, "stopped output releases every activated client");
+    }
     std::puts("WASAPI: 24 event/padding/diagnostics scenarios passed; no audio device opened.");
 }

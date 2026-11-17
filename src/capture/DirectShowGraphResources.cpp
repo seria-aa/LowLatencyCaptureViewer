@@ -32,6 +32,38 @@ DirectShowGraphResources::~DirectShowGraphResources() {
     Reset();
 }
 
+HRESULT DirectShowGraphResources::RemoveAudioBranch() {
+    if (audioGrabber) audioGrabber->SetCallback(nullptr, 0);
+    SafeRelease(audioCallback);
+    SafeRelease(audioNullInput);
+    SafeRelease(audioGrabberOutput);
+    SafeRelease(audioGrabberInput);
+    SafeRelease(audioGrabber);
+    SafeRelease(audioPin);
+    DeleteMediaType(selectedAudioType);
+    HRESULT result = S_OK;
+    // RemoveFilter disconnects the filter's pins first. A filter whose
+    // AddFilter failed has no graph and is only released. A filter that
+    // cannot say whether it is in the graph may still be there: that is a
+    // failure, never a successful removal.
+    const auto remove = [&](IBaseFilter*& filter) {
+        if (!filter) return;
+        if (graph && filter != capture) {
+            FILTER_INFO info{};
+            HRESULT hr = filter->QueryFilterInfo(&info);
+            const bool inGraph = SUCCEEDED(hr) && info.pGraph;
+            SafeRelease(info.pGraph);
+            if (inGraph) hr = graph->RemoveFilter(filter);
+            if (FAILED(hr) && SUCCEEDED(result)) result = hr;
+        }
+        SafeRelease(filter);
+    };
+    remove(audioNullRenderer);
+    remove(audioGrabberFilter);
+    remove(audioCapture);
+    return result;
+}
+
 void DirectShowGraphResources::Reset() {
     if (control) control->Stop();
     events.Reset();

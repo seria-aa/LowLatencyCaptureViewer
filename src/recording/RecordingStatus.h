@@ -11,6 +11,10 @@ inline constexpr HRESULT UnsupportedUyvyRecording =
     MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x401);
 inline constexpr HRESULT RgbRecordingTooSlow =
     MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x403);
+// Capture was started with video only after its audio could not be connected.
+// A recording always carries the capture audio track.
+inline constexpr HRESULT NoCaptureAudioRecording =
+    MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x404);
 enum class Phase { Idle, Starting, Recording, Finalizing, Saved, Failed };
 enum class Failure {
     None, DiskFull, WriteFailed, EncoderOverload, EncoderFailed,
