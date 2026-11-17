@@ -12,6 +12,27 @@ spec.loader.exec_module(segments)
 
 
 class RecoveryPolicy(unittest.TestCase):
+    def test_finalized_hybrid_requires_its_index(self):
+        with tempfile.TemporaryDirectory(prefix="LLCV-HybridPolicy-") as directory:
+            path = Path(directory) / "complete-001.mp4"
+            ftyp = (16).to_bytes(4, "big") + b"ftyp" + b"isom" + bytes(4)
+            moov = (8).to_bytes(4, "big") + b"moov"
+            for media in ((12).to_bytes(4, "big") + b"mdat" + bytes(4),
+                          (1).to_bytes(4, "big") + b"mdat" + (20).to_bytes(8, "big") + bytes(4)):
+                path.write_bytes(ftyp + media + moov)
+                self.assertEqual(segments.initialization_state(path), "initialized")
+                self.assertEqual(segments.recoverable_segments([path], False), ([path], None))
+                # The ordinary index is essential after the hybrid commit.
+                # Do not discard a finalized-but-corrupt last part as "empty".
+                for content in (ftyp + media, ftyp + media[:-1],
+                                ftyp + media + moov[:6],
+                                ftyp + media + (64).to_bytes(4, "big") + b"moov",
+                                ftyp + media + b"\x00\x00\x00\x01moov"):
+                    path.write_bytes(content)
+                    self.assertEqual(segments.initialization_state(path), "invalid")
+                    with self.assertRaises(AssertionError):
+                        segments.recoverable_segments([path], True)
+
     def test_tail_policy(self):
         with tempfile.TemporaryDirectory(prefix="LLCV-RecoveryPolicy-") as directory:
             root = Path(directory)

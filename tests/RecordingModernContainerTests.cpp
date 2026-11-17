@@ -2,6 +2,7 @@
 #include "recording/RecordingStorage.h"
 #include "recording/EncoderSupport.h"
 #include "recording/FragmentedMp4Sink.h"
+#include "RecordingFileTestSupport.h"
 #include <mfapi.h>
 #include <mferror.h>
 #include <wrl/client.h>
@@ -128,7 +129,8 @@ Boxes Scan(IMFByteStream* bytes) {
 void CheckStructure(IMFByteStream* bytes) {
     const auto boxes = Scan(bytes);
     printf("bytes=%llu movies=%u fragments=%u media=%u\n", boxes.length, boxes.movies, boxes.fragments, boxes.media);
-    Check(boxes.movies == 1 && boxes.fragments > 1 && boxes.media > 1, "continuous independently described fragments");
+    Check(boxes.movies == 1 && boxes.fragments == 0 && boxes.media == 1,
+        "completed hybrid recording has a conventional MP4 index");
 }
 ComPtr<IMFAttributes> Attributes(bool cpu, bool crash) {
     ComPtr<IMFAttributes> attributes;
@@ -216,6 +218,9 @@ void Remux(const wchar_t* inputPath, const wchar_t* outputPath, bool crash, LONG
             const auto path=RecordingPartPath(outputPath,part);if(!std::filesystem::exists(path))break;
             Hr(ValidateCompletedRecording(path.c_str()),"segment has both tracks");
             const auto v=Read(path.c_str(),true),a=Read(path.c_str(),false);
+            test::CheckShellDuration(path.c_str(), (std::max)(
+                v.packets.back().pts + v.packets.back().duration,
+                a.packets.back().pts + a.packets.back().duration));
             videos+=v.packets.size();audios+=a.packets.size();
             Check(MFGetAttributeUINT32(v.packets.front().sample.Get(),MFSampleExtension_CleanPoint,FALSE)!=FALSE,"every segment starts on a keyframe");
         }
@@ -355,6 +360,9 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (fixture.empty()) Encode(good.c_str(), options, false); else Remux(fixture.c_str(), good.c_str(), false, videoOffset, audioOffset);
     auto video = Read(good.c_str(), true), audio = Read(good.c_str(), false);
+    test::CheckShellDuration(good.c_str(), (std::max)(
+        video.packets.back().pts + video.packets.back().duration,
+        audio.packets.back().pts + audio.packets.back().duration));
     Check(video.packets.size() == kFrames, "all 360 frames saved");
     Continuous(video, kSecond / kFps); Continuous(audio, 1024 * kSecond / 48000);
     if (!fixture.empty()) {
@@ -367,7 +375,7 @@ int wmain(int argc, wchar_t** argv) {
         SameTimeline(expectedAudio, audio, audioOffset != 0);
     }
     Hr(ValidateCompletedRecording(good.c_str()), "saved output validates without optional decoder");
-    Check(CopyFileW(good.c_str(), truncated.c_str(), TRUE) != FALSE, "copy test-owned truncation fixture");
+    test::FragmentedSnapshot(good.c_str(), truncated.c_str());
     {
         ComPtr<IMFByteStream> bytes;
         Hr(MFCreateFile(MF_ACCESSMODE_READWRITE, MF_OPENMODE_FAIL_IF_NOT_EXIST, MF_FILEFLAGS_NONE, truncated.c_str(), &bytes), "open test-owned truncation fixture");

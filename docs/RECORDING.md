@@ -81,7 +81,8 @@ Long storage stalls can still exhaust bounded queues or delay finalization.
 Low space, write failures and overload stop recording with a notice while playback continues.
 Closing during recording asks for confirmation, then finishes saving. If saving stalls, follow the prompt; forcing an exit may lose the final section.
 
-H.264, HEVC and AV1 all use fragmented MP4. Already-written fragments may survive an unexpected exit, but the final fragment, OS write cache and disk failures are not fully protected. Keep the file and check it with a compatible player. This is not automatic recovery or a lossless guarantee.
+H.264, HEVC and AV1 use hybrid MP4: fragmented during recording, with a conventional MP4 sample index completed on normal stop. This lets Windows Explorer read the completed file's duration without re-encoding or copying the media payload. Completed split files receive the same index. Existing recordings are not changed.
+Already-written fragments may survive an unexpected exit, but the final fragment, OS write cache and disk failures are not fully protected. An interrupted file may still lack duration in Explorer; keep it and check it with a compatible player. This is not automatic recovery or a lossless guarantee.
 
 Playback settings keep their existing location. Recording preferences are separate; the internal filename `recording-prototype.ini` is retained for compatibility with prototype users. Copies of the installation folder share settings within the same Windows account.
 If an individual recording preference is invalid, only that field falls back to its default. Valid folder/codec/encoder choices survive; loading does not rewrite the source file. Legacy files missing resolution/FPS caps retain their original match-capture interpretation.

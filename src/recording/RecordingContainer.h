@@ -12,9 +12,9 @@ inline bool UsesFragmentedContainer(Codec codec) {
 // prefixes. Some Windows readers discard a fragmented MP4 track's initial
 // edit-list delay even when the muxer correctly preserves its PTS/DTS.
 inline bool RequiresZeroOriginTimeline(Codec codec) { return UsesFragmentedContainer(codec); }
-// Continuous, crash-tolerant MP4 without encoder restarts. H.264 keeps the
-// native Windows sink unless splitting or explicit color metadata is required;
-// those recordings and HEVC/AV1 keep MF encoders but use a packet-only muxer.
+// Continuous, crash-tolerant MP4 without encoder restarts. Standard builds use
+// MF encoders and a packet-only hybrid muxer for all codecs: fragmented while
+// recording, with a conventional sample index on successful finalization.
 // There is no silent fallback if the selected codec/container fails.
 // The caller must initialize COM / Media Foundation and configure its streams.
 HRESULT CreateRecordingWriter(IMFByteStream* bytes, IMFAttributes* attributes,

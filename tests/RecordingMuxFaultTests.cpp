@@ -4,6 +4,7 @@
 #include <mferror.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -18,7 +19,7 @@ using namespace llcv::recording;
 namespace {
 void Check(bool value, const char* text) { if (!value) { printf("FAIL %s\n", text); std::exit(1); } }
 void Hr(HRESULT hr, const char* text) { if (FAILED(hr)) { printf("FAIL %s %08lX\n", text, static_cast<unsigned long>(hr)); std::exit(1); } }
-enum class Fault { None, DiskFull, WriteError, ZeroWrite, SeekError, FlushError };
+enum class Fault { None, DiskFull, WriteError, ZeroWrite, SeekError, FlushError, FinalIndexError };
 constexpr HRESULT kDiskFull = HRESULT_FROM_WIN32(ERROR_DISK_FULL);
 constexpr HRESULT kWriteError = HRESULT_FROM_WIN32(ERROR_WRITE_FAULT);
 constexpr HRESULT kSeekError = HRESULT_FROM_WIN32(ERROR_SEEK);
@@ -26,10 +27,35 @@ class Bytes final : public IMFByteStream {
     std::atomic<ULONG> references_{1};
     std::vector<BYTE> data_;
     QWORD position_ = 0;
+    QWORD FinalIndexOffset(const BYTE* bytes, ULONG count) const {
+        // Parse top-level boxes in the prospective write, not byte patterns
+        // inside compressed media. The second moov is the hybrid commit index.
+        const auto length = (std::max)(QWORD(data_.size()), position_ + count);
+        const auto byte = [&](QWORD at) -> BYTE {
+            return at >= position_ && at - position_ < count ? bytes[at - position_] :
+                (at < data_.size() ? data_[at] : 0);
+        };
+        unsigned movies = 0;
+        for (QWORD at = 0; at + 8 <= length;) {
+            QWORD size = 0; for (unsigned i = 0; i < 4; ++i) size = (size << 8) | byte(at + i);
+            if (byte(at + 4) == 'm' && byte(at + 5) == 'o' && byte(at + 6) == 'o' && byte(at + 7) == 'v')
+                if (++movies == 2) return at;
+            unsigned header = 8;
+            if (size == 1) {
+                if (at + 16 > length) break;
+                size = 0; for (unsigned i = 8; i < 16; ++i) size = (size << 8) | byte(at + i);
+                header = 16;
+            }
+            if (size < header || size > length - at) break;
+            at += size;
+        }
+        return UINT64_MAX;
+    }
 public:
     Fault fault = Fault::None;
     unsigned failAfterWrites = 0, writes = 0, seeks = 0, flushes = 0;
     bool closed = false;
+    bool finalIndexRejected = false;
     STDMETHODIMP QueryInterface(REFIID iid, void** object) override {
         if (!object) return E_POINTER; *object = nullptr;
         if (iid != IID_IUnknown && iid != __uuidof(IMFByteStream)) return E_NOINTERFACE;
@@ -71,9 +97,19 @@ public:
         if (failing && fault == Fault::DiskFull) return kDiskFull;
         if (failing && fault == Fault::WriteError) return kWriteError;
         if (failing && fault == Fault::ZeroWrite) return S_OK;
+        if (fault == Fault::FinalIndexError) {
+            const auto offset = FinalIndexOffset(bytes, count);
+            if (offset >= position_ && offset - position_ < count) {
+                // A short failing write exactly at the final-index boundary:
+                // preceding fragments reach storage, the new index does not.
+                count = static_cast<ULONG>(offset - position_); finalIndexRejected = true;
+                printf("reject final index at=%llu write-position=%llu prefix=%lu\n", offset, position_, count);
+            }
+        }
         if (position_ > 16 * 1024 * 1024 || count > 16 * 1024 * 1024 - position_) return kDiskFull;
         if (position_ + count > data_.size()) data_.resize(static_cast<size_t>(position_ + count));
-        memcpy(data_.data() + position_, bytes, count); position_ += count; *written = count; return S_OK;
+        memcpy(data_.data() + position_, bytes, count); position_ += count; *written = count;
+        return finalIndexRejected ? kWriteError : S_OK;
     }
     STDMETHODIMP BeginWrite(const BYTE*, ULONG, IMFAsyncCallback*, IUnknown*) override { return E_NOTIMPL; }
     STDMETHODIMP EndWrite(IMFAsyncResult*, ULONG*) override { return E_NOTIMPL; }
@@ -173,6 +209,46 @@ void TestFault(const Fixture& fixture, Fault fault, HRESULT expected, unsigned a
     if (fault == Fault::ZeroWrite) Check(FAILED(result), "zero-byte successful write cannot silently truncate a recording");
     else Check(result == expected, "original storage HRESULT retained");
     Check(!bytes->closed, "writer does not close caller-owned byte stream");
+}
+void FailedIndexKeepsFragments(const Fixture& fixture) {
+    ComPtr<Bytes> bytes; bytes.Attach(new Bytes()); bytes->fault = Fault::FinalIndexError;
+    Check(Exercise(fixture, bytes.Get()) == kWriteError && bytes->finalIndexRejected,
+        "final sample-index write failure is reported, never called saved");
+    Released(bytes.Get());
+    QWORD length = 0; Hr(bytes->GetLength(&length), "failed index file length");
+    printf("failed index length=%llu writes=%u seeks=%u\n", length, bytes->writes, bytes->seeks);
+    Hr(bytes->SetCurrentPosition(0), "seek failed-index prefix");
+    // The fault stream intentionally has no async Read implementation. Give
+    // MF's asynchronous source a real test-owned temporary byte stream.
+    ComPtr<IMFByteStream> view;
+    Hr(MFCreateTempFile(MF_ACCESSMODE_READWRITE, MF_OPENMODE_DELETE_IF_EXIST, MF_FILEFLAGS_NONE, &view), "recovery reader file");
+    std::array<BYTE, 65536> buffer{};
+    for (QWORD left = length; left;) {
+        ULONG read = 0, written = 0;
+        Hr(bytes->Read(buffer.data(), static_cast<ULONG>((std::min)(left, QWORD(buffer.size()))), &read), "copy recovered bytes");
+        Hr(view->Write(buffer.data(), read, &written), "write recovered bytes");
+        Check(read && written == read, "copy failed-index prefix completely"); left -= read;
+    }
+    Hr(view->Flush(), "flush recovered fixture"); Hr(view->SetCurrentPosition(0), "seek recovered fixture");
+    ComPtr<IMFSourceReader> reader;
+    Hr(MFCreateSourceReaderFromByteStream(view.Get(), nullptr, &reader), "original fragmented prefix remains readable");
+    constexpr DWORD video = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+    ComPtr<IMFMediaType> type; Hr(reader->GetNativeMediaType(video, 0, &type), "recover encoded type");
+    Hr(reader->SetStreamSelection(static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS), FALSE), "unselect recovery streams");
+    Hr(reader->SetStreamSelection(video, TRUE), "select recovery video");
+    Hr(reader->SetCurrentMediaType(video, nullptr, type.Get()), "read recovery packets without decoder");
+    unsigned recovered = 0;
+    for (unsigned i = 0; i < 1000; ++i) {
+        ComPtr<IMFSample> sample; DWORD flags = 0;
+        const auto hr = reader->ReadSample(video, 0, nullptr, &flags, nullptr, &sample);
+        if (FAILED(hr) || (flags & MF_SOURCE_READERF_ERROR)) break;
+        if (sample) ++recovered;
+        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
+    }
+    unsigned expected = 0; for (const auto& packet : fixture.packets) if (packet.video) ++expected;
+    printf("index failure recovery video packets=%u/%u\n", recovered, expected);
+    Check(recovered > expected * 3 / 4 && recovered <= expected,
+        "failed final index preserves the earlier video fragments");
 }
 void DirectLifecycle(const Fixture& fixture) {
     ComPtr<Bytes> bytes; bytes.Attach(new Bytes());
@@ -384,6 +460,7 @@ int wmain(int argc, wchar_t** argv) {
     const auto fixture = Load(argv[1]);
     ColorNegotiationAfterFirstPacket(fixture);
     DirectLifecycle(fixture);
+    FailedIndexKeepsFragments(fixture);
     Bounds(fixture);
     {
         ComPtr<Bytes> bytes; bytes.Attach(new Bytes()); Hr(Exercise(fixture, bytes.Get()), "control passthrough");

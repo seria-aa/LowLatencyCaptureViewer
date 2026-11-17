@@ -21,6 +21,7 @@ def initialization_state(path):
     with path.open("rb") as stream:
         offset = 0
         have_ftyp = False
+        have_media = False
         while offset + 8 <= length:
             stream.seek(offset)
             header = stream.read(8)
@@ -30,22 +31,29 @@ def initialization_state(path):
             header_size = 8
             if size == 1:
                 if offset + 16 > length:
-                    return "incomplete" if allowed else "invalid"
+                    return "incomplete" if allowed and not have_media else "invalid"
                 size = int.from_bytes(stream.read(8), "big")
                 header_size = 16
             if size < header_size or (kind == b"ftyp" and size < header_size + 8):
                 return "invalid"
             if offset + size > length:
-                return "incomplete" if allowed else "invalid"
+                return "incomplete" if allowed and not have_media else "invalid"
             if kind == b"moov":
                 # All initialized files must still pass ffprobe and full decoding.
                 return "initialized"
+            if kind == b"mdat" and have_ftyp:
+                # A successfully finalized hybrid MP4 puts the complete
+                # media box before its final index. An absent/torn index is
+                # corrupt, NOT an uninitialized crash tail we may exclude.
+                have_media = True
+                offset += size
+                continue
             if not allowed:
                 return "invalid"
             if kind == b"ftyp":
                 have_ftyp = True
             offset += size
-    return "incomplete" if offset == length and have_ftyp else "invalid"
+    return "incomplete" if offset == length and have_ftyp and not have_media else "invalid"
 
 
 def initialized(path):
