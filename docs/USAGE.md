@@ -46,6 +46,12 @@ devices can expose separate video and audio devices; in that case, choose the
 matching audio input manually. If the app shows “Internal audio detected · use
 automatically,” no separate selection is needed.
 
+If capture audio cannot be connected, startup asks whether to **start with video
+only**. Yes plays video without sound and closes the audio output device (including
+WASAPI Exclusive and ASIO); recording is unavailable in that state.
+No returns to Settings. Exclusive fullscreen presentation does not ask and reports
+the error as before.
+
 <br>
 
 ## Finding your settings
@@ -400,10 +406,12 @@ Press **F12** during video playback to save a PNG in **Pictures / LowLatencyCapt
 The screenshot section of **App** has **Open folder** and
 **Also copy to clipboard** (off by default).
 
-**F1** opens a modeless guide with the app version, keyboard shortcuts, mouse controls,
+**F1** opens a modeless guide with the app version, all assigned keyboard shortcuts, mouse controls,
 and screenshot information without stopping playback.
 Use the configured Help or Exit key (defaults: F1/Esc), or its Close button, to
-dismiss it. The Exit key here closes only the help window, not the viewer.
+dismiss it. The Exit key here closes only the help window, not the viewer. Unassigned actions are hidden.
+
+See [Frame interpolation](FRAME_INTERPOLATION.md) to enable optional interpolation. F7 toggles it by default.
 
 - NV12/YUY2 and decoded MJPEG retain the capture resolution and selected SDR color interpretation.
 - P010 HDR10 is converted to **SDR sRGB**, both in the PNG and clipboard image.

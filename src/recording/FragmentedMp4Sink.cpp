@@ -329,9 +329,14 @@ HRESULT State::StartHeader() {
     // and can double the starting delay when paired with the edit list.
     // Matrix/range can be known while primaries/transfer remain unspecified.
     // The pinned muxer otherwise omits colr unless all three are specified.
+    // Keep fragments recoverable during capture. At trailer time the pinned
+    // muxer appends the full sample index, then hides the old fragment headers
+    // inside mdat. No media readback, payload rewrite or re-encoding is needed.
+    // The final index is written before committing the new mdat header; a
+    // failed index write must not replace the recoverable fragmented prefix.
     const char* flags = videoAttributes
-        ? "delay_moov+default_base_moof+frag_keyframe+write_colr"
-        : "delay_moov+default_base_moof+frag_keyframe";
+        ? "hybrid_fragmented+delay_moov+default_base_moof+frag_keyframe+write_colr"
+        : "hybrid_fragmented+delay_moov+default_base_moof+frag_keyframe";
     int configured = av_dict_set(&options, "movflags", flags, 0);
     if (configured >= 0) configured = av_dict_set(&options, "frag_duration", "1000000", 0);
     if (configured >= 0) configured = av_dict_set(&options, "min_frag_duration", "1000000", 0);

@@ -1,4 +1,5 @@
 #include "ui/WindowGeometry.h"
+#include "ui/ViewerOverlayGeometry.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +14,7 @@ bool Check(bool condition, const char* message) {
 
 int main() {
     using namespace llcv::window_geometry;
+    namespace overlay = llcv::overlay_ui;
     bool ok = true;
     const AspectConstraint aspect{16, 39, 16, 9, 320, 180};
 
@@ -102,5 +104,24 @@ int main() {
                         HTCAPTION,
                     "fixed windows must keep every borderless edge draggable");
     }
+
+    const auto full = overlay::FitPanel({1920, 1080}, {700, 488});
+    ok &= Check(full.left == 16 && full.top == 16 && full.right == 716 && full.bottom == 504,
+                "diagnostics keep their original size and margins on a normal display");
+    for (const SIZE viewport : {SIZE{640, 360}, SIZE{489, 275}, SIZE{320, 180}, SIZE{1, 1}}) {
+        for (const SIZE texture : {SIZE{700, 488}, SIZE{700, 440}}) {
+            const auto panel = overlay::FitPanel(viewport, texture);
+            ok &= Check(overlay::Fits(panel, viewport), "entire diagnostics quad fits a small client");
+            if (viewport.cx > 1)
+                ok &= Check(std::abs(overlay::Width(panel) * texture.cy -
+                                     overlay::Height(panel) * texture.cx) < texture.cx,
+                            "small diagnostics quad preserves raster aspect ratio within rounding");
+        }
+    }
+    const auto small = overlay::FitPanel({489, 275}, {700, 488});
+    ok &= Check(small.left == 16 && small.top == 16 && small.bottom == 259,
+                "489x275 regression keeps a complete diagnostics card with stable inset");
+    ok &= Check(!overlay::HasArea(overlay::FitPanel({0, 275}, {700, 488})),
+                "minimized client has no drawable diagnostics quad");
     return ok ? 0 : 1;
 }

@@ -68,6 +68,7 @@ try {
         'NIS-LICENSE.txt' = 'third_party/upscaling/nis/licence.txt'
         'CMAA2-LICENSE.txt' = 'third_party/upscaling/cmaa2/license.txt'
         'UPSCALING-NOTICE.txt' = 'third_party/upscaling/NOTICE.txt'
+        'VFG-RTX30-NOTICE.txt' = 'third_party/frame-generation/VFG-RTX30-NOTICE.txt'
     }
     foreach ($file in Get-ChildItem -LiteralPath $package -Recurse -File) {
         $relative = $file.FullName.Substring($package.Length + 1)

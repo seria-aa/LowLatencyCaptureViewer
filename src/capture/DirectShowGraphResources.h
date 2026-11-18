@@ -23,6 +23,13 @@ public:
         const DirectShowGraphResources&) = delete;
 
     void Reset();
+    // Detaches a partly or fully built audio branch so the video branch can
+    // start alone: releases every audio object and removes the audio grabber,
+    // audio null renderer and a separate audio capture filter from the graph.
+    // An audio pin on the video capture filter is only released; that filter
+    // stays. Fails when a filter could not be removed; the graph must not be
+    // started then.
+    HRESULT RemoveAudioBranch();
 
     IGraphBuilder* graph = nullptr;
     IMediaControl* control = nullptr;

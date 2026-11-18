@@ -79,6 +79,15 @@ void TestAsioIntegerPacking() {
 void SaveMessage(const wchar_t* message) { savedMessage = message; }
 
 void TestAsioInitialMixAndRuntimeMode() {
+    // Cancellation must be consulted before any driver lookup/open or startup
+    // callback. A deliberately nonexistent driver keeps this test hardware-free.
+    static unsigned cancellationChecks = 0;
+    static unsigned startupCallbacks = 0;
+    llcv::asio::Output cancelled("LLCV nonexistent test driver", nullptr, nullptr, nullptr);
+    Require(!cancelled.Start([](void*) { ++startupCallbacks; },
+                [] { ++cancellationChecks; return false; }) &&
+            cancellationChecks == 1 && startupCallbacks == 0 && !cancelled.Running(),
+            "cancelled video-only startup must not open or start ASIO");
     const auto settings = g_settings;
     const auto runtimeMode = ActiveAudioMode();
     const int master = g_volumePercent.load();

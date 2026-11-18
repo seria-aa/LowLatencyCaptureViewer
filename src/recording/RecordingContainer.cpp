@@ -20,21 +20,23 @@ HRESULT CreateRecordingWriter(IMFByteStream* bytes, IMFAttributes* attributes,
     HRESULT hr = MFCreateAttributes(&configured, 4);
     if (FAILED(hr)) return hr;
     if (attributes && FAILED(hr = attributes->CopyAllItems(configured.Get()))) return hr;
-    // The Windows H.264 sink/encoder may omit the matrix even when the media
-    // type specifies it. The existing packet muxer preserves it in MP4 colr.
-    if (codec != Codec::H264 || preserveColor) {
 #ifdef LLCV_RECORDING_MODERN_MP4
+    // Use the same hybrid MP4 path for every encoder. The native fragmented
+    // H.264 sink does not finish a conventional sample index for Explorer.
+    // Encoding remains in Media Foundation; only compressed packets are muxed.
+    {
         ComPtr<IMFMediaSink> sink;
         if (FAILED(hr = CreateFragmentedMp4Sink(bytes, &sink,nullptr,nullptr,
                                                preserveColor?attributes:nullptr))) return hr;
         hr = MFCreateSinkWriterFromMediaSink(sink.Get(), configured.Get(), writer);
         if (FAILED(hr)) sink->Shutdown();
         return hr;
+    }
 #else
-        // Standard builds do not ship the private recording dependency. Never
-        // silently fall back to an unprotected file for an available codec.
+    if (codec != Codec::H264 || preserveColor) {
+        // A playback-only build can omit the mux SDK. Never silently replace
+        // an unavailable codec with a different encoder/container.
         return MF_E_TOPO_CODEC_NOT_FOUND;
-#endif
     }
     if (FAILED(hr = configured->SetGUID(MF_TRANSCODE_CONTAINERTYPE, MFTranscodeContainerType_FMPEG4))) return hr;
     // Let the sink interleave audio/video into approximately one-second chunks.
@@ -44,6 +46,7 @@ HRESULT CreateRecordingWriter(IMFByteStream* bytes, IMFAttributes* attributes,
     ComPtr<IMFByteStream> view;
     if (FAILED(hr = MFCreateMFByteStreamWrapper(bytes, &view))) return hr;
     return MFCreateSinkWriterFromURL(nullptr, view.Get(), configured.Get(), writer);
+#endif
 }
 HRESULT CreateRecordingFile(const wchar_t* path, IMFAttributes* attributes,
                             IMFByteStream** bytes, IMFSinkWriter** writer, Codec codec,

@@ -23,6 +23,10 @@ inline bool ApplySmokeVideoOptions(const std::vector<std::wstring>& args, AppSet
             if (value==L"rgb24") next.pixelFormat=VideoPixelFormat::Rgb24;
             else if (value==L"rgb32") next.pixelFormat=VideoPixelFormat::Rgb32;
             else if (value==L"nv12") next.pixelFormat=VideoPixelFormat::Nv12;
+#ifdef LLCV_RIFE_OPTIONAL
+            else if(value==L"yuy2")next.pixelFormat=VideoPixelFormat::Yuy2;
+            else if(value==L"uyvy")next.pixelFormat=VideoPixelFormat::Uyvy;
+#endif
             else return false;
         } else if (arg==L"--smoke-test-resolution") {
             if (seenResolution) return false; seenResolution=true;

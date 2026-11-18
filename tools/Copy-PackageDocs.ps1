@@ -46,7 +46,8 @@ foreach ($relative in $rootFiles) {
 foreach ($notice in @(
     @("third_party/upscaling/nis/licence.txt", "NIS-LICENSE.txt"),
     @("third_party/upscaling/cmaa2/license.txt", "CMAA2-LICENSE.txt"),
-    @("third_party/upscaling/NOTICE.txt", "UPSCALING-NOTICE.txt"))) {
+    @("third_party/upscaling/NOTICE.txt", "UPSCALING-NOTICE.txt"),
+    @("third_party/frame-generation/VFG-RTX30-NOTICE.txt", "VFG-RTX30-NOTICE.txt"))) {
     Copy-Item -LiteralPath (Join-Path $source $notice[0]) -Destination (Join-Path $destination $notice[1])
 }
 foreach ($document in Get-ChildItem -LiteralPath $docs -Recurse -File) {

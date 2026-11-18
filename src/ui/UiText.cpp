@@ -7,30 +7,16 @@ namespace llcv::ui_text {
 
 const wchar_t* VsrSetupGuide(bool useEnglish) {
     return useEnglish
-        ? L"Setup\n"
-          L"1. In NVIDIA App > System > Video, enable RTX Video Super Resolution.\n"
-          L"2. Select NVIDIA VSR under Video > Upscaling. F6 toggles the selected method.\n"
-          L"3. Check NVIDIA App's active indicator while playing. This viewer cannot verify activation.\n\n"
-          L"Supported input\n"
-          L"NV12/YUY2 SDR, MJPEG (decoded to NV12), or P010 HDR10; display at source size or larger. "
-          L"RGB24 and XRGB (RGB32) can also request VSR; actual activation depends on the driver. Downscaling bypasses VSR. HDR requires a recent NVIDIA driver; "
-          L"native HDR10 is preserved, without SDR-to-HDR conversion.\n\n"
-          L"Keep in mind\n"
-          L"Capture resolution selects input size; Display resolution selects video size, including fullscreen, with or without VSR. "
-          L"F6 keeps both sizes unchanged. F5 restores source-size display.\n"
-          L"GPU processing can increase latency. Screenshots remain unfiltered source images."
-        : L"설정 방법\n"
-          L"1. NVIDIA App > 시스템 > 비디오에서 RTX Video Super Resolution을 켜세요.\n"
-          L"2. 영상 > 업스케일링에서 NVIDIA VSR을 선택하세요. F6은 선택한 방식만 켜고 끕니다.\n"
-          L"3. NVIDIA App의 활성 표시를 확인하세요. 이 뷰어는 실제 적용 여부를 확인하지 못합니다.\n\n"
-          L"지원 조건\n"
-          L"NV12/YUY2 SDR, MJPEG(NV12로 디코딩), P010 HDR10을 원본과 같거나 크게 표시할 때 사용합니다. "
-          L"RGB24와 XRGB (RGB32)도 VSR을 요청할 수 있으며 실제 활성화는 드라이버에 따라 다릅니다. 축소 표시에는 적용하지 않습니다. HDR은 최신 NVIDIA 드라이버를 권장하며, "
-          L"SDR→HDR 변환 없이 원래 HDR10을 유지합니다.\n\n"
-          L"참고\n"
-          L"캡처 해상도는 입력 크기, 표시 해상도는 전체화면을 포함한 영상 크기이며 VSR을 꺼도 유지됩니다. "
-          L"F6은 두 해상도를 유지합니다. F5는 입력 크기로 표시합니다.\n"
-          L"GPU 처리로 지연이 늘 수 있습니다. 스크린샷에는 VSR이 적용되지 않습니다.";
+        ? L"In NVIDIA App → System → Video, enable RTX Video Super Resolution. During playback, check the active indicator in NVIDIA App; LLCV cannot verify activation.\n\n"
+          L"VSR works at source size or larger. Supported inputs include NV12/YUY2, MJPEG, RGB and P010 HDR10. Native HDR10 is preserved. GPU processing can add latency.\n\n"
+          L"Press F6 to turn VSR on or off without changing the display size. Recordings and screenshots do not include the effect."
+        : L"NVIDIA App → 시스템 → 비디오에서 ‘RTX Video Super Resolution’을 켭니다.\n"
+          L"실제 적용 여부는 재생 중 NVIDIA App의 활성 표시로 확인합니다.\n\n"
+          L"VSR은 영상을 원본 크기 이상으로 표시할 때 사용합니다.\n"
+          L"NV12/YUY2, MJPEG, RGB, P010 HDR10 입력을 지원하며 원래 HDR10을 유지합니다.\n"
+          L"GPU 처리로 표시 지연이 늘 수 있습니다.\n\n"
+          L"F6으로 표시 크기를 바꾸지 않고 VSR을 켜거나 끌 수 있습니다.\n"
+          L"녹화와 스크린샷에는 적용되지 않습니다.";
 }
 
 const wchar_t* Translate(const wchar_t* korean, bool useEnglish) {

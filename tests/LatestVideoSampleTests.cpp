@@ -1,5 +1,6 @@
 #include "capture/LatestVideoSample.h"
 #include "capture/DirectShowGraphResources.h"
+#include "capture/VideoOnlyStart.h"
 #include "video/PresentationReadiness.h"
 #include "video/PresentationPolicy.h"
 
@@ -332,6 +333,17 @@ static void TestPartialRunTeardown(bool explicitReset) {
 #include "VideoMailboxStress.inl"
 #include "VideoSampleFormatTests.inl"
 
+static bool HandleIsClosed(HANDLE handle) {
+    DWORD flags = 0;
+    __try {
+        return !GetHandleInformation(handle, &flags) && GetLastError() == ERROR_INVALID_HANDLE;
+    } __except (GetExceptionCode() == 0xC0000008UL /* STATUS_INVALID_HANDLE */
+                    ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        // Checked-handle environments can raise instead of returning FALSE.
+        // Accept only the expected closed-handle result, not an access violation.
+        return true;
+    }
+}
 static void TestPresentationAdmission() {
     using Reason = llcv::capture::CaptureGraphEvents::WaitReason;
     using Mode = llcv::settings::PresentationMode;
@@ -400,13 +412,288 @@ static void TestPresentationAdmission() {
     events.Reset();
     source->Release();
     admission.Reset();
-    DWORD flags = 0;
-    Check(!GetHandleInformation(slot, &flags), "reset closes owned DXGI readiness handle");
+    Check(HandleIsClosed(slot), "reset closes owned DXGI readiness handle");
     Check(admission.Ready() && !admission.WaitHandle(), "disabled modes have no wait or handle");
     Check(liveSamples == 0, "admission has no leaked sample ownership");
     CloseHandle(frame);
     CloseHandle(wake);
 }
+// A callback that only shows who still holds it.
+class CountingAudioCallback final : public ISampleGrabberCB {
+public:
+    ULONG References() const { return refs_.load(); }
+    STDMETHODIMP QueryInterface(REFIID iid, void** object) override {
+        if (!object) return E_POINTER;
+        *object = nullptr;
+        if (iid != IID_IUnknown && iid != __uuidof(ISampleGrabberCB)) return E_NOINTERFACE;
+        *object = this; AddRef(); return S_OK;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return ++refs_; }
+    STDMETHODIMP_(ULONG) Release() override {
+        const ULONG left = --refs_;
+        if (!left) delete this;
+        return left;
+    }
+    STDMETHODIMP SampleCB(double, IMediaSample*) override { return S_OK; }
+    STDMETHODIMP BufferCB(double, BYTE*, long) override { return S_OK; }
+private:
+    std::atomic<ULONG> refs_{1};
+};
+
+// Only RemoveFilter matters to RemoveAudioBranch; everything else is unused.
+class RemovalGraph final : public IGraphBuilder {
+public:
+    HRESULT removeResult = S_OK;
+    unsigned removeCalls = 0;
+    STDMETHODIMP QueryInterface(REFIID, void** object) override { if (object) *object = nullptr; return E_NOINTERFACE; }
+    STDMETHODIMP_(ULONG) AddRef() override { return ++refs_; }
+    STDMETHODIMP_(ULONG) Release() override { return --refs_; }
+    STDMETHODIMP AddFilter(IBaseFilter*, LPCWSTR) override { return E_NOTIMPL; }
+    STDMETHODIMP RemoveFilter(IBaseFilter*) override { ++removeCalls; return removeResult; }
+    STDMETHODIMP EnumFilters(IEnumFilters**) override { return E_NOTIMPL; }
+    STDMETHODIMP FindFilterByName(LPCWSTR, IBaseFilter**) override { return E_NOTIMPL; }
+    STDMETHODIMP ConnectDirect(IPin*, IPin*, const AM_MEDIA_TYPE*) override { return E_NOTIMPL; }
+    STDMETHODIMP Reconnect(IPin*) override { return E_NOTIMPL; }
+    STDMETHODIMP Disconnect(IPin*) override { return E_NOTIMPL; }
+    STDMETHODIMP SetDefaultSyncSource() override { return E_NOTIMPL; }
+    STDMETHODIMP Connect(IPin*, IPin*) override { return E_NOTIMPL; }
+    STDMETHODIMP Render(IPin*) override { return E_NOTIMPL; }
+    STDMETHODIMP RenderFile(LPCWSTR, LPCWSTR) override { return E_NOTIMPL; }
+    STDMETHODIMP AddSourceFilter(LPCWSTR, LPCWSTR, IBaseFilter**) override { return E_NOTIMPL; }
+    STDMETHODIMP SetLogFile(DWORD_PTR) override { return E_NOTIMPL; }
+    STDMETHODIMP Abort() override { return E_NOTIMPL; }
+    STDMETHODIMP ShouldOperationContinue() override { return E_NOTIMPL; }
+    ULONG References() const { return refs_.load(); }
+private:
+    std::atomic<ULONG> refs_{1};
+};
+
+class RemovalFilter final : public IBaseFilter {
+public:
+    RemovalFilter(IFilterGraph* graph, HRESULT queryResult, unsigned& released)
+        : graph_(graph), queryResult_(queryResult), released_(released) {}
+    STDMETHODIMP QueryInterface(REFIID, void** object) override { if (object) *object = nullptr; return E_NOINTERFACE; }
+    STDMETHODIMP_(ULONG) AddRef() override { return ++refs_; }
+    STDMETHODIMP_(ULONG) Release() override {
+        const ULONG left = --refs_;
+        if (!left) { ++released_; delete this; }
+        return left;
+    }
+    STDMETHODIMP GetClassID(CLSID*) override { return E_NOTIMPL; }
+    STDMETHODIMP Stop() override { return E_NOTIMPL; }
+    STDMETHODIMP Pause() override { return E_NOTIMPL; }
+    STDMETHODIMP Run(REFERENCE_TIME) override { return E_NOTIMPL; }
+    STDMETHODIMP GetState(DWORD, FILTER_STATE*) override { return E_NOTIMPL; }
+    STDMETHODIMP SetSyncSource(IReferenceClock*) override { return E_NOTIMPL; }
+    STDMETHODIMP GetSyncSource(IReferenceClock**) override { return E_NOTIMPL; }
+    STDMETHODIMP EnumPins(IEnumPins**) override { return E_NOTIMPL; }
+    STDMETHODIMP FindPin(LPCWSTR, IPin**) override { return E_NOTIMPL; }
+    STDMETHODIMP QueryFilterInfo(FILTER_INFO* info) override {
+        if (FAILED(queryResult_)) return queryResult_;
+        *info = {};
+        info->pGraph = graph_;
+        if (graph_) graph_->AddRef();
+        return S_OK;
+    }
+    STDMETHODIMP JoinFilterGraph(IFilterGraph*, LPCWSTR) override { return E_NOTIMPL; }
+    STDMETHODIMP QueryVendorInfo(LPWSTR*) override { return E_NOTIMPL; }
+private:
+    IFilterGraph* graph_;
+    HRESULT queryResult_;
+    unsigned& released_;
+    std::atomic<ULONG> refs_{1};
+};
+
+static bool PinConnected(IPin* pin) {
+    IPin* peer = nullptr;
+    const bool connected = pin && SUCCEEDED(pin->ConnectedTo(&peer)) && peer;
+    if (peer) peer->Release();
+    return connected;
+}
+
+// Real graph, stock filters only, with the audio branch actually connected
+// (WAV file -> WAVE parser -> sample grabber -> null renderer): a failed
+// audio branch must leave exactly the video branch behind, whether the audio
+// pin was on the capture filter itself or on a separate audio filter.
+static void TestRemoveConnectedAudioBranch() {
+    using namespace llcv::capture;
+    static constexpr CLSID kWaveParser =
+        {0xD51BD5A1, 0x7548, 0x11CF, {0xA5, 0x20, 0x00, 0x80, 0xC7, 0x7E, 0xF5, 0x8A}};
+    wchar_t folder[MAX_PATH]{}, file[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, folder);
+    GetTempFileNameW(folder, L"llc", 0, file);
+    {
+        // 48 kHz 16-bit stereo PCM, 0.1 s of silence.
+        constexpr DWORD dataBytes = 19200;
+        std::vector<BYTE> wave(44 + dataBytes);
+        const auto put = [&](size_t at, DWORD value, int bytes) {
+            for (int i = 0; i < bytes; ++i) wave[at + i] = static_cast<BYTE>(value >> (8 * i));
+        };
+        std::memcpy(wave.data(), "RIFF", 4); put(4, 36 + dataBytes, 4);
+        std::memcpy(wave.data() + 8, "WAVEfmt ", 8); put(16, 16, 4);
+        put(20, 1, 2); put(22, 2, 2); put(24, 48000, 4); put(28, 192000, 4); put(32, 4, 2); put(34, 16, 2);
+        std::memcpy(wave.data() + 36, "data", 4); put(40, dataBytes, 4);
+        const HANDLE out = CreateFileW(file, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        DWORD written = 0;
+        if (out != INVALID_HANDLE_VALUE) {
+            WriteFile(out, wave.data(), static_cast<DWORD>(wave.size()), &written, nullptr);
+            CloseHandle(out);
+        }
+    }
+    const auto filterCount = [](IGraphBuilder* graph) {
+        IEnumFilters* filters = nullptr;
+        if (FAILED(graph->EnumFilters(&filters))) return -1;
+        int count = 0;
+        IBaseFilter* filter = nullptr;
+        while (filters->Next(1, &filter, nullptr) == S_OK) { ++count; filter->Release(); }
+        filters->Release();
+        return count;
+    };
+    const auto create = [](const CLSID& id) {
+        IBaseFilter* filter = nullptr;
+        CoCreateInstance(id, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&filter));
+        return filter;
+    };
+    const auto firstPin = [](IBaseFilter* filter, PIN_DIRECTION wanted) {
+        IEnumPins* pins = nullptr;
+        IPin* found = nullptr;
+        if (!filter || FAILED(filter->EnumPins(&pins))) return found;
+        IPin* pin = nullptr;
+        while (!found && pins->Next(1, &pin, nullptr) == S_OK) {
+            PIN_DIRECTION direction{};
+            if (SUCCEEDED(pin->QueryDirection(&direction)) && direction == wanted) found = pin;
+            else pin->Release();
+        }
+        pins->Release();
+        return found;
+    };
+    for (bool separateAudioFilter : {false, true}) {
+        DirectShowGraphResources resources;
+        Check(SUCCEEDED(CoCreateInstance(CLSID_FilterGraph, nullptr, CLSCTX_INPROC_SERVER,
+                                         IID_PPV_ARGS(&resources.graph))), "create audio-branch test graph");
+        if (!resources.graph) continue;
+        // The file reader only feeds the parser and stays in the graph. The
+        // parser carries the audio pin: it is either the capture filter
+        // itself or a separate audio capture filter.
+        IBaseFilter* reader = create(CLSID_AsyncReader);
+        IBaseFilter* source = create(kWaveParser);
+        IFileSourceFilter* loader = nullptr;
+        const bool loaded = reader && source && SUCCEEDED(reader->QueryInterface(IID_PPV_ARGS(&loader))) &&
+            SUCCEEDED(loader->Load(file, nullptr));
+        if (loader) loader->Release();
+        Check(loaded, "file source for the audio branch loads");
+        if (!loaded) { if (reader) reader->Release(); if (source) source->Release(); continue; }
+        if (separateAudioFilter) {
+            resources.capture = create(CLSID_SmartTee);
+            resources.audioCapture = source;
+        } else {
+            resources.capture = source;
+        }
+        resources.videoNullRenderer = create(kNullRendererClassId);
+        resources.audioGrabberFilter = create(kSampleGrabberClassId);
+        resources.audioNullRenderer = create(kNullRendererClassId);
+        if (!resources.capture || !resources.videoNullRenderer || !resources.audioGrabberFilter ||
+            !resources.audioNullRenderer) { reader->Release(); Check(false, "stock test filters are available"); continue; }
+        resources.graph->AddFilter(reader, L"file reader");
+        resources.graph->AddFilter(resources.capture, L"capture");
+        resources.graph->AddFilter(resources.videoNullRenderer, L"video sink");
+        if (separateAudioFilter) resources.graph->AddFilter(resources.audioCapture, L"audio capture");
+        {
+            IPin* readerOut = firstPin(reader, PINDIR_OUTPUT);
+            IPin* parserIn = firstPin(source, PINDIR_INPUT);
+            Check(readerOut && parserIn && SUCCEEDED(resources.graph->ConnectDirect(readerOut, parserIn, nullptr)),
+                  "WAVE parser reads the test file");
+            if (readerOut) readerOut->Release();
+            if (parserIn) parserIn->Release();
+        }
+        reader->Release();
+        resources.graph->AddFilter(resources.audioGrabberFilter, L"audio grabber");
+        resources.graph->AddFilter(resources.audioNullRenderer, L"audio sink");
+        resources.audioGrabberFilter->QueryInterface(__uuidof(ISampleGrabber),
+            reinterpret_cast<void**>(&resources.audioGrabber));
+        auto* callback = new CountingAudioCallback();
+        resources.audioCallback = callback;
+        callback->AddRef();  // the test's own reference, to observe the others
+        Check(resources.audioGrabber && SUCCEEDED(resources.audioGrabber->SetCallback(callback, 0)) &&
+                  callback->References() == 3, "grabber and resources both hold the audio callback");
+        resources.audioPin = firstPin(source, PINDIR_OUTPUT);
+        resources.audioGrabberInput = firstPin(resources.audioGrabberFilter, PINDIR_INPUT);
+        resources.audioGrabberOutput = firstPin(resources.audioGrabberFilter, PINDIR_OUTPUT);
+        resources.audioNullInput = firstPin(resources.audioNullRenderer, PINDIR_INPUT);
+        const bool connected = resources.audioPin && resources.audioGrabberInput &&
+            resources.audioGrabberOutput && resources.audioNullInput &&
+            SUCCEEDED(resources.graph->ConnectDirect(resources.audioPin, resources.audioGrabberInput, nullptr)) &&
+            SUCCEEDED(resources.graph->ConnectDirect(resources.audioGrabberOutput, resources.audioNullInput, nullptr));
+        Check(connected && PinConnected(resources.audioPin) && PinConnected(resources.audioNullInput),
+              "audio branch is connected end to end");
+        IPin* sourcePin = resources.audioPin;
+        if (sourcePin) sourcePin->AddRef();
+        Check(filterCount(resources.graph) == (separateAudioFilter ? 6 : 5), "audio branch test graph is built");
+        Check(SUCCEEDED(resources.RemoveAudioBranch()), "connected audio branch removal succeeds");
+        Check(filterCount(resources.graph) == 3 && resources.capture && resources.videoNullRenderer,
+              "only the reader, video capture filter and video sink stay in the graph");
+        Check(!PinConnected(sourcePin), "the audio source pin is disconnected");
+        Check(callback->References() == 1, "grabber and resources released the audio callback");
+        Check(!resources.audioPin && !resources.audioCapture && !resources.audioGrabberFilter &&
+                  !resources.audioNullRenderer && !resources.audioGrabber && !resources.audioCallback &&
+                  !resources.audioGrabberInput && !resources.audioGrabberOutput && !resources.audioNullInput &&
+                  !resources.selectedAudioType,
+              "every audio object is released after removal");
+        Check(SUCCEEDED(resources.RemoveAudioBranch()) && filterCount(resources.graph) == 3,
+              "removing an absent audio branch changes nothing");
+        if (sourcePin) sourcePin->Release();
+        callback->Release();
+    }
+    DeleteFileW(file);
+}
+
+// A filter that cannot be removed, or cannot even say whether it is in the
+// graph, must fail the removal; the rest is still detached and released.
+static void TestRemoveAudioBranchFailures() {
+    using namespace llcv::capture;
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        RemovalGraph graph;
+        unsigned released = 0;
+        {
+            DirectShowGraphResources resources;
+            resources.graph = &graph; graph.AddRef();
+            // 0: RemoveFilter fails. 1: QueryFilterInfo fails. 2: a filter
+            // that never joined the graph is released without RemoveFilter.
+            graph.removeResult = scenario == 0 ? E_ACCESSDENIED : S_OK;
+            resources.audioNullRenderer = new RemovalFilter(scenario == 2 ? nullptr : &graph, S_OK, released);
+            resources.audioGrabberFilter = new RemovalFilter(&graph, scenario == 1 ? E_UNEXPECTED : S_OK, released);
+            resources.audioCapture = new RemovalFilter(&graph, S_OK, released);
+            const HRESULT result = resources.RemoveAudioBranch();
+            if (scenario == 0)
+                Check(result == E_ACCESSDENIED && graph.removeCalls == 3,
+                      "a RemoveFilter failure is reported after every filter was still attempted");
+            else if (scenario == 1)
+                Check(result == E_UNEXPECTED && graph.removeCalls == 2,
+                      "a filter that cannot report its graph is a removal failure, not a success");
+            else
+                Check(result == S_OK && graph.removeCalls == 2,
+                      "a filter outside the graph is released without a RemoveFilter call");
+            Check(released == 3 && !resources.audioNullRenderer && !resources.audioGrabberFilter &&
+                      !resources.audioCapture, "failed removal still releases every audio filter");
+        }
+        Check(graph.References() == 1, "graph references are balanced after removal");
+    }
+}
+
+static void TestRemoveAudioBranch() {
+    using namespace llcv::capture;
+    static_assert(OnCaptureAudioFailure(false, false) == AudioFailureAction::AskVideoOnly);
+    static_assert(OnCaptureAudioFailure(true, false) == AudioFailureAction::ReportFailure);
+    static_assert(OnCaptureAudioFailure(false, true) == AudioFailureAction::ReportFailure);
+    constexpr auto yes = AfterVideoOnlyPrompt(true), no = AfterVideoOnlyPrompt(false);
+    static_assert(yes.startVideoOnly && yes.closeAudioOutput && !yes.returnToSettingsQuietly);
+    static_assert(!no.startVideoOnly && !no.closeAudioOutput && no.returnToSettingsQuietly);
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    TestRemoveConnectedAudioBranch();
+    TestRemoveAudioBranchFailures();
+    if (SUCCEEDED(com)) CoUninitialize();
+}
+
 int main(int argc, char** argv) {
     TestPresentationAdmission();
     if (argc == 2 && std::string(argv[1]) == "--stress") return RunMailboxStress();
@@ -415,6 +702,7 @@ int main(int argc, char** argv) {
     TestVideoSampleChanges();
     TestRgb32CallbackOrientationAndShortBuffer();
     TestRgb24CallbackOrientationAndShortBuffer();
+    TestRemoveAudioBranch();
     using namespace llcv::capture;
     HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     Check(ready != nullptr, "create test frame event");

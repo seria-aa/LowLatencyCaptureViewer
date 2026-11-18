@@ -5,7 +5,7 @@
 HDMI 캡처보드로 들어오는 영상과 소리를 재생하는 Windows용 저지연 뷰어입니다.
 OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리만 들을 수 있습니다.
 
-**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.2.1.md) · [English](README.en.md)
+**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.3.0.md) · [English](README.en.md)
 
 <br>
 
@@ -17,12 +17,12 @@ OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리�
 
 <br>
 
-## 2.2.1 업데이트
+## 2.3.0 업데이트
 
-SDR 업스케일링에 **CMAA2 높음·보존형** 선택을 추가하고, **HDR10은 NIS와 윤곽 보호**로 확대합니다.
-업스케일링 조절을 나란히 배치하고 스크린샷 설정을 앱 설정으로 옮겼습니다.
-간격·정렬과 키보드 이동 순서를 다듬고, 앱 설정에서 **릴리스 노트**를 바로 열 수 있습니다.
-[전체 변경 내역](docs/release-notes-v2.2.1.md)
+캡처 영상에 **NVIDIA VFG 프레임 보간**을 선택해 사용할 수 있습니다. Ada·Blackwell은 기본 경로를, RTX 30(SM 8.6)은 지정 런타임에서 실험적 호환 경로를 사용합니다. 기본은 꺼짐이며, NVIDIA 실행 구성품과 모델은 동봉하지 않습니다.
+녹화 중에는 화면 구석에 **REC와 경과 시간**이 표시되고, 정상 저장한 MP4의 길이는 Windows 탐색기에 표시됩니다.
+캡처 오디오를 연결하지 못하면 영상만 시작할 수 있고, F1에서는 지정된 단축키 전체를 확인할 수 있습니다.
+[전체 변경 내역](docs/release-notes-v2.3.0.md) · [프레임 보간 안내](docs/FRAME_INTERPOLATION.ko.md)
 
 <br>
 

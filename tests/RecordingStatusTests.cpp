@@ -62,6 +62,12 @@ int main() {
         Check(!view.canOpenVideo && !view.canOpenFolder &&
             view.description.find(english?L"remaining file":L"남은 파일")==std::wstring::npos,
             "rejected UYVY recording does not imply damaged file residue");
+        snapshot.result=NoCaptureAudioRecording;
+        view=presentation::Build(snapshot,english);
+        Check(view.description.find(english?L"video only":L"영상만")!=std::wstring::npos &&
+            view.description.find(english?L"capture audio device":L"캡처 오디오 장치")!=std::wstring::npos &&
+            !view.canOpenVideo && !view.canOpenFolder,
+            "video-only capture explains why recording is unavailable and offers no file");
         snapshot.result=E_INVALIDARG;
         Check(presentation::Build(snapshot,english).description.find(L"UYVY/HDYC")==std::wstring::npos,
             "other invalid input retains the existing generic message");

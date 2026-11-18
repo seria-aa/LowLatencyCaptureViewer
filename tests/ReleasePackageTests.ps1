@@ -16,6 +16,19 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $stage "docs/release-notes-v$Version.md") -PathType Leaf)) {
         throw "Missing release notes for $Version."
     }
+    if ([version]$Version -ge [version]'2.3.0') {
+        $config = Join-Path $stage 'ffmpeg-licenses/config.mak'
+        $original = [IO.File]::ReadAllBytes($config)
+        try {
+            [IO.File]::AppendAllText($config, "`nprefix=/c/Users/build-fixture/sdk`n")
+            try {
+                & $validator -PackageRoot $stage -Version $Version | Out-Null
+                throw 'Local FFmpeg configuration path was accepted.'
+            } catch {
+                if ($_.Exception.Message -ne 'Build-machine profile path in release file: ffmpeg-licenses/config.mak') {throw}
+            }
+        } finally { [IO.File]::WriteAllBytes($config,$original) }
+    }
     foreach ($name in @('UPSCALING_BOUNDARY_SAFETY.md', 'UPSCALING_OVERFLOW_DIAGNOSTIC.md',
             'UYVY_HDYC_SUPPORT.md', 'RGB_CAPTURE_SUPPORT.md')) {
         if (Test-Path -LiteralPath (Join-Path $stage "docs/$name")) {
@@ -68,6 +81,22 @@ try {
     }
     if (-not $diagnosticError.Contains('Audio-input recovery diagnostic')) {
         throw "Diagnostic build was not rejected by its marker: $diagnosticError"
+    }
+    if ($Version -eq '2.3.0') {
+        Move-Item -LiteralPath (Join-Path $diagnosticBuild 'llcv-audio-recovery-diagnostic.txt') `
+            -Destination (Join-Path $diagnosticBuild 'disabled-marker.txt')
+        $stamp = Join-Path $diagnosticBuild 'llcv-release-vfg-sm86.sha256'
+        foreach ($expected in @('Build the VFG + SM86 release executable', 'stamp does not match the executable')) {
+            $packageError = ''
+            try {
+                & (Join-Path $toolsDirectory 'package-v1.ps1') -Version $Version `
+                    -BuildDir $relativeBuild -OutputDir $relativeOutput | Out-Null
+            } catch { $packageError = $_.Exception.Message }
+            if ((Test-Path -LiteralPath $diagnosticOutput) -or -not $packageError.Contains($expected)) {
+                throw "A missing/stale release stamp was not rejected: $packageError"
+            }
+            [IO.File]::WriteAllText($stamp, '0' * 64)
+        }
     }
 } finally {
     if (Test-Path -LiteralPath $stage) {

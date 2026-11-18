@@ -1,7 +1,7 @@
 ﻿param(
-    [string]$Version = "2.2.1",
-    [string]$BuildDir = "..\build-v2210-release",
-    [string]$OutputDir = "outputs\v2.2.1"
+    [string]$Version = "2.3.0",
+    [string]$BuildDir = "..\build-v2300-release",
+    [string]$OutputDir = "outputs\v2.3.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,12 +15,25 @@ $exe = Join-Path $build "LowLatencyCaptureViewer.exe"
 if (Test-Path -LiteralPath (Join-Path $build 'llcv-audio-recovery-diagnostic.txt')) {
     throw "Audio-input recovery diagnostic builds cannot be packaged as a regular release."
 }
+if ((Get-ChildItem -LiteralPath $build -Filter 'swresample-*.dll' -File) -or
+    (Test-Path -LiteralPath (Join-Path $build 'ffmpeg-licenses/dolby-ffmpeg-NOTICE.txt'))) {
+    throw "Dolby preview FFmpeg cannot be packaged as a regular release."
+}
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
     throw "Release executable not found: $exe"
 }
 $exeVersion = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
 if ($exeVersion -ne $Version -and $exeVersion -ne "$Version.0") {
     throw "Version mismatch: requested $Version but executable reports $exeVersion"
+}
+if ($Version -eq '2.3.0') {
+    $stamp = Join-Path $build 'llcv-release-vfg-sm86.sha256'
+    if (-not (Test-Path -LiteralPath $stamp -PathType Leaf)) {
+        throw 'Build the VFG + SM86 release executable before packaging.'
+    }
+    if ((Get-Content -LiteralPath $stamp -Raw).Trim() -ne (Get-FileHash -LiteralPath $exe).Hash) {
+        throw 'VFG release stamp does not match the executable; rebuild before packaging.'
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $output | Out-Null

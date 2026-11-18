@@ -183,7 +183,9 @@ void Output::ProcessBuffer(long index) {
     if (impl_) impl_->Switch(index);
 }
 
-bool Output::Start(void (*beforeStart)(void*)) {
+bool Output::Start(void (*beforeStart)(void*), bool (*stillWanted)()) {
+    const auto cancelled = [stillWanted] { return stillWanted && !stillWanted(); };
+    if (cancelled()) return false;
     if (!impl_ || impl_->driverIndex < 0) return false;
     error_.clear();
     g_restartRequested.store(false, std::memory_order_release);
@@ -193,12 +195,14 @@ bool Output::Start(void (*beforeStart)(void*)) {
         error_ = "ASIO driver could not be opened";
         return false;
     }
+    if (cancelled()) { Stop(); return false; }
     if (!impl_->driver->init(impl_->hostWindow)) {
         error_ = "ASIO driver initialization failed";
         impl_->drivers.asioCloseDriver(impl_->driverIndex);
         impl_->driver = nullptr;
         return false;
     }
+    if (cancelled()) { Stop(); return false; }
 
     long inputs = 0, outputs = 0;
     if (impl_->driver->getChannels(&inputs, &outputs) != ASE_OK ||
@@ -242,6 +246,7 @@ bool Output::Start(void (*beforeStart)(void*)) {
         return false;
     }
     impl_->bufferFrames = preferred;
+    if (cancelled()) { Stop(); return false; }
     for (int i = 0; i < 2; ++i) {
         impl_->buffers[i].isInput = ASIOFalse;
         impl_->buffers[i].channelNum = i;
@@ -284,7 +289,9 @@ bool Output::Start(void (*beforeStart)(void*)) {
     }
     impl_->sampleType = impl_->channels[0].type;
     impl_->scratchBuffer.resize(static_cast<std::size_t>(preferred) * 2);
+    if (cancelled()) { Stop(); return false; }
     if (beforeStart) beforeStart(impl_->user);
+    if (cancelled()) { Stop(); return false; }
     {
         std::lock_guard<std::mutex> lock(g_outputMutex);
         g_activeOutput = this;
@@ -296,6 +303,7 @@ bool Output::Start(void (*beforeStart)(void*)) {
         return false;
     }
     impl_->started = true;
+    if (cancelled()) { Stop(); return false; }
     running_ = true;
     bufferFrames_ = preferred;
     sampleRate_ = rate;

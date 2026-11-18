@@ -856,6 +856,16 @@ static int TestOverlayUi(const char* directory) {
             Require(metrics.lineCount == 20 && metrics.height <= r.kOsdTextHeight,
                 "VSR row retains all diagnostics without wrapping or clipping");
         }
+#ifdef LLCV_INTERPOLATION_RELEASE
+        llcv::rife_test::EnableComponents(true);
+        g_overlayGeneration.fetch_add(1);
+        Check(r.refreshOverlayLayouts(), "opted-in frame interpolation diagnostics refresh");
+        DWRITE_TEXT_METRICS interpolationMetrics{};
+        Check(r.osdTextLayout->GetMetrics(&interpolationMetrics), "interpolation diagnostics fit");
+        Require(interpolationMetrics.lineCount == 22 && interpolationMetrics.height <= r.kOsdTextHeight,
+            "opt-in adds two visible rows without clipping VSR or base diagnostics");
+        llcv::rife_test::EnableComponents(false);
+#endif
         r.vsrState = savedVsrState;
         r.vsrInputWidth = savedInputWidth; r.vsrInputHeight = savedInputHeight;
         r.vsrDisplayWidth = savedDisplayWidth; r.vsrDisplayHeight = savedDisplayHeight;

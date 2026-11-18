@@ -112,6 +112,10 @@ bool Recorder::Start(const std::wstring& path,const Options* options) {
         // Never feed UYVY bytes into the existing YUY2 recording path.
         Fail(UnsupportedUyvyRecording,Operation::Input);phase_=Phase::Failed;return false;
     }
+    if(audio_.channels==0) {
+        // Never start a recording that would silently have no sound.
+        Fail(NoCaptureAudioRecording,Operation::Input);phase_=Phase::Failed;return false;
+    }
     const bool rgb24=video_.format==settings::VideoPixelFormat::Rgb24;
     const bool rgb=rgb24 || video_.format==settings::VideoPixelFormat::Rgb32;
     const bool nv12=video_.format==settings::VideoPixelFormat::Nv12;

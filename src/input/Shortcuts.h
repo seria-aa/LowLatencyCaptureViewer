@@ -12,7 +12,11 @@ enum class Action : size_t { Help, Settings, AudioOsd, PixelPerfect, Vsr, Fullsc
 #ifdef LLCV_RECORDING
     Recording,
 #endif
-    Mute, Count };
+    Mute,
+#ifdef LLCV_RIFE_OPTIONAL
+    HudCorrection, FrameInterpolation,
+#endif
+    Count };
 inline constexpr size_t Count = static_cast<size_t>(Action::Count);
 inline constexpr unsigned Ctrl = 0x100, Alt = 0x200, Shift = 0x400;
 using Bindings = std::array<unsigned, Count>;
@@ -21,18 +25,27 @@ inline constexpr Bindings Defaults{VK_F1,VK_F2,VK_F3,VK_F5,VK_F6,VK_F11,VK_F12,V
     ,VK_F9
 #endif
     ,'M'
+#ifdef LLCV_RIFE_OPTIONAL
+    ,0,VK_F7
+#endif
 };
 inline constexpr std::array<const wchar_t*, Count> Names{L"Help",L"Settings",L"AudioOsd",L"PixelPerfect",L"Vsr",L"Fullscreen",L"Screenshot",L"Diagnostics",L"Exit"
 #ifdef LLCV_RECORDING
     ,L"Recording"
 #endif
     ,L"Mute"
+#ifdef LLCV_RIFE_OPTIONAL
+    ,L"HudCorrection",L"FrameInterpolation"
+#endif
 };
 inline constexpr std::array<const wchar_t*, Count> DefaultLabels{L"F1",L"F2",L"F3",L"F5",L"F6",L"F11",L"F12",L"Tab",L"Esc"
 #ifdef LLCV_RECORDING
     ,L"F9"
 #endif
     ,L"M"
+#ifdef LLCV_RIFE_OPTIONAL
+    ,L"F4",L"F7"
+#endif
 };
 #ifdef LLCV_RECORDING
 // Preserve legacy custom bindings when the new action has no saved key yet.
@@ -74,6 +87,9 @@ inline bool Valid(unsigned binding) {
 }
 inline bool Valid(const Bindings& bindings) {
     for (size_t i=0;i<Count;++i) {
+#ifdef LLCV_RIFE_OPTIONAL
+        if (i==static_cast<size_t>(Action::HudCorrection) && bindings[i]==0) continue;
+#endif
         if (!Valid(bindings[i])) return false;
         for (size_t j=0;j<i;++j) if (bindings[i]==bindings[j]) return false;
     }
@@ -92,7 +108,7 @@ inline bool AllowedInSettings(UINT key) {
     return key>=VK_F1 && key<=VK_F24 && key!=VK_F4;
 }
 inline bool Match(const Bindings& bindings,Action action,UINT key,unsigned modifiers) {
-    return key<256 && bindings[static_cast<size_t>(action)]==(key|modifiers);
+    return key!=0 && key<256 && bindings[static_cast<size_t>(action)]==(key|modifiers);
 }
 inline bool Match(const Bindings& bindings,Action action,const MSG& message) {
     return KeyDown(message.message) && Match(bindings,action,static_cast<UINT>(message.wParam),Modifiers());

@@ -77,7 +77,8 @@ private:
 };
 
 bool IsRunning(const Host& host) {
-    return host.running && host.running->load(std::memory_order_acquire);
+    return host.running && host.running->load(std::memory_order_acquire) &&
+        !(host.stop && host.stop->load(std::memory_order_acquire));
 }
 
 }  // namespace

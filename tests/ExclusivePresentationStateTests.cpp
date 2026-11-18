@@ -1,5 +1,6 @@
 #include "video/ExclusivePresentationState.h"
 #include "video/PresentationPolicy.h"
+#include "video/PresentationReadiness.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +20,66 @@ void Check(bool value, const char* message) {
 
 int main() {
     using llcv::presentation::Mode;
+    {
+        using namespace llcv::presentation;
+        Check(VfgPresentationBlock(Mode::AllowTearing,60,0,false)==VfgBlock::None &&
+              VfgPresentationBlock(Mode::ExclusiveFullscreen,60,0,false)==VfgBlock::None,
+              "existing immediate and exclusive VFG paths need no waitable object");
+        Check(VfgPresentationBlock(Mode::Compatibility,30,144,true)==VfgBlock::Compatibility,
+              "legacy Blt output does not support VFG");
+        Check(VfgPresentationBlock(Mode::VSync,60,120,false)==VfgBlock::SyncUnavailable,
+              "VSync VFG needs frame admission");
+        for(const auto hz:{0u,60u,118u})
+            Check(VfgPresentationBlock(Mode::VSync,60,hz,true)==VfgBlock::RefreshRate,
+                  "VSync with unknown or insufficient refresh keeps original playback");
+        Check(VfgPresentationBlock(Mode::VSync,30,59,true)==VfgBlock::None &&
+              VfgPresentationBlock(Mode::VSync,60,119,true)==VfgBlock::None &&
+              VfgPresentationBlock(Mode::VSync,60,144,true)==VfgBlock::None,
+              "VSync accepts full double-rate cadence and fractional Windows modes");
+        Check(!UseVfgOriginalTimer(Mode::VSync,60,120) &&
+               UseVfgOriginalTimer(Mode::VSync,30,144) &&
+               UseVfgOriginalTimer(Mode::ExclusiveFullscreen,60,0) &&
+               VfgOriginalWaitMs(48)<=50 && VfgOriginalWaitMs(240)>=8,
+              "VSync lets the next refresh pace 2x output and bounds the second-slot wait");
+        Readiness admission;
+        HANDLE signal=CreateEventW(nullptr,FALSE,TRUE,nullptr);
+        Check(signal!=nullptr,"create synthetic readiness signal");
+        admission.Reset(signal);
+        Check(admission.Poll()==S_OK,"admit first presentation");
+        admission.Presented();
+        Check(admission.Wait(1)==S_FALSE && !admission.Ready(),
+              "generated presentation cannot reuse its admission credit for the original");
+        Check(SetEvent(signal)!=FALSE && admission.Wait(10)==S_OK && admission.Ready(),
+              "next signal independently admits the original");
+        admission.Presented();
+        VfgSecondSlotRecovery recovery;
+        recovery.ObserveRequest(true, 1);
+        Check(admission.Wait(0)==S_FALSE,"simulate a missing second slot");
+        recovery.TimedOut(60);
+        Check(recovery.OriginalOnly() && admission.Enabled() && admission.WaitHandle()==signal,
+              "VFG timeout does not disable original-frame readiness");
+        recovery.ObserveRequest(true, 1);
+        Check(recovery.OriginalOnly(),"same intent with no admitted frame cannot consume the retry delay");
+        for (int i=0; i<60; ++i) {
+            Check(recovery.OriginalOnly() && !admission.Ready(),
+                  "recovery continues to wait for independent original credits");
+            Check(SetEvent(signal)!=FALSE && admission.Poll()==S_OK,"source-only slot is admitted");
+            admission.Presented();
+            recovery.OriginalPresented();
+        }
+        Check(!recovery.OriginalOnly() &&
+                  VfgPresentationBlock(Mode::VSync,60,120,admission.Enabled())==VfgBlock::None,
+              "VFG can automatically retry after stable original playback");
+        recovery.TimedOut(30);
+        recovery.ObserveRequest(true, 3);
+        Check(!recovery.OriginalOnly(),"rapid F7 off/on permits a fresh attempt");
+        recovery.TimedOut(30);
+        recovery.ObserveRequest(false, 4);
+        Check(!recovery.OriginalOnly(),"disabling VFG clears the recovery delay");
+        admission.Bypass();
+        Check(admission.Wait(1)==S_OK && !admission.Enabled(),
+              "fallback admission does not block ordinary VSync playback");
+    }
     for (Mode mode : {Mode::AllowTearing, Mode::VSync, Mode::Compatibility,
                       Mode::ExclusiveFullscreen})
     for (bool hdr : {false, true})

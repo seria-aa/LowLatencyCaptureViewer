@@ -155,6 +155,15 @@ int main() {
                "invalid input has actionable terminal failure without an openable file");
         Expect(!std::filesystem::exists(invalidFile), "unsupported input does not create a misleading empty video");
 
+        const auto silentFile=temporary.Path(L"video-only.mp4");
+        recorder.Configure(video,{},{},false,options);
+        Expect(!recorder.Start(silentFile.wstring()),"recording without capture audio rejected before startup");
+        state=recorder.GetSnapshot();
+        Expect(state.phase==Phase::Failed && state.failure==Failure::InvalidInput &&
+            state.result==llcv::recording::NoCaptureAudioRecording && !state.busy && !state.playable &&
+            !llcv::recording::RecorderTestAccess::HasWorker(recorder),"video-only rejection has dedicated reason and starts no worker");
+        Expect(!std::filesystem::exists(silentFile),"video-only rejection creates no recording file");
+
         const auto uyvyFile=temporary.Path(L"unsupported-uyvy.mp4");
         auto uyvy=video;uyvy.format=llcv::settings::VideoPixelFormat::Uyvy;uyvy.stride=uyvy.width*2;
         recorder.Configure(uyvy,audio,{},false,options);

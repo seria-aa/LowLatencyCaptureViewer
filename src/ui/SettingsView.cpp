@@ -6,6 +6,12 @@
 #include "SettingsFonts.h"
 #include "PresentationModeUi.h"
 #include "settings/AppSettings.h"
+#ifdef LLCV_RIFE_TEST
+#include "video/RifeHalfTest.h"
+#endif
+#ifdef LLCV_INTERPOLATION_RELEASE
+#include "video/VfgRuntimeInstall.h"
+#endif
 
 #include <commctrl.h>
 #include <algorithm>
@@ -20,6 +26,28 @@ void SetSettingsText(HWND control, const wchar_t* text) {
     GetWindowTextW(control, current, ARRAYSIZE(current));
     if (std::wcscmp(current, text) != 0) SetWindowTextW(control, text);
 }
+#ifdef LLCV_INTERPOLATION_RELEASE
+void RefreshVfgDownloadControl(SettingsControls* state) {
+    if (!state || !state->vfgDownloadButton) return;
+    const auto status = llcv::vfg_runtime::GetStatus();
+    using llcv::vfg_runtime::Stage;
+    const auto tr = [state](const wchar_t* ko, const wchar_t* en) { return state->english ? en : ko; };
+    const bool canStart = status.stage == Stage::Idle || status.stage == Stage::Failed;
+    std::wstring text;
+    switch (status.stage) {
+    case Stage::Idle: text = tr(L"VFG 구성품 받기", L"Download VFG components"); break;
+    case Stage::Downloading:
+        text = tr(L"다운로드 중 · ", L"Downloading · ") + std::to_wstring(status.percent) + L"%"; break;
+    case Stage::Verifying: text = tr(L"구성품 확인 중", L"Verifying components"); break;
+    case Stage::Installing: text = tr(L"설치 중", L"Installing"); break;
+    case Stage::Ready: text = tr(L"VFG 구성품 설치됨", L"VFG components installed"); break;
+    case Stage::Failed: text = tr(L"설치 실패 · 다시 받기", L"Install failed · Retry"); break;
+    }
+    SetSettingsText(state->vfgDownloadButton, text.c_str());
+    SetSettingsControlVisible(state->vfgDownloadButton, state->activeTab == SettingsTab::Interpolation
+        && state->InterpolationGpuAvailable(), canStart);
+}
+#endif
 
 // Anchor the actual detected-mode text, not a fixed-height empty rectangle,
 // above the footer. The optional direct-request line shares the same block.
@@ -50,7 +78,7 @@ static void LayoutVideoStatus(SettingsControls* state, UINT dpi) {
 
 void RefreshShortcutCaptions(SettingsControls* state) {
     for (size_t i=0;i<state->guideKeys.size();++i)
-        SetSettingsText(state->guideKeys[i],viewer_help::KeyLabel(i,state->shortcutBindings).c_str());
+        SetSettingsText(state->guideKeys[i],viewer_help::KeyLabel(i,state->shortcutBindings,state->english).c_str());
     SetSettingsText(state->guideVideoHint,state->english
         ? L"Click a key to change\n* Video mode only"
         : L"키 버튼을 눌러 변경\n* 영상 모드 전용");
@@ -65,8 +93,8 @@ ShortcutLayout MeasureShortcutLayout(const SettingsControls* state,UINT dpi,int 
     HDC dc=GetDC(nullptr);
     if (!dc) return result;
     const auto old=SelectObject(dc,reinterpret_cast<HFONT>(SendMessageW(state->guideKeys[0],WM_GETFONT,0,0)));
-    for (unsigned binding:state->shortcutBindings) {
-        const auto label=shortcuts::Label(binding);
+    for (size_t i=0;i<state->shortcutBindings.size();++i) {
+        const auto label=viewer_help::KeyLabel(i,state->shortcutBindings,state->english);
         SIZE size{}; GetTextExtentPoint32W(dc,label.c_str(),static_cast<int>(label.size()),&size);
         result.keyWidth=std::max(result.keyWidth,
             static_cast<int>(((size.cx+SettingsPixels(19,dpi))*96+dpi-1)/dpi));
@@ -102,7 +130,15 @@ void BeginShortcutEdit(SettingsControls* state,size_t index) {
     if (same || index>=shortcuts::Count) return;
     state->editingShortcut=static_cast<int>(index);
     SetFocus(state->guideKeys[index]);
-    SetSettingsText(state->guideKeys[index],L"…");
+    SetSettingsText(state->guideKeys[index],state->english ? L"Press key" : L"키 입력");
+#ifdef LLCV_RIFE_OPTIONAL
+    if (index==static_cast<size_t>(shortcuts::Action::HudCorrection)) {
+        SetSettingsText(state->guideVideoHint,state->english
+            ? L"Press a key to assign. Backspace clears it.\nClick the key button again to cancel."
+            : L"새 키를 입력합니다. Backspace로 배정을 해제합니다.\n키 버튼을 다시 누르면 취소합니다.");
+        return;
+    }
+#endif
     SetSettingsText(state->guideVideoHint,state->english
         ? L"Press a key with Ctrl / Alt / Shift.\nClick the key button again to cancel."
         : L"키 입력 (Ctrl / Alt / Shift 조합 가능)\n취소하려면 키 버튼을 다시 누르세요.");
@@ -125,17 +161,27 @@ bool ProcessShortcutEdit(SettingsControls* state,const MSG& message,unsigned mod
     const UINT key=static_cast<UINT>(message.wParam);
     if (message.lParam & (LPARAM{1}<<30)) return true;
     if (shortcuts::Modifier(key)) return true;
+#ifdef LLCV_RIFE_OPTIONAL
+    if (index==static_cast<size_t>(shortcuts::Action::HudCorrection) && key==VK_BACK && !modifiers) {
+        state->shortcutBindings[index]=0;
+        state->shortcutKeyToRelease=key;
+        CancelShortcutEdit(state);
+        return true;
+    }
+#endif
     const unsigned binding=key|modifiers;
     if (!shortcuts::Valid(binding)) {
         SetSettingsText(state->guideVideoHint,state->english
             ? L"Reserved or unsupported key. Try another."
-            : L"예약되었거나 지원하지 않는 키예요.\n다른 키를 입력하세요.");
+            : L"예약되었거나 지원하지 않는 키입니다.\n다른 키를 입력하면 변경됩니다.");
         return true;
     }
     for (size_t i=0;i<shortcuts::Count;++i) if (i!=index && state->shortcutBindings[i]==binding) {
-        SetSettingsText(state->guideVideoHint,state->english
-            ? L"Already assigned. Try another key."
-            : L"이미 사용 중인 키예요. 다른 키를 입력하세요.");
+        const auto& other=viewer_help::kShortcuts[i];
+        const std::wstring reason=state->english
+            ? std::wstring(L"Already assigned: ")+other.english+L"\nPress a different key."
+            : std::wstring(L"이미 사용 중인 키: ")+other.korean+L"\n다른 키를 입력하면 변경됩니다.";
+        SetSettingsText(state->guideVideoHint,reason.c_str());
         return true;
     }
     state->shortcutBindings[index]=binding;
@@ -153,6 +199,9 @@ static constexpr int kSettingsTabbedClientHeightDip = 650;
 
 static constexpr SettingsTab kNavigationTabs[] = {
     SettingsTab::VideoWindow, SettingsTab::Audio,
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+    SettingsTab::Interpolation,
+#endif
 #ifdef LLCV_RECORDING
     SettingsTab::Recording,
 #endif
@@ -175,6 +224,18 @@ void RefreshSettingsPageHeader(SettingsControls* state) {
     const wchar_t* title = L"";
     const wchar_t* subtitle = L"";
     switch (state->activeTab) {
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+    case SettingsTab::Interpolation:
+        title = state->english ? L"Frame interpolation" : L"프레임 보간";
+        subtitle = state->english ? L"Private RIFE comparison · Session-only settings." : L"RIFE 비교판 · 설정은 이번 실행에만 적용됩니다.";
+#ifdef LLCV_RIFE_OPTIONAL
+        subtitle=state->english?L"Enable components for this session, then toggle interpolation with F7.":L"이번 실행에서 구성품을 사용하려면 체크하세요. 이후 F7로 보간을 전환합니다.";
+#endif
+#ifdef LLCV_FLYHIGH_TEST
+        subtitle=state->english?L"FlyHighFG / RIFE comparison · Session-only settings.":L"FlyHighFG / RIFE 비교판 · 설정은 이번 실행에만 적용됩니다.";
+#endif
+        break;
+#endif
 #ifdef LLCV_RECORDING
     case SettingsTab::Recording:
         title = state->english ? L"Recording" : L"녹화";
@@ -321,7 +382,10 @@ void ApplySettingsFont(SettingsControls* state, HWND hwnd,
     // Smaller explanatory copy recedes without making interactive options
     // harder to read. Labels, fields, navigation and buttons remain 10 pt.
     for (HWND control : {state->pageSubtitle, state->versionWatermark,
-                         state->audioStatus, state->surround51Hint,
+                         state->audioStatus,
+#ifndef LLCV_DOLBY_CAPTURE
+                         state->surround51Hint,
+#endif
                          state->captureAudioStatus, state->videoCapabilityStatus, state->unlistedFpsStatus,
                          state->vsrStatus, state->screenshotHelp, state->frameOptionsHint,
                          state->relativeSizeWarning, state->fullscreenCursorHint,
@@ -473,8 +537,15 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     place(state->volumeBoostHelp, 600 + boostWidth + 12, 208, 24, 24);
     place(state->muteBackgroundCheck, 600, 244, 376, 32);
     place(state->audioOnlyCheck, 600, 284, 376, 32);
+#ifdef LLCV_DOLBY_CAPTURE
+    place(state->surround51Hint,600,336,340,20);
+    place(state->surroundHelp,952,334,24,24);
+    place(state->surround51Check,600,364,376,160);
+    SendMessageW(state->surround51Check,CB_SETMINVISIBLE,3,0);
+#else
     place(state->surround51Check, 600, 336, 376, 32);
     place(state->surround51Hint, 600, 376, 376, 88);
+#endif
     place(state->audioStabilitySection, 184, 488, 792, 20);
     place(state->driftLabel, 184, 516, 340, 20);
     place(state->driftHelp, 536, 514, 24, 24);
@@ -547,11 +618,74 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     place(state->cmaaQualityCombo, 600, 484, 180, 140);
     place(state->nisSharpnessLabel, 796, 456, 180, 20);
     place(state->nisSharpnessCombo, 796, 484, 180, 230);
+#ifdef LLCV_RIFE_TEST
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+    place(state->rifeHalfCheck,184,120,376,32);
+#if defined(LLCV_INTERPOLATION_RELEASE)
+    // Reserve a separate rectangle so a native label repaint cannot cover ?.
+    place(state->rifeScaleLabel,184,176,340,20);
+#else
+    place(state->rifeScaleLabel,184,176,376,20);
+#endif
+    place(state->rifeScaleCombo,184,204,376,160);
+#if defined(LLCV_INTERPOLATION_RELEASE)
+    place(state->interpolationQualityHelp,536,174,24,24);
+#elif defined(LLCV_FLYHIGH_TEST) || defined(LLCV_RIFE_OPTIONAL)
+    place(state->interpolationProviderLabel,184,176,376,20);
+    place(state->interpolationProviderCombo,184,204,376,160);
+#ifdef LLCV_RIFE_OPTIONAL
+    place(state->rifeScaleLabel,600,176,340,20);
+    place(state->interpolationQualityHelp,952,174,24,24);
+#else
+    place(state->rifeScaleLabel,600,176,376,20);
+#endif
+    place(state->rifeScaleCombo,600,204,376,160);
+#endif
+#ifdef LLCV_INTERPOLATION_RELEASE
+    place(state->vfgDownloadButton,600,120,280,32);
+    place(state->rifeQualityCheck,184,256,640,32);
+    place(state->rifeAutoUiHints[0],184,304,792,28);
+    place(state->rifeAutoUiHints[2],184,352,792,90);
+#else
+    place(state->rifeQualityCheck,184,256,640,32);
+    place(state->rifeAutoUiLabel,184,320,376,20);
+    place(state->rifeAutoUiCombo,184,348,376,160);
+#ifdef LLCV_RIFE_OPTIONAL
+    place(state->rifeAutoUiHints[0],184,396,792,24);
+    place(state->rifeAutoUiHints[1],184,424,792,24);
+    place(state->rifeAutoUiHints[2],184,460,792,90);
+#else
+    for(size_t i=0;i<state->rifeAutoUiHints.size();++i)place(state->rifeAutoUiHints[i],184,396+int(i)*32,740,28);
+#endif
+#endif
+#else
+    place(state->rifeHalfCheck,600,526,148,24);
+    place(state->rifeScaleLabel,756,528,64,20);
+    place(state->rifeScaleCombo,828,524,148,160);
+    SendMessageW(state->rifeScaleCombo,CB_SETDROPPEDWIDTH,SettingsPixels(180,dpi),0);
+    place(state->rifeQualityCheck,600,556,376,18);
+#endif
+#endif
     LayoutVideoHeadingControls(state,dpi);
 
     // Window behavior has its own page, avoiding a packed video/options wall.
     LayoutWindowBehaviorControls(state);
 
+#ifdef LLCV_RIFE_OPTIONAL
+    place(state->guideShortcutsTitle,204,116,166,22);
+    place(state->shortcutListToggle,state->showAllShortcuts?204:374,110,166,28);
+    place(state->shortcutResetButton,432,110,108,26);
+    const auto shortcutLayout=MeasureShortcutLayout(state,dpi,350);
+    place(state->guideVideoHint,204,142,350,shortcutLayout.hintHeight);
+    int shortcutY=142+shortcutLayout.hintHeight+6;
+    for (const auto i : viewer_help::kDisplayOrder) {
+        if (!state->ShowShortcut(i)) continue;
+        const int height=std::max(state->showAllShortcuts?27:36,shortcutLayout.descriptionHeights[i]);
+        place(state->guideKeys[i],204,shortcutY+(height-26)/2,shortcutLayout.keyWidth,26);
+        place(state->guideDescriptions[i],216+shortcutLayout.keyWidth,shortcutY,338-shortcutLayout.keyWidth,height);
+        shortcutY+=height+3;
+    }
+#else
     place(state->guideShortcutsTitle, 204, 120, 216, 20);
     place(state->shortcutResetButton, 432, 118, 108, 24);
     const auto shortcutLayout=MeasureShortcutLayout(state,dpi);
@@ -559,7 +693,7 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     constexpr int shortcutKeyHeight=29;
     constexpr int shortcutTop=156;
     int shortcutY=shortcutTop;
-    for (size_t i = 0; i < state->guideKeys.size(); ++i) {
+    for (const auto i : viewer_help::kDisplayOrder) {
         const int height=std::max(shortcutStep-1,shortcutLayout.descriptionHeights[i]);
         place(state->guideKeys[i], 204, shortcutY, shortcutLayout.keyWidth, shortcutKeyHeight);
         place(state->guideDescriptions[i], 216+shortcutLayout.keyWidth, shortcutY-3, 324-shortcutLayout.keyWidth, height);
@@ -570,12 +704,13 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     const int normalHintY=shortcutTop+static_cast<int>(state->guideKeys.size()-1)*shortcutStep+shortcutKeyHeight+16;
     const int hintY=std::max(normalHintY,shortcutY-shortcutStep+shortcutKeyHeight+8);
     place(state->guideVideoHint, 204, hintY, 336, shortcutLayout.hintHeight);
+#endif
     place(state->guideDiagnosticsTitle, 600, 120, 376, 20);
     place(state->guideDiagnosticsText, 600, 148, 376, 32);
     place(state->saveLogCheck, 600, 196, 376, 32);
-    place(state->showConsoleCheck, 600, 236, 376, 32);
-    place(state->guideLogFolderButton, 600, 284, 185, 32);
-    place(state->guideReportButton, 801, 284, 175, 32);
+    place(state->guideReportButton, 600, 240, 185, 32);
+    place(state->guideLogFolderButton, 801, 240, 175, 32);
+    place(state->showConsoleCheck, 600, 300, 376, 32);
     place(state->guideLsButton, 600, 348, 376, 32);
 
     // App-wide preferences no longer dominate every page.
@@ -600,11 +735,20 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     place(state->screenshotFolderButton, 794, 360, 182, 30);
     place(state->screenshotHelp, 600, 408, 376, 18);
     for (HWND combo : {state->audioCombo, state->audioOutputCombo,
+#ifdef LLCV_DOLBY_CAPTURE
+                        state->surround51Check,
+#endif
                         state->bufferCombo, state->volumeHudCombo,
                         state->driftCombo, state->pcmQueueCombo,
                         state->captureDeviceCombo, state->captureAudioDeviceCombo,
                         state->videoCombo, state->displayResolutionCombo, state->frameRateCombo,
                         state->upscalerCombo, state->cmaaQualityCombo, state->nisSharpnessCombo,
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+                        state->rifeScaleCombo, state->rifeAutoUiCombo,
+#if defined(LLCV_FLYHIGH_TEST) || defined(LLCV_RIFE_OPTIONAL)
+                        state->interpolationProviderCombo,
+#endif
+#endif
                         state->pixelFormatCombo, state->presentationCombo,
                         state->displayMonitorCombo, state->scalingCombo,
                         state->hdrChromaCombo, state->sdrRangeCombo, state->mjpegColorCombo,
@@ -636,6 +780,26 @@ static bool HasSplitResolution(const SettingsControls& state) {
     return capture >= 0 && display >= 0 && capture != display;
 }
 
+#ifdef LLCV_RIFE_OPTIONAL
+void UpdateInterpolationAvailability(SettingsControls* state) {
+    const bool page=state->activeTab==SettingsTab::Interpolation;
+    const bool enabled=state->InterpolationGpuAvailable()&&llcv::rife_test::componentsEnabled.load();
+#ifdef LLCV_INTERPOLATION_RELEASE
+    const bool hud=false;
+#else
+    const bool hud=enabled&&!llcv::rife_test::IsVfg(llcv::rife_test::selectedScale.load());
+#endif
+    for(HWND child:{state->interpolationProviderLabel,state->interpolationProviderCombo,
+                    state->rifeScaleLabel,state->rifeScaleCombo,state->rifeQualityCheck})
+        SetSettingsControlVisible(child,page,enabled);
+    for(HWND child:{state->rifeAutoUiLabel,state->rifeAutoUiCombo})
+#ifdef LLCV_INTERPOLATION_RELEASE
+        SetSettingsControlVisible(child,page&&hud,hud);
+#else
+        SetSettingsControlVisible(child,page,hud);
+#endif
+}
+#endif
 void UpdateScalingControlVisibility(SettingsControls* state) {
     if (!state) return;
     const bool pixelPerfect = state->pixelCheck &&
@@ -690,6 +854,10 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     const bool frameOptions = video && (flyout || SettingsCompactLayout(state));
     const bool guide = state->activeTab == SettingsTab::GuideDiagnostics;
     const bool updates = state->activeTab == SettingsTab::Updates;
+#if defined(LLCV_RIFE_OPTIONAL) && !defined(LLCV_INTERPOLATION_RELEASE)
+    SetSettingsText(state->rifeAutoUiHints[1],llcv::rife_test::IsVfg(llcv::rife_test::selectedScale.load())
+        ? (state->english ? L"HUD correction is only available with RIFE." : L"HUD 보정은 RIFE에서만 사용합니다.") : L"");
+#endif
     LayoutCompactSettingsControls(state, state->layoutDpi);
     LayoutVideoStatus(state,state->layoutDpi);
     RefreshSettingsPageHeader(state);
@@ -732,6 +900,9 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     SetSettingsControlVisible(state->exclusiveTestButton,
                               audio && exclusive, availability.exclusiveProbe);
     const bool shared = SendMessageW(state->audioCombo, CB_GETCURSEL, 0, 0) == 0;
+#ifdef LLCV_DOLBY_CAPTURE
+    SetSettingsControlVisible(state->surroundHelp,audio);
+#endif
     SetSettingsControlVisible(state->surround51Check, audio, shared);
     SetSettingsControlVisible(state->surround51Hint, audio, shared);
     for (HWND control : {state->videoCaptureSection,
@@ -788,12 +959,21 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     SetSettingsControlVisible(state->mjpegColorLabel, video && !flyout && mjpegSelected);
     SetSettingsControlVisible(state->mjpegColorCombo, video && !flyout && mjpegSelected);
     SetSettingsControlVisible(state->mjpegColorHelp, video && !flyout && mjpegSelected);
-    SetSettingsControlVisible(state->guideShortcutsTitle, guide);
-    SetSettingsControlVisible(state->shortcutResetButton, guide);
+    const bool editingShortcuts=!state->shortcutListToggle || state->showAllShortcuts;
+    if (state->shortcutListToggle) {
+        SetSettingsText(state->shortcutListToggle,state->showAllShortcuts
+            ? (state->english?L"Back to quick guide":L"간단히 보기")
+            : (state->english?L"Edit all shortcuts":L"전체 단축키 편집"));
+        SetSettingsControlVisible(state->shortcutListToggle,guide);
+    }
+    SetSettingsControlVisible(state->guideShortcutsTitle,guide && !state->showAllShortcuts);
+    SetSettingsControlVisible(state->shortcutResetButton,guide && editingShortcuts);
     SetSettingsControlVisible(state->guideVideoHint, guide);
-    for (HWND key : state->guideKeys)
-        SetSettingsControlVisible(key, guide);
-    for (HWND description : state->guideDescriptions) SetSettingsControlVisible(description, guide);
+    for (size_t i=0;i<state->guideKeys.size();++i) {
+        const bool visible=guide && state->ShowShortcut(i);
+        SetSettingsControlVisible(state->guideKeys[i],visible);
+        SetSettingsControlVisible(state->guideDescriptions[i],visible);
+    }
     SetSettingsControlVisible(state->guideDiagnosticsTitle, guide);
     SetSettingsControlVisible(state->guideDiagnosticsText, guide);
     SetSettingsControlVisible(state->guideLogFolderButton, guide);
@@ -822,6 +1002,123 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     LayoutVideoHeadingControls(state,state->layoutDpi);
     SetSettingsControlVisible(state->upscalerLabel, video);
     SetSettingsControlVisible(state->upscalerCombo, video);
+#ifdef LLCV_RIFE_TEST
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+    const bool rifePage=state->activeTab==SettingsTab::Interpolation;
+    SetSettingsControlVisible(state->rifeAutoUiLabel,rifePage);
+    SetSettingsControlVisible(state->rifeAutoUiCombo,rifePage);
+    for(auto hint:state->rifeAutoUiHints)SetSettingsControlVisible(hint,rifePage);
+    SetSettingsText(state->rifeAutoUiLabel,state->english?L"Automatic HUD protection (F4)":L"자동 HUD 보호 (F4)");
+    SendMessageW(state->rifeAutoUiCombo,CB_SETCURSEL,llcv::rife_test::SelectedHudWidth()==16?1:llcv::rife_test::SelectedHudWidth()==32?2:0,0);
+#ifndef LLCV_RIFE_OPTIONAL
+#ifdef LLCV_RIFE_TRAJECTORY
+    SetSettingsText(state->rifeAutoUiHints[0],state->english?L"Tracks background motion around stationary HUD edges.":L"고정된 HUD 주변에서 배경의 이동 경로를 추적합니다.");
+    SetSettingsText(state->rifeAutoUiHints[1],state->english?L"Falls back to ordinary RIFE when uncertain.":L"추적이 불확실하면 기본 RIFE를 유지합니다.");
+#ifdef LLCV_RIFE_UHD_PROBE
+    SetSettingsText(state->rifeAutoUiHints[2],state->english?L"F4: HUD protection · F7: interpolation · 4K SDR":L"F4: HUD 보정 · F7: 보간 · 4K SDR");
+#else
+    SetSettingsText(state->rifeAutoUiHints[2],state->english?L"F4: trajectory · F8: Fast / Half / High · FHD SDR":L"F4: 이동 추적 · F8: Fast / Half / High · FHD SDR");
+#endif
+#else
+    SetSettingsText(state->rifeAutoUiHints[0],state->english
+        ?L"Learns stationary edges while the background moves (about 1 second)."
+        :L"배경이 움직일 때 약 1초 동안 고정된 윤곽을 찾습니다.");
+    SetSettingsText(state->rifeAutoUiHints[1],state->english
+        ?L"16 px: narrow transition. 32 px: stronger protection, more background ghosting."
+        :L"16px: 좁은 전환 · 32px: 강한 보호, 배경 이중상이 늘 수 있음");
+    SetSettingsText(state->rifeAutoUiHints[2],state->english
+        ?L"Uncertain detection keeps ordinary RIFE. SDR NV12, FHD/QHD only."
+        :L"감지가 불확실하면 기존 RIFE를 유지합니다. SDR NV12 · FHD/QHD 전용");
+#endif
+#endif
+#else
+    const bool rifePage=video;
+#endif
+    SetSettingsControlVisible(state->rifeHalfCheck,rifePage);
+    SetSettingsControlVisible(state->rifeScaleLabel,rifePage);
+    SetSettingsControlVisible(state->rifeScaleCombo,rifePage);
+    SetSettingsControlVisible(state->rifeQualityCheck,rifePage);
+    SendMessageW(state->rifeHalfCheck,BM_SETCHECK,llcv::rife_test::requested.load()?BST_CHECKED:BST_UNCHECKED,0);
+    SendMessageW(state->rifeScaleCombo,CB_SETCURSEL,llcv::rife_test::ScaleIndex(llcv::rife_test::selectedScale.load()),0);
+    SetSettingsText(state->rifeHalfCheck,state->english?L"RIFE (F7)":L"RIFE 보간 (F7)");
+    SetSettingsText(state->rifeScaleLabel,state->english?L"Scale":L"추정 크기");
+    SendMessageW(state->rifeQualityCheck,BM_SETCHECK,llcv::rife_test::qualityComparison.load()?BST_CHECKED:BST_UNCHECKED,0);
+    SetSettingsText(state->rifeQualityCheck,state->english?L"Quality compare (wait; more latency; F10)":L"화질 비교 (완료 대기·지연 증가·F10)");
+#ifdef LLCV_RIFE_OPTIONAL
+    const bool allow=state->InterpolationGpuAvailable()&&llcv::rife_test::componentsEnabled.load();
+#ifdef LLCV_INTERPOLATION_RELEASE
+    constexpr bool vfg=true;
+    SetSettingsControlVisible(state->rifeHalfCheck,rifePage,state->InterpolationGpuAvailable());
+    SetSettingsText(state->rifeHalfCheck,state->english?L"Enable NVIDIA VFG":L"NVIDIA VFG 사용");
+    RefreshVfgDownloadControl(state);
+    SetSettingsControlVisible(state->rifeAutoUiHints[1],false);
+#else
+    const bool vfg=llcv::rife_test::IsVfg(llcv::rife_test::selectedScale.load());
+    SetSettingsControlVisible(state->rifeHalfCheck,rifePage,!state->vsrGpuUnavailable);
+    SetSettingsText(state->rifeHalfCheck,state->english?L"Enable NVIDIA frame interpolation":L"NVIDIA 프레임 보간 사용");
+    SetSettingsControlVisible(state->interpolationProviderLabel,rifePage,allow);
+    SetSettingsControlVisible(state->interpolationProviderCombo,rifePage,allow);
+    SetSettingsText(state->interpolationProviderLabel,state->english?L"Interpolation method":L"보간 방식");
+    SendMessageW(state->interpolationProviderCombo,CB_SETCURSEL,vfg?1:0,0);
+#endif
+    SetSettingsText(state->rifeScaleLabel,state->english?L"Quality":L"품질");
+    SetSettingsControlVisible(state->interpolationQualityHelp,rifePage);
+    const auto first=llcv::rife_test::PresetLabel(vfg?llcv::rife_test::Scale::VfgLow:llcv::rife_test::Scale::Fast,state->english);
+    if(SendMessageW(state->rifeScaleCombo,CB_GETCOUNT,0,0)!=(vfg?2:3)||SendMessageW(state->rifeScaleCombo,CB_FINDSTRINGEXACT,-1,reinterpret_cast<LPARAM>(wcschr(first,L'·')+2))==CB_ERR){
+        SendMessageW(state->rifeScaleCombo,CB_RESETCONTENT,0,0);
+        for(auto preset:llcv::rife_test::Scales)if(llcv::rife_test::IsVfg(preset)==vfg){
+            auto label=llcv::rife_test::PresetLabel(preset,state->english);auto separator=wcschr(label,L'·');
+            auto index=SendMessageW(state->rifeScaleCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(separator?separator+2:label));
+            SendMessageW(state->rifeScaleCombo,CB_SETITEMDATA,index,static_cast<LPARAM>(preset));
+        }
+    }
+    const auto scale=llcv::rife_test::selectedScale.load();
+    const size_t qualityIndex=vfg&&!llcv::rife_test::IsVfg(scale)
+        ? size_t{1} : llcv::rife_test::ScaleIndex(scale)-(vfg?size_t{3}:size_t{0});
+    SendMessageW(state->rifeScaleCombo,CB_SETCURSEL,qualityIndex,0);
+    SetSettingsText(state->rifeQualityCheck,state->english?L"Wait for generated frames (increases latency)":L"생성 프레임 완료 대기 (지연 증가)");
+    SetSettingsText(state->rifeAutoUiLabel,state->shortcutBindings[static_cast<size_t>(shortcuts::Action::HudCorrection)]
+        ? shortcuts::Expand(state->english?L"HUD correction (F4)":L"HUD 보정 (F4)",state->shortcutBindings).c_str()
+        : (state->english?L"HUD correction":L"HUD 보정"));
+    const wchar_t* inputHint=
+#ifdef LLCV_INTERPOLATION_RELEASE
+        !state->InterpolationGpuAvailable()?(state->english?L"VFG is not available on this GPU.":L"이 GPU에서는 VFG를 사용할 수 없습니다."):
+#ifdef LLCV_VFG_AMPERE_COMPAT
+        state->vfgRtx30?(state->english?L"RTX 30: experimental compatibility · F7: toggle VFG":L"RTX 30: 실험적 호환 · F7: VFG 켜기/끄기"):
+#endif
+#else
+        state->vsrGpuUnavailable?(state->english?L"An NVIDIA playback GPU is required.":L"재생에 사용하는 GPU가 NVIDIA여야 합니다."):
+#endif
+        vfg?(state->english?L"F7: toggle interpolation · FHD / QHD / 4K UHD SDR":L"F7: 보간 켜기/끄기 · FHD / QHD / 4K UHD SDR"):
+            (state->english?L"F7: toggle interpolation · FHD SDR":L"F7: 보간 켜기/끄기 · FHD SDR");
+    SetSettingsText(state->rifeAutoUiHints[0],shortcuts::Expand(inputHint,state->shortcutBindings).c_str());
+    SendMessageW(state->rifeHalfCheck,BM_SETCHECK,allow?BST_CHECKED:BST_UNCHECKED,0);
+    UpdateInterpolationAvailability(state);
+#endif
+#ifdef LLCV_FLYHIGH_TEST
+    const bool fly=llcv::rife_test::IsFlyHigh();
+    SetSettingsControlVisible(state->interpolationProviderLabel,rifePage);
+    SetSettingsControlVisible(state->interpolationProviderCombo,rifePage);
+    SetSettingsText(state->interpolationProviderLabel,state->english?L"Method (F8)":L"보간 방식 (F8)");
+    SendMessageW(state->interpolationProviderCombo,CB_SETCURSEL,fly?1:0,0);
+    SetSettingsText(state->rifeHalfCheck,state->english?L"Frame interpolation (F7)":L"프레임 보간 (F7)");
+    SetSettingsText(state->rifeScaleLabel,state->english?L"RIFE estimation size":L"RIFE 추정 크기");
+    SetSettingsControlVisible(state->rifeScaleCombo,rifePage,!fly);
+    SetSettingsControlVisible(state->rifeScaleLabel,rifePage,!fly);
+    const int choices=fly?2:3;
+    if(SendMessageW(state->rifeAutoUiCombo,CB_GETCOUNT,0,0)!=choices){
+        SendMessageW(state->rifeAutoUiCombo,CB_RESETCONTENT,0,0);
+        for(const wchar_t* choice:{state->english?L"Off":L"끄기",fly?(state->english?L"On (FlyHigh native)":L"켜기 (FlyHigh 기본)"):L"16 px"})SendMessageW(state->rifeAutoUiCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(choice));
+        if(!fly)SendMessageW(state->rifeAutoUiCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"32 px"));
+    }
+    SendMessageW(state->rifeAutoUiCombo,CB_SETCURSEL,fly?(llcv::rife_test::flyHighHud.load()?1:0):llcv::rife_test::SelectedHudWidth()==16?1:llcv::rife_test::SelectedHudWidth()==32?2:0,0);
+    if(fly){
+        SetSettingsText(state->rifeAutoUiHints[0],state->english?L"FlyHigh native size · Original-resolution synthesis · No video lookahead.":L"FlyHigh 기본 추정 크기 · 원본 해상도 합성 · 영상용 선행 대기 없음");
+        SetSettingsText(state->rifeAutoUiHints[1],state->english?L"Native HUD protection looks for unchanged pixels; translucent HUD may still distort.":L"기본 HUD 보호는 변하지 않는 픽셀을 찾습니다. 반투명 HUD는 왜곡될 수 있습니다.");
+        SetSettingsText(state->rifeAutoUiHints[2],state->english?L"F7: ON/OFF · F8: RIFE/FlyHigh · SDR NV12 FHD/QHD · Non-commercial test.":L"F7: 켜기/끄기 · F8: RIFE/FlyHigh · SDR NV12 FHD/QHD · 비상업 테스트");
+    }
+#endif
+#endif
     SetSettingsControlVisible(state->cmaaQualityLabel, video && cmaaNis);
     SetSettingsControlVisible(state->cmaaQualityCombo, video && cmaaNis, !p010Selected);
     SetSettingsControlVisible(state->nisSharpnessLabel, video && cmaaNis);
@@ -960,173 +1257,67 @@ bool IsSettingsHelpControl(const SettingsControls* state,
 }
 
 const wchar_t* SettingsHelpText(SettingsHelpTopic topic, bool english) {
-    if (topic == SettingsHelpTopic::Capture40) {
-        // Frame generation is only an external-app example, not an integration.
-        return english
-            ? L"40 fps capture\n"
-              L"• Leave off for normal viewing.\n"
-              L"• Enable to request 40 fps; disable to restore your setting.\n"
-              L"• Support is checked on Start. No fallback to another FPS.\n"
-              L"\n"
-              L"Keep in mind\n"
-              L"• Does not lock game FPS or replace VRR.\n"
-              L"\n"
-              L"Example: Lossless Scaling (LS)\n"
-              L"Console 120 Hz → LLCV 40 fps → LS 3x → Monitor 120 Hz\n"
-              L"• Assumes steady 40 fps. At 30–40 fps, stutter may persist or become more noticeable with LS.\n"
-              L"• LS is separate; configure it and refresh rate yourself.\n"
-              L"• May add latency or artifacts. If worse, disable and compare."
-            : L"40fps 캡처\n"
-              L"• 일반적인 시청에는 끈 채 사용하세요.\n"
-              L"• 체크하면 40fps 요청, 해제하면 기존 설정으로 돌아갑니다.\n"
-              L"• 지원은 시작할 때 확인하며, 다른 FPS로 대체하지 않습니다.\n"
-              L"\n"
-              L"주의사항\n"
-              L"• 게임 FPS 고정·VRR 대체 기능이 아닙니다.\n"
-              L"\n"
-              L"활용 예시: Lossless Scaling (LS)\n"
-              L"콘솔 120Hz → LLCV 40fps → LS 3배 → 모니터 120Hz\n"
-              L"• 40fps 유지 시 예시입니다. 30~40fps로 흔들리면 LS를 써도 끊김이 남거나 더 두드러질 수 있습니다.\n"
-              L"• LS는 별도 앱입니다. 주사율·LS는 직접 설정하세요.\n"
-              L"• 지연·화면 왜곡이 생길 수 있습니다. 더 끊기면 끄고 비교하세요.";
-    }
-    if (english) {
-        switch (topic) {
-        case SettingsHelpTopic::Drift:
-            return L"Preventing audio tearing · deciding whether correction is needed\n\n"
-                    L"The capture and output device clocks can run at slightly different rates. "
-                    L"Auto mode watches the application PCM queue first and enables resampling only "
-                    L"when a sustained imbalance is detected. It stays enabled for the rest of the "
-                    L"session once triggered, avoiding repeated on/off clicks. Check the Tab OSD for "
-                    L"10–30 minutes.\n\n"
-                   L"'Stable · correction unnecessary' or 'Rare errors · Off can be kept' means "
-                   L"you can leave it Off when the audio is clean. If 'Repeated imbalance · "
-                    L"correction recommended' continues, choose Auto. Do not judge "
-                   L"from errors immediately after startup.\n\n"
-                   L"The resampler and PCM safety buffer are independent. 'Resampler correction "
-                   L"limit approaching' indicates clock difference; 'Possible PCM buffer shortage' "
-                   L"indicates a momentary lack of queued audio; 'Capture packet delay detected' "
-                   L"indicates a late input callback. If the resampler is healthy but underruns "
-                   L"continue, raise the PCM buffer target first.\n\n"
-                   L"The imbalance ppm shown in the OSD is an estimate from accumulated underrun/"
-                    L"overrun frames, not a direct hardware-clock measurement. When Auto activates, "
-                    L"the resampler adds a small amount of audio buffering and changes PCM samples. "
-                    L"Off always preserves the original PCM path; On always uses the resampler.";
-        case SettingsHelpTopic::PcmQueue:
-            return L"PCM buffer target\n\n"
-                   L"The amount of captured audio kept inside the application before playback.\n"
-                   L"10 ms is minimum latency, 15 ms is the low-latency target, 20 ms is a stability "
-                   L"target, 25 ms is the recommended default, and 30 ms prioritizes stability.\n\n"
-                   L"Higher values absorb more scheduling jitter but add the same amount of audio "
-                   L"latency. This is independent of the WASAPI output buffer and clock-drift correction.";
-        case SettingsHelpTopic::Presentation:
-            return llcv::presentation_ui::HelpText(true);
-        case SettingsHelpTopic::VolumeBoost:
-            return L"Volume boost above 100%\n\n"
-                   L"Allows the mouse wheel to raise the app volume up to 200%. "
-                   L"100% is the original PCM level; values above it apply digital gain only inside this app.\n\n"
-                   L"No audio buffer or frame queue is added, so this option does not add audio latency. "
-                   L"At high source volumes, boosting can clip peaks and cause distortion. Keep it off unless "
-                   L"the capture audio is genuinely too quiet.";
-        case SettingsHelpTopic::ForceHdr10:
-            return L"Force HDR10 output\n\n"
-                   L"P010 without transfer/gamut metadata already defaults to BT.2020/PQ HDR10; "
-                   L"you do not need to enable this option for missing metadata alone. Explicit SDR metadata "
-                   L"is rejected when this option is off: P010 is HDR-only. Select NV12/YUY2 for SDR.\n\n"
-                   L"Use this override only for confirmed PQ/BT.2020 input with incorrect or incomplete color "
-                   L"metadata. Range and chroma validation still apply. It does not convert SDR into HDR. "
-                   L"For an SDR source without color metadata, select NV12/YUY2 instead. Enable Windows HDR "
-                   L"on the viewing monitor. No frame queue is added.";
-        case SettingsHelpTopic::HdrChroma:
-            return L"HDR chroma placement\n\n"
-                   L"Auto follows the device metadata and rejects unsupported placements. Use Top-left or Left "
-                   L"only for a P010 HDR device with missing or incorrect chroma metadata. Compare fine colored "
-                   L"edges and text against a reference.\n\n"
-                   L"This overrides the declared chroma placement; it does not repair genuinely staggered Cb/Cr "
-                   L"planes or guarantee that placement 6 is supported. It does not change brightness, saturation, "
-                   L"PQ interpretation or range validation, and adds no frame queue or processing pass. "
-                   L"P010 without transfer/gamut metadata already defaults to PQ/BT.2020.";
-        case SettingsHelpTopic::MjpegColor:
-            return L"MJPEG color matrix\n\n"
-                   L"Auto uses decoder metadata first, then DirectShow metadata. Without matrix metadata, "
-                   L"it uses BT.709 for HD or BT.601 for SD.\n\n"
-                   L"Change this only if MJPEG colors are incorrect. Black and white levels are controlled "
-                   L"separately by SDR color range. Playback, screenshots and recordings use the same interpretation.";
-        case SettingsHelpTopic::SdrRange:
-            return L"SDR color range\n\n"
-                   L"Auto keeps the existing behavior: follow color metadata, or use Limited for NV12/YUY2 "
-                   L"and Full for MJPEG, RGB24 and XRGB (RGB32) when range metadata is missing. "
-                   L"RGB requires SDR BT.709/sRGB or unspecified metadata; PQ, HLG and BT.2020 are unsupported. RGB supports screenshots, NVIDIA VSR requests, and SDR recording (worker conversion to BT.709 Limited NV12). Driver acceptance does not confirm VSR activation.\n\n"
-                   L"Select Limited or Full only to correct misreported input levels. This changes input "
-                   L"interpretation, not the HDMI output of your console. Playback, screenshots and recordings "
-                   L"use the same range. P010/HDR is unaffected. No frame queue or processing pass is added.\n\n"
-                   L"An older MJPEG-only correction is retained until you change this selection; then the "
-                   L"selected range is shared by all SDR formats.";
-        }
-    }
     switch (topic) {
+    case SettingsHelpTopic::Capture40:
+        return english
+            ? L"Leave this off for normal playback. Turn it on to request 40 fps instead of your selected frame rate. If the device does not support 40 fps, capture will not start.\n\n"
+              L"This does not lock the game's frame rate or replace VRR. For a game running at a steady 40 fps, one option is 120 Hz console output → 40 fps capture → 3× in Lossless Scaling → 120 Hz display. If the game varies between 30 and 40 fps, interpolation can make stutter more noticeable and add latency."
+            : L"이 옵션을 켜면 선택한 프레임 속도 대신 40fps로 캡처합니다.\n"
+              L"장치가 40fps를 지원하지 않으면 재생을 시작할 수 없습니다. 게임의 프레임 속도나 VRR은 바뀌지 않습니다.\n\n"
+              L"게임이 40fps를 유지할 때의 설정 예시는 다음과 같습니다.\n"
+              L"콘솔 120Hz → LLCV 캡처 40fps → Lossless Scaling 3배 → 모니터 120Hz\n\n"
+              L"게임이 30~40fps 사이를 오가면 보간 후 끊김이 더 눈에 띄거나 지연이 늘 수 있습니다.";
     case SettingsHelpTopic::Drift:
-         return L"소리 찢어짐 방지 · 보정 필요 확인\n\n"
-                L"자동은 프로그램 내부 PCM 대기량을 관찰하다가 클록 불균형이 일정 시간 지속될 때만 "
-                L"리샘플링을 켭니다. 한 번 켜지면 세션 중 반복해서 켰다 끄지 않아 소리 변화와 클릭을 "
-                L"줄입니다. Tab OSD를 10~30분 확인하세요.\n\n"
-               L"'안정 · 보정 불필요' 또는 '드문 오류 · 끔 유지 가능'이면 소리에 문제가 "
-                L"없는 한 끔을 유지해도 됩니다. '반복 불균형 · 보정 권장'이 계속 보이면 자동을 "
-                L"선택하세요. 시작 직후 오류만으로 판단하지 마세요.\n\n"
-               L"리샘플러와 PCM 안전 대기량은 서로 독립입니다. '리샘플러 보정 한계 접근'은 "
-               L"클록 차이, 'PCM 버퍼 부족 가능'은 순간 버퍼 여유 부족, '캡처 패킷 지연 감지'는 "
-               L"입력 콜백 지연을 뜻합니다. 리샘플러가 정상인데 underrun이 나면 PCM 버퍼 "
-               L"목표를 먼저 높이세요.\n\n"
-                L"OSD의 불균형 ppm은 누적 underrun/overrun으로 계산한 참고값이며 실제 하드웨어 "
-                L"클록을 직접 측정한 값은 아닙니다. 자동이 작동하면 작은 오디오 대기량을 추가하고 "
-                L"PCM 샘플을 변경합니다. 끔은 원본 PCM을 유지하고, 켬은 항상 리샘플러를 사용합니다.";
+        return english
+            ? L"If audio plays cleanly with correction off, leave it off. If Tab repeatedly reports a clock imbalance during playback, choose Auto.\n\n"
+              L"Auto adjusts the audio rate only when the capture and playback devices drift apart. Once active, correction stays on until playback ends. If Tab reports a low PCM buffer instead, raise the PCM buffer target."
+            : L"보정을 꺼도 소리가 깨끗하면 설정을 바꿀 필요가 없습니다.\n"
+              L"재생 중 Tab 진단에 ‘반복 불균형’이 계속 표시되면 ‘자동’을 선택합니다.\n\n"
+              L"‘자동’은 캡처 장치와 출력 장치의 속도가 어긋날 때만 보정을 시작합니다.\n"
+              L"한 번 시작한 보정은 재생이 끝날 때까지 유지됩니다.\n\n"
+              L"‘PCM 버퍼 부족’이 표시되면 보정 대신 PCM 버퍼 목표를 높입니다.";
     case SettingsHelpTopic::PcmQueue:
-        return L"PCM 버퍼 목표 안내\n\n"
-               L"캡처 오디오를 재생 전에 확보하는 프로그램 내부 대기량입니다.\n"
-               L"10ms는 최저 지연, 15ms는 저지연 목표, 20ms는 안정 목표, 25ms는 권장 기본값, "
-               L"30ms는 안정성 우선 설정입니다.\n\n"
-               L"값을 높이면 순간적인 입력 지연을 흡수할 여유가 커지지만, 그만큼 오디오 지연이 "
-               L"늘어납니다. WASAPI 출력 버퍼와 클록 드리프트 보정과는 독립적으로 조정됩니다.";
+        return english
+            ? L"Start with 25 ms. If the sound cuts out, raise the target. If it plays cleanly but you want less audio delay, lower it one step at a time.\n\nThis controls how much captured audio the app holds before playback. The WASAPI output buffer is a separate setting."
+            : L"재생 전에 앱에 모아 두는 소리의 양입니다. 기본값은 25ms입니다.\n\n"
+              L"소리가 끊기면 값을 높입니다.\n"
+              L"끊김 없이 재생되고 소리 지연을 더 줄이고 싶다면 한 단계씩 낮춥니다.\n\n"
+              L"WASAPI 출력 버퍼는 이 값과 별도로 설정합니다.";
     case SettingsHelpTopic::Presentation:
-        return llcv::presentation_ui::HelpText(false);
+        return llcv::presentation_ui::HelpText(english);
     case SettingsHelpTopic::VolumeBoost:
-        return L"100% 이상 볼륨 증폭 안내\n\n"
-               L"마우스 휠로 앱 음량을 최대 200%까지 올릴 수 있게 합니다. 100%는 원본 PCM 크기이고, "
-               L"그 이상은 이 앱 안에서만 디지털 증폭을 적용합니다.\n\n"
-               L"추가 오디오 버퍼나 프레임 큐를 만들지 않으므로 오디오 지연은 늘지 않습니다. 다만 원본 "
-               L"소리가 이미 큰 경우에는 피크가 잘려 왜곡될 수 있으니, 실제로 음량이 부족할 때만 켜세요.";
+        return english
+            ? L"Turn this on if the capture audio is still too quiet at 100%. You can then use the mouse wheel to raise the app volume to 200%.\n\nIf loud sounds start to distort, lower the volume. At 100%, the app applies no boost."
+            : L"캡처 소리가 작을 때 마우스 휠로 앱 음량을 최대 200%까지 높일 수 있습니다.\n"
+              L"100%에서는 소리를 증폭하지 않습니다.\n\n"
+              L"큰 소리가 찢어져 들리면 음량을 낮춥니다.";
     case SettingsHelpTopic::ForceHdr10:
-        return L"HDR10 강제 출력 안내\n\n"
-               L"전달 함수·색역 정보가 없는 P010은 기본적으로 BT.2020/PQ HDR10으로 해석하므로, "
-               L"정보가 없다는 이유만으로 이 옵션을 켤 필요는 없습니다. P010은 HDR 전용이므로, 끈 상태에서 SDR로 보고된 입력은 차단합니다. SDR은 NV12/YUY2를 선택하세요.\n\n"
-               L"입력이 실제 PQ/BT.2020인데 색 정보가 잘못되었거나 불완전한 경우에만 강제로 해석하세요. "
-               L"색 범위·색차 배치 검증은 유지되며 SDR을 HDR로 변환하지는 않습니다. "
-               L"색 정보가 없는 SDR 입력은 NV12/YUY2를 선택하세요. 표시 모니터의 Windows HDR을 켜야 합니다. "
-               L"프레임 큐는 추가하지 않습니다.";
+        return english
+            ? L"Turn this on only if the source is HDR10 but the capture device reports the wrong color information. If the information is missing, the app already treats P010 as HDR10. Enable Windows HDR on the playback monitor.\n\nThis does not convert SDR to HDR. For an SDR source, choose NV12/YUY2 instead of P010."
+            : L"실제 입력은 HDR10인데 캡처 장치가 색 정보를 잘못 알릴 때만 사용합니다.\n"
+              L"색 정보가 없으면 P010을 HDR10으로 인식하므로 강제할 필요가 없습니다.\n\n"
+              L"HDR로 재생하려면 재생할 모니터에서 Windows HDR을 켭니다.\n"
+              L"SDR 영상을 HDR로 바꾸는 기능은 아닙니다. SDR 입력에는 P010 대신 NV12/YUY2를 선택합니다.";
     case SettingsHelpTopic::HdrChroma:
-        return L"HDR 색차 배치 안내\n\n"
-               L"자동은 장치 메타데이터를 따르며 지원하지 않는 배치는 차단합니다. P010 HDR 장치의 "
-               L"색차 배치 정보가 없거나 잘못된 경우에만 Top-left 또는 Left를 선택하고, 가는 색 경계와 "
-               L"글자를 기준 화면과 비교하세요.\n\n"
-               L"이 옵션은 배치 정보의 해석을 바꿉니다. 실제 Cb/Cr가 서로 어긋난 데이터를 복원하거나 "
-               L"배치 값 6의 지원을 보장하지 않습니다. 밝기·채도·PQ 해석·색 범위 검증은 바꾸지 않으며 "
-               L"프레임 큐나 처리 단계를 추가하지 않습니다. 전달 함수·색역 정보가 없는 P010은 기본적으로 PQ/BT.2020으로 해석합니다.";
+        return english
+            ? L"Leave this on Auto. If color bleeds to one side of fine text or lines in P010 HDR video, compare Top-left and Left against the source.\n\nThis changes where the app reads color samples. It cannot repair misaligned color channels in the captured image."
+            : L"일반적으로 ‘자동’을 사용합니다.\n"
+              L"P010 HDR 영상에서 글씨나 가는 선 한쪽으로 색이 번지면 ‘Top-left’와 ‘Left’를 원본과 비교합니다.\n\n"
+              L"이 설정은 색을 읽는 위치만 바꿉니다.\n"
+              L"캡처된 영상 자체에서 색이 어긋난 경우에는 복구할 수 없습니다.";
     case SettingsHelpTopic::MjpegColor:
-        return L"MJPEG 색 공간 안내\n\n"
-               L"자동은 디코더 메타데이터를 먼저 사용하고, 없으면 DirectShow 정보를 확인합니다. 색 공간 "
-               L"정보가 없으면 HD는 BT.709, SD는 BT.601을 사용합니다.\n\n"
-               L"MJPEG 색상이 잘못된 경우에만 변경하세요. 검정·흰색 명암 범위는 별도의 SDR 색 범위에서 "
-               L"설정합니다. 재생·스크린샷·녹화에 같은 해석을 적용합니다.";
+        return english
+            ? L"Leave this on Auto unless MJPEG colors look wrong. If the device supplies no color information, Auto uses BT.709 for HD and BT.601 for SD.\n\nIf the colors look right but blacks look gray or shadow detail is lost, check SDR color range instead."
+            : L"MJPEG 영상의 색이 자연스러우면 ‘자동’을 유지합니다.\n"
+              L"색 정보가 없을 때는 HD에 BT.709, SD에 BT.601을 사용합니다.\n\n"
+              L"색상은 맞는데 검정이 회색처럼 보이거나 어두운 부분이 뭉개지면 ‘SDR 색 범위’를 확인합니다.";
     case SettingsHelpTopic::SdrRange:
-        return L"SDR 색 범위 안내\n\n"
-               L"자동은 기존 동작을 유지합니다. 색 범위 메타데이터를 따르고, 정보가 없으면 NV12/YUY2는 "
-               L"Limited, MJPEG·RGB24·XRGB (RGB32)는 Full로 해석합니다. "
-               L"RGB는 SDR BT.709/sRGB 또는 미지정 메타데이터가 필요하며 PQ·HLG·BT.2020은 지원하지 않습니다. RGB 스크린샷·NVIDIA VSR 요청·SDR 녹화를 지원합니다. 녹화는 작업 스레드에서 BT.709 Limited NV12로 변환하며, VSR 요청 수락이 실제 활성화를 보장하지는 않습니다.\n\n"
-               L"입력의 색 범위 정보가 잘못된 경우에만 Limited 또는 Full을 선택하세요. 콘솔의 HDMI "
-               L"출력을 바꾸는 설정은 아닙니다. 재생·스크린샷·녹화에 같은 범위를 적용하며, P010/HDR에는 "
-               L"적용하지 않습니다. 프레임 큐나 처리 단계를 추가하지 않습니다.\n\n"
-               L"구버전의 MJPEG 전용 보정은 이 항목을 변경하기 전까지 유지됩니다. 직접 선택하면 모든 "
-               L"SDR 형식에 공통으로 적용합니다.";
+        return english
+            ? L"Leave this on Auto unless blacks look gray or shadow detail is lost. If that happens, match Limited or Full to the source output.\n\nWithout range information, Auto uses Limited for NV12/YUY2 and Full for MJPEG and RGB. This affects playback, screenshots and recordings, not the console output or P010/HDR."
+            : L"일반적으로 ‘자동’을 사용합니다. 검정이 회색처럼 뜨거나 어두운 부분이 뭉개지면\n"
+              L"입력 기기의 출력 범위에 맞춰 Limited(제한) 또는 Full(전체)을 선택합니다.\n\n"
+              L"범위 정보가 없으면 NV12/YUY2는 Limited, MJPEG와 RGB는 Full로 읽습니다.\n"
+              L"재생·스크린샷·녹화에 적용되며 콘솔 출력이나 P010/HDR에는 영향을 주지 않습니다.";
     }
     return L"";
 }

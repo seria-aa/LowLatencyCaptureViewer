@@ -223,8 +223,48 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
         }
         if (!cmaa && (SendMessageW(s->upscalerCombo,CB_GETCURSEL,0,0)!=0 || s->vsrGpuUnavailable))
             pages.Text(s->vsrStatus,36);
+#if defined(LLCV_RIFE_TEST) && !defined(LLCV_RIFE_AUTO_UI_TEST)
+        pages.Block(62,{{s->rifeHalfCheck,0,0,width,26},{s->rifeScaleLabel,0,34,64,20},
+            {s->rifeScaleCombo,72,30,width-72,30}});
+        pages.Check(s->rifeQualityCheck);
+#endif
         }
         break;
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+    case SettingsTab::Interpolation:
+#if defined(LLCV_FLYHIGH_TEST) || defined(LLCV_RIFE_OPTIONAL)
+        pages.Group(text(L"프레임 보간",L"Frame interpolation"));
+#else
+        pages.Group(text(L"RIFE",L"RIFE"));
+#endif
+#ifdef LLCV_INTERPOLATION_RELEASE
+        if (s->InterpolationGpuAvailable()) pages.Button(s->vfgDownloadButton);
+#endif
+        pages.Check(s->rifeHalfCheck);
+#if (defined(LLCV_FLYHIGH_TEST) || defined(LLCV_RIFE_OPTIONAL)) && !defined(LLCV_INTERPOLATION_RELEASE)
+        pages.Field(s->interpolationProviderLabel,s->interpolationProviderCombo);
+#endif
+#ifdef LLCV_RIFE_OPTIONAL
+        pages.HeadingField(s->rifeScaleLabel,s->rifeScaleCombo,s->interpolationQualityHelp);
+#else
+        pages.Field(s->rifeScaleLabel,s->rifeScaleCombo);
+#endif
+        pages.Check(s->rifeQualityCheck);
+#ifndef LLCV_INTERPOLATION_RELEASE
+        pages.Group(text(L"자동 HUD 보호",L"Automatic HUD protection"));
+        pages.Field(s->rifeAutoUiLabel,s->rifeAutoUiCombo);
+#endif
+#ifdef LLCV_RIFE_OPTIONAL
+        pages.Text(s->rifeAutoUiHints[0],CapabilityTextHeight(s->rifeAutoUiHints[0],width,dpi));
+        if (GetWindowTextLengthW(s->rifeAutoUiHints[1]))
+            pages.Text(s->rifeAutoUiHints[1],CapabilityTextHeight(s->rifeAutoUiHints[1],width,dpi));
+        pages.Group(text(L"Smooth Motion 사용 시",L"If you use Smooth Motion"));
+        pages.Text(s->rifeAutoUiHints[2],CapabilityTextHeight(s->rifeAutoUiHints[2],width,dpi));
+#else
+        for(auto hint:s->rifeAutoUiHints)pages.Text(hint,CapabilityTextHeight(hint,width,dpi));
+#endif
+        break;
+#endif
     case SettingsTab::Audio:
         pages.Group(text(L"출력",L"Output"));
         pages.Field(s->audioLabel,s->audioCombo);
@@ -239,8 +279,12 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
         pages.Check(s->audioOnlyCheck);
         // The continuation name keeps the standalone explanation associated
         // with its option on the shortest supported work areas.
+#ifdef LLCV_DOLBY_CAPTURE
+        pages.HeadingField(s->surround51Hint,s->surround51Check,s->surroundHelp);
+#else
         if (pageHeight < 128) pages.Group(text(L"콘솔 LPCM 5.1",L"Console LPCM 5.1"));
         pages.Block(128, {{s->surround51Check,0,0,width,32},{s->surround51Hint,0,40,width,88}},40);
+#endif
         pages.Group(text(L"동기화 · 안정성",L"Timing & stability"));
         pages.Field(s->driftLabel,s->driftCombo,s->driftHelp);
         pages.Field(s->pcmQueueLabel,s->pcmQueueCombo,s->pcmQueueHelp);
@@ -261,10 +305,12 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
         break;
     case SettingsTab::GuideDiagnostics:
         pages.Group(text(L"키보드 단축키",L"Keyboard shortcuts"));
-        pages.Button(s->shortcutResetButton);
+        if (s->shortcutListToggle) pages.Button(s->shortcutListToggle);
+        if (!s->shortcutListToggle || s->showAllShortcuts) pages.Button(s->shortcutResetButton);
         {
         const auto metrics=MeasureShortcutLayout(s,dpi,width);
-        for (size_t i=0;i<s->guideKeys.size();++i) {
+        for (auto i:viewer_help::kDisplayOrder) {
+            if (!s->ShowShortcut(i)) continue;
             const int height=std::max(29,metrics.descriptionHeights[i]);
             pages.Block(std::max(36,height+7),{{s->guideKeys[i],0,0,metrics.keyWidth,29},
                 {s->guideDescriptions[i],metrics.keyWidth+12,0,width-metrics.keyWidth-12,height}});
@@ -274,9 +320,9 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
         pages.Group(text(L"진단",L"Diagnostics"));
         pages.Text(s->guideDiagnosticsText,52);
         pages.Check(s->saveLogCheck);
-        pages.Check(s->showConsoleCheck);
-        pages.Button(s->guideLogFolderButton);
         pages.Button(s->guideReportButton);
+        pages.Button(s->guideLogFolderButton);
+        pages.Check(s->showConsoleCheck);
         pages.Button(s->guideLsButton);
         break;
     case SettingsTab::Updates:

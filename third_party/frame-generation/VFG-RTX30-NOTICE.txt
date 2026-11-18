@@ -1,0 +1,39 @@
+LLCV — Experimental VFG compatibility (NVIDIA SM 8.6)
+
+The native VfgAmpereCompat.h port is GPL-3.0-only. It is adapted from
+Veyra-NRVideo (Likely7/Veyra-NRVideo, GPL-3.0), src/pipeline/VfgAmpereCompat.cpp
+and include/veyra/pipeline/VfgAmpereCompat.h, reviewed 2026-11-17.
+The LLCV port adds exact-runtime identity and bounds checks, uses process-local
+imports and private kernel copies, and does not modify the installed driver
+or an NVIDIA DLL on disk.
+
+Veyra's underlying contribution is derived from Xchen991/RTX30-Broadcast-FrameGen,
+commit 07536ab32a508b7daa714a4a9bda5b56f031bbc3, src/dllmain.cpp.
+Its MIT notice as retained by Veyra follows.
+
+MIT License
+
+Copyright (c) 2026
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+NVIDIA's runtime, SDK and model have separate proprietary terms, included in
+the official local wheel. Nothing here grants runtime redistribution rights
+or asserts official RTX 3080 support. No NVIDIA DLL is committed or patched
+on disk. This does not translate Ada instructions into Ampere instructions.

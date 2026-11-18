@@ -4,7 +4,7 @@
 #include <cstdint>
 
 namespace llcv::viewer_help::detail {
-inline constexpr int kMinimumClientWidth=760, kMinimumClientHeight=640;
+inline constexpr int kMinimumClientWidth=760, kMinimumClientHeight=560;
 
 // Adapt only this guide, never Windows DPI or viewer/capture settings. Floor
 // the fitted DPI so rounding cannot make its minimum layout exceed the client.

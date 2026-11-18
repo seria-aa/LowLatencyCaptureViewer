@@ -3,6 +3,7 @@
 #include "recording/EncoderSupport.h"
 #include "recording/EncoderProbe.h"
 #include "recording/RecordingTimeline.h"
+#include "RecordingFileTestSupport.h"
 #include <mfapi.h>
 #include <mferror.h>
 #include <wrl/client.h>
@@ -95,9 +96,13 @@ void Encode(const wchar_t* path, const Options& options, bool terminate) {
     Hr(writer->Finalize(), "finalize"); Hr(bytes->Flush(), "final flush");
     const auto boxes = Scan(bytes.Get());
     printf("finalized codec=%d bytes=%llu movies=%u fragments=%u media=%u\n", static_cast<int>(options.codec), boxes.length, boxes.movies, boxes.fragments, boxes.media);
-    if (UsesFragmentedContainer(options.codec))
-        Check(boxes.movies == 1 && boxes.fragments > 1 && boxes.media > 1, "continuous fragmented MP4 output");
-    else Check(boxes.movies == 1 && boxes.fragments == 0, "indexed MP4 remains explicitly unprotected");
+#ifdef LLCV_RECORDING_MODERN_MP4
+    Check(boxes.movies == 1 && boxes.fragments == 0 && boxes.media == 1,
+        "successful finalization exposes a conventional MP4 index");
+#else
+    Check(boxes.movies == 1 && boxes.fragments > 1 && boxes.media > 1,
+        "playback-only build's native H.264 test fallback remains fragmented");
+#endif
     bytes->Close();
 }
 unsigned Read(const wchar_t* path, bool video, bool exact, LONGLONG* lastTime = nullptr) {
@@ -227,6 +232,9 @@ int wmain(int argc, wchar_t** argv) {
     if (argc == 3 && (std::wstring(argv[1]) == L"--hevc" || std::wstring(argv[1]) == L"--hardware-h264")) {
         options.encoder.clear(); options.codec = std::wstring(argv[1]) == L"--hardware-h264" ? Codec::H264 : Codec::Hevc;
         Encode(argv[2], options, false);
+#ifdef LLCV_RECORDING_MODERN_MP4
+        test::CheckShellDuration(argv[2], Time(frames));
+#endif
         Read(argv[2], true, true); Read(argv[2], false, true);
         Hr(ValidateCompletedRecording(argv[2]), "hardware output structural check"); return 0;
     }
@@ -251,9 +259,16 @@ int wmain(int argc, wchar_t** argv) {
     wprintf(L"fixtures: %ls\n", directory.c_str());
     if (!hardware) { Timing(directory, 0, 100000); Timing(directory, 150000, 0); Timing(directory, 0, 0); }
     Encode(good.c_str(), options, false); Read(good.c_str(), true, true); Read(good.c_str(), false, true);
+#ifdef LLCV_RECORDING_MODERN_MP4
+    test::CheckShellDuration(good.c_str(), Time(frames));
+#endif
     Hr(ValidateCompletedRecording(good.c_str()), "finished file structural check");
     const auto truncated = directory / L"truncated-last-fragment.mp4";
-    Check(CopyFileW(good.c_str(), truncated.c_str(), TRUE) != FALSE, "copy owned test fixture");
+#ifdef LLCV_RECORDING_MODERN_MP4
+    test::FragmentedSnapshot(good.c_str(), truncated.c_str());
+#else
+    Check(CopyFileW(good.c_str(), truncated.c_str(), TRUE) != FALSE, "copy native fragmented fixture");
+#endif
     {
         ComPtr<IMFByteStream> bytes;
         Hr(MFCreateFile(MF_ACCESSMODE_READWRITE, MF_OPENMODE_FAIL_IF_NOT_EXIST, MF_FILEFLAGS_NONE, truncated.c_str(), &bytes), "open truncation fixture");

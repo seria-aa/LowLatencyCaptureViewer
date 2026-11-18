@@ -5,6 +5,10 @@ if(LLCV_RECORDING AND NOT LLCV_RECORDING_FFMPEG_ROOT)
     message(FATAL_ERROR "Recording requires LLCV_RECORDING_FFMPEG_ROOT. See tools/Build-RecordingFFmpeg.ps1, or configure -DLLCV_RECORDING=OFF for a playback-only build.")
 endif()
 if(LLCV_RECORDING_FFMPEG_ROOT)
+    file(GLOB llcv_recording_resample_dll "${LLCV_RECORDING_FFMPEG_ROOT}/bin/swresample-*.dll")
+    if(llcv_recording_resample_dll OR EXISTS "${LLCV_RECORDING_FFMPEG_ROOT}/licenses/dolby-ffmpeg-NOTICE.txt")
+        message(FATAL_ERROR "Use the mux-only FFmpeg SDK for LLCV_RECORDING_FFMPEG_ROOT, not the Dolby preview SDK. Use LLCV_DOLBY_SDK for a Dolby preview.")
+    endif()
     foreach(component avformat avcodec avutil)
         if(NOT EXISTS "${LLCV_RECORDING_FFMPEG_ROOT}/include/lib${component}/${component}.h" OR
            NOT EXISTS "${LLCV_RECORDING_FFMPEG_ROOT}/lib/${component}.lib")
@@ -23,10 +27,7 @@ if(LLCV_RECORDING_FFMPEG_ROOT)
             INTERFACE_INCLUDE_DIRECTORIES "${LLCV_RECORDING_FFMPEG_ROOT}/include")
         list(APPEND llcv_recording_runtime_dlls "${component_dll}")
     endforeach()
-    # Full development builds may require swresample; the minimal mux-only
-    # build does not. Never copy the unrelated FFmpeg programs/other libraries.
-    file(GLOB llcv_recording_resample_dll "${LLCV_RECORDING_FFMPEG_ROOT}/bin/swresample-*.dll")
-    list(APPEND llcv_recording_runtime_dlls ${llcv_recording_resample_dll})
+    # The mux-only runtime excludes resampling and all FFmpeg tools.
     add_library(LLCV_RecordingMux STATIC src/recording/FragmentedMp4Sink.cpp)
     target_include_directories(LLCV_RecordingMux PRIVATE src)
     target_compile_definitions(LLCV_RecordingMux PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

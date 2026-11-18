@@ -1,4 +1,14 @@
-LLCV v2.2.1 x64 (continued from the v0.14.2 rework)
+LLCV v2.3.0 x64 (continued from the v0.14.2 rework)
+
+v2.3.0 optional frame interpolation and recording improvements
+-------------------------------------------------------------
+- Provides opt-in VFG on Ada/Blackwell, plus experimental SM 8.6 compatibility.
+  NVIDIA runtime components are separate. RIFE is not a release feature.
+- Composites the compact REC badge in both standard and exclusive output.
+- Finalizes normally completed recordings and splits with a standard MP4 duration index.
+- Allows video-only playback after capture-audio connection failure.
+- Shows all assigned shortcuts in the F1 guide.
+- See tests/RELEASE_V2_3_0_AUDIT.md for candidate status.
 
 v2.2.1 SDR correction, HDR upscaling and settings layout
 -----------------------------------------------------
