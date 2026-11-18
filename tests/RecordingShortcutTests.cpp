@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <set>
+#include <algorithm>
 namespace keys=llcv::shortcuts;
 using namespace llcv::settings_ui;
 static void Check(bool ok,const char* message) {
@@ -92,8 +93,9 @@ int main() {
                     for(size_t i=0;i<keys::Count;++i) {
                         RECT key{};GetWindowRect(s.guideKeys[i],&key);
                         MapWindowPoints(nullptr,owner,reinterpret_cast<POINT*>(&key),2);
+                        const auto row=std::find(llcv::viewer_help::kDisplayOrder.begin(),llcv::viewer_help::kDisplayOrder.end(),i)-llcv::viewer_help::kDisplayOrder.begin();
                         Check(key.left==SettingsPixels(204,dpi) &&
-                              key.top==SettingsPixels(156+static_cast<int>(i)*32,dpi) &&
+                              key.top==SettingsPixels(156+static_cast<int>(row)*32,dpi) &&
                               key.right-key.left==SettingsPixels(80,dpi) &&
                               key.bottom-key.top==SettingsPixels(29,dpi),
                               "current guide geometry returns after long bindings");

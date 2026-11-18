@@ -8,9 +8,9 @@ namespace llcv::viewer_help {
 namespace {
 constexpr wchar_t kClass[]=L"LLCV.ViewerHelp", kBodyClass[]=L"LLCV.ViewerHelp.Content";
 enum Index : unsigned {
-    Tag,Name,Version,Subtitle,KeyboardTitle,FirstKey,VideoHint=FirstKey+2*kShortcuts.size(),
+    Tag,Name,Version,Subtitle,KeyboardTitle,FirstKey,VideoHint=FirstKey+2*std::size(kDisplayOrder),
     MouseTitle,WheelLabel,WheelText,DragLabel,DragText,
-    ShotTitle,ShotSummary,FolderLabel,FolderText,ShotOption,FieldCount
+    ShotTitle,ShotSummary,FolderText,ShotOption,FieldCount
 };
 int Pixels(int dip,UINT dpi) { return MulDiv(dip,dpi ? dpi : 96,96); }
 RECT MonitorWorkArea(HWND window,const RECT* suggested=nullptr) {
@@ -82,18 +82,40 @@ bool Window::CreateContent() {
     if (!body_) return false;
     auto add=[&](const wchar_t* ko,const wchar_t* en,Font font,Surface surface,bool muted=false) {
         const auto caption=shortcuts::Expand(english_ ? en : ko,bindings_);
-        HWND child=CreateWindowW(L"STATIC",caption.c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT|SS_NOPREFIX,
+        HWND child=CreateWindowW(L"STATIC",caption.c_str(),WS_CHILD|WS_VISIBLE|SS_NOPREFIX|
+            (surface==Key ? SS_CENTER : SS_LEFT),
             0,0,1,1,body_,reinterpret_cast<HMENU>(INT_PTR(200+fields_.size())),nullptr,nullptr);
         fields_.push_back({child,font,surface,muted});
     };
     add(L"빠른 사용 안내",L"QUICK GUIDE",Small,Background,true);
     add(L"LLCV",L"LLCV",Title,Background);
     add(version_.c_str(),version_.c_str(),Small,Key);
+#if defined(LLCV_RIFE_OPTIONAL)
+    add(L"재생 중 자주 쓰는 조작을 확인합니다.",L"Frequently used controls during playback.",Normal,Background,true);
+#elif defined(LLCV_RIFE_UHD_PROBE) && defined(LLCV_RIFE_TRAJECTORY)
+    add(L"4K30 Half · F4 HUD 보정 · F7 보간 · F10 화질 비교(지연 증가)",
+        L"4K30 Half · F4 HUD protection · F7 interpolation · F10 quality comparison (more latency)",Normal,Background,true);
+#elif defined(LLCV_RIFE_AUTO_UI_TEST)
+    add(L"RIFE 비교 · F7 보간 · F8 추정 크기 · F4 자동 HUD 보호 · F10 화질 비교(지연 증가)",
+        L"RIFE comparison · F7 interpolation · F8 scale · F4 auto HUD protection · F10 quality comparison (more latency)",Normal,Background,true);
+#elif defined(LLCV_RIFE_TEST)
+    add(L"RIFE 테스트 · F7 보간 · F8 추정 크기 · F10 화질 비교(지연 증가) · F6 업스케일링",
+        L"RIFE test · F7 interpolation · F8 scale · F10 quality comparison (more latency) · F6 upscaling",Normal,Background,true);
+#else
     add(L"캡처 장치의 영상과 오디오를 저지연으로 재생합니다.",L"Low-latency video and audio playback from capture devices.",Normal,Background,true);
+#endif
     add(L"키보드 단축키",L"Keyboard shortcuts",Strong,Card);
-    for (const auto& shortcut:kShortcuts) {
-        add(shortcut.key,shortcut.key,Strong,Key);
-        add(shortcut.korean,shortcut.english,Normal,Card);
+    for (const auto action:kDisplayOrder) {
+        const auto index=static_cast<size_t>(action);
+        const auto& shortcut=kShortcuts[index];
+        add(L"",L"",Strong,Key);
+        SetWindowTextW(fields_.back().hwnd,KeyLabel(index,bindings_,english_).c_str());
+        const std::wstring suffix=shortcut.videoOnly ? L" *" : L"";
+        add((shortcut.korean+suffix).c_str(),(shortcut.english+suffix).c_str(),Normal,Card);
+        if (!bindings_[index]) {
+            ShowWindow(fields_[fields_.size()-2].hwnd,SW_HIDE);
+            ShowWindow(fields_.back().hwnd,SW_HIDE);
+        }
     }
     add(VideoOnlyHint(false),VideoOnlyHint(true),Small,Card,true);
     add(L"마우스 조작",L"Mouse controls",Strong,Card);
@@ -104,10 +126,10 @@ bool Window::CreateContent() {
     add(L"스냅 없이 창 이동",L"Move the window without snapping.",Normal,Card,true);
     add(L"스크린샷",L"Screenshots",Strong,Card);
     add(L"F12로 입력 해상도 PNG 저장\nOSD·화면 필터 제외 / HDR은 SDR로 변환",L"F12 saves a source-resolution PNG.\nNo OSD or display filters; HDR to SDR.",Normal,Card,true);
-    add(L"저장 위치",L"Save location",Small,Card,true);
+
     add(L"사진 / LowLatencyCaptureViewer",L"Pictures / LowLatencyCaptureViewer",Small,Card);
     add(L"클립보드 복사: 앱 설정의 스크린샷",L"Clipboard copy: Screenshots in App settings.",Small,Card,true);
-    const auto footer=shortcuts::Expand(english_ ? L"Playback continues · F1 / Esc closes this guide" : L"재생은 계속됩니다 · F1 / Esc로 안내창 닫기",bindings_);
+    const auto footer=shortcuts::Expand(english_ ? L"Edit shortcuts: F2 → Guide & diagnostics\nF1 / Esc closes this guide" : L"단축키 변경: F2 → 도움말 · 진단\nF1 / Esc로 안내창 닫기",bindings_);
     footer_=CreateWindowW(L"STATIC",footer.c_str(),
         WS_CHILD|WS_VISIBLE|SS_NOPREFIX,0,0,1,1,window_,nullptr,nullptr,nullptr);
     close_=CreateWindowW(L"BUTTON",english_ ? L"Close" : L"닫기",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,
@@ -165,8 +187,9 @@ void Window::Layout(UINT windowDpi) {
         y+=field(KeyboardTitle,margin+padding,y,leftWidth-2*padding)+px(12);
         int keyWidth=px(80);
         const auto previousFont=SelectObject(dc,fonts_[Strong]);
-        for (unsigned binding:bindings_) {
-            const auto label=shortcuts::Label(binding);
+        for (const auto index:kDisplayOrder) {
+            if (!bindings_[index]) continue;
+            const auto label=KeyLabel(index,bindings_,english_);
             SIZE size{}; GetTextExtentPoint32W(dc,label.c_str(),static_cast<int>(label.size()),&size);
             keyWidth=std::max(keyWidth,static_cast<int>(size.cx)+px(18));
         }
@@ -175,9 +198,11 @@ void Window::Layout(UINT windowDpi) {
         // Let the key keep its measured width while reserving a readable
         // wrapped description and the existing gap beside it.
         keyWidth=std::min(keyWidth,leftWidth-2*padding-px(96+12));
-        std::array<int,kShortcuts.size()> keyHeights{},actionHeights{};
-        int textHeight=0;
-        for (unsigned i=0;i<kShortcuts.size();++i) {
+        std::array<int,std::size(kDisplayOrder)> keyHeights{},actionHeights{};
+        int textHeight=0, visibleRows=0;
+        for (unsigned i=0;i<std::size(kDisplayOrder);++i) {
+            if (!bindings_[kDisplayOrder[i]]) continue;
+            ++visibleRows;
             keyHeights[i]=field(FirstKey+2*i,0,0,keyWidth-px(16));
             actionHeights[i]=field(FirstKey+2*i+1,0,0,leftWidth-2*padding-keyWidth-px(12));
             textHeight+=std::max(keyHeights[i],actionHeights[i]);
@@ -186,19 +211,20 @@ void Window::Layout(UINT windowDpi) {
         const int available=int(client.bottom)-margin-padding-px(8)-hintHeight-y;
         // Keep the whole shortcut list visible, including wrapped custom chords.
         // Use comfortable 32-DIP rows when possible, then reduce only row spacing.
-        int rowPadding=std::clamp((available-textHeight)/int(kShortcuts.size()),px(4),px(12));
+        int rowPadding=std::clamp((available-textHeight)/std::max(1,visibleRows),px(4),px(12));
         int minimumRow=px(32);
         auto rowsHeight=[&] {
             int height=0;
-            for (unsigned i=0;i<kShortcuts.size();++i)
-                height+=std::max(minimumRow,std::max(keyHeights[i],actionHeights[i])+rowPadding);
+            for (unsigned i=0;i<std::size(kDisplayOrder);++i)
+                if (bindings_[kDisplayOrder[i]]) height+=std::max(minimumRow,std::max(keyHeights[i],actionHeights[i])+rowPadding);
             return height;
         };
         if (rowsHeight()>available) {
-            minimumRow=px(24);
-            while (rowPadding>px(4) && rowsHeight()>available) --rowPadding;
+            minimumRow=px(16);
+            while (rowPadding>0 && rowsHeight()>available) --rowPadding;
         }
-        for (unsigned i=0;i<kShortcuts.size();++i) {
+        for (unsigned i=0;i<std::size(kDisplayOrder);++i) {
+            if (!bindings_[kDisplayOrder[i]]) continue;
             const int rowHeight=std::max(minimumRow,std::max(keyHeights[i],actionHeights[i])+rowPadding);
             auto place=[&](unsigned index,int x,int h) {
                 const int w=index==FirstKey+2*i ? keyWidth-px(16) : leftWidth-2*padding-keyWidth-px(12);
@@ -222,8 +248,8 @@ void Window::Layout(UINT windowDpi) {
         y+=padding-px(14); cards_[1]={rightX,mouseTop,rightX+rightWidth,y};
         const int shotTop=y+gap; y=shotTop+padding;
         y+=field(ShotTitle,rightX+padding,y,rightWidth-2*padding)+px(12);
-        y+=field(ShotSummary,rightX+padding,y,rightWidth-2*padding)+px(16);
-        y+=field(FolderLabel,rightX+padding,y,rightWidth-2*padding)+px(6);
+        y+=field(ShotSummary,rightX+padding,y,rightWidth-2*padding)+px(8);
+
         y+=field(FolderText,rightX+padding,y,rightWidth-2*padding)+px(12);
         y+=field(ShotOption,rightX+padding,y,rightWidth-2*padding)+padding;
         cards_[2]={rightX,shotTop,rightX+rightWidth,y};
@@ -298,7 +324,7 @@ void Window::Toggle(HWND owner,bool english,const wchar_t* version,int show,bool
     owner_=owner; english_=english; version_=version ? version : L"";
     lightTheme_=lightTheme;
     const UINT dpi=GetDpiForWindow(owner);
-    RECT rect{0,0,Pixels(820,dpi),Pixels(680,dpi)};
+    RECT rect{0,0,Pixels(820,dpi),Pixels(580,dpi)};
     constexpr DWORD style=WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_THICKFRAME|WS_CLIPCHILDREN;
     if (!AdjustWindowRectExForDpi(&rect,style,FALSE,WS_EX_CONTROLPARENT,dpi)) AdjustWindowRectEx(&rect,style,FALSE,WS_EX_CONTROLPARENT);
     const RECT work=MonitorWorkArea(owner);

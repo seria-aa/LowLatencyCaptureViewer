@@ -1,16 +1,29 @@
-; LLCV v2.2.1
+; LLCV v2.3.0
 ; Build this script with Inno Setup 7 from the installer directory.
 
 #define MyAppName "LLCV"
-#define MyAppVersion "2.2.1"
+#define MyAppVersion "2.3.0"
 #define MyAppPublisher "seria-aa"
 #define MyAppURL "https://github.com/seria-aa/LowLatencyCaptureViewer"
 #define MyAppExeName "LowLatencyCaptureViewer.exe"
 #ifndef BuildDir
-#define BuildDir "..\build-v2210-release"
+#define BuildDir "..\build-v2300-release"
 #endif
 #if FileExists(BuildDir + "\llcv-audio-recovery-diagnostic.txt")
   #error Audio-input recovery diagnostic builds cannot be packaged as a regular release.
+#endif
+#define ReleaseVfgStamp BuildDir + "\llcv-release-vfg-sm86.sha256"
+#if !FileExists(ReleaseVfgStamp)
+  #error Build the VFG + SM86 release executable before packaging.
+#endif
+#define ReleaseVfgStampHandle FileOpen(ReleaseVfgStamp)
+#define ReleaseVfgExeHash FileRead(ReleaseVfgStampHandle)
+#expr FileClose(ReleaseVfgStampHandle)
+#if LowerCase(ReleaseVfgExeHash) != LowerCase(GetSHA256OfFile(BuildDir + "\" + MyAppExeName))
+  #error VFG release stamp does not match the executable; rebuild before packaging.
+#endif
+#if FileExists(BuildDir + "\ffmpeg-licenses\dolby-ffmpeg-NOTICE.txt") || FileExists(BuildDir + "\swresample-6.dll")
+  #error Dolby preview FFmpeg cannot be packaged as a regular release.
 #endif
 
 [Setup]
@@ -28,9 +41,9 @@ DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
-OutputDir=..\outputs\v2.2.1
-OutputBaseFilename=LowLatencyCaptureViewer_v2.2.1_Setup
-OutputManifestFile=LowLatencyCaptureViewer_v2.2.1_Setup-manifest.txt
+OutputDir=..\outputs\v2.3.0
+OutputBaseFilename=LowLatencyCaptureViewer_v2.3.0_Setup
+OutputManifestFile=LowLatencyCaptureViewer_v2.3.0_Setup-manifest.txt
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -38,7 +51,7 @@ CloseApplications=yes
 SetupIconFile=..\assets\LowLatencyCaptureViewer.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Uninstallable=yes
-VersionInfoVersion=2.2.1.0
+VersionInfoVersion=2.3.0.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName}
 VersionInfoCopyright=Copyright (C) 2026 seria-aa
@@ -80,6 +93,7 @@ Source: "..\third_party\pretendard\LICENSE.txt"; DestDir: "{app}"; DestName: "PR
 Source: "..\third_party\upscaling\nis\licence.txt"; DestDir: "{app}"; DestName: "NIS-LICENSE.txt"; Flags: ignoreversion
 Source: "..\third_party\upscaling\cmaa2\license.txt"; DestDir: "{app}"; DestName: "CMAA2-LICENSE.txt"; Flags: ignoreversion
 Source: "..\third_party\upscaling\NOTICE.txt"; DestDir: "{app}"; DestName: "UPSCALING-NOTICE.txt"; Flags: ignoreversion
+Source: "..\third_party\frame-generation\VFG-RTX30-NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\실행안내.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\DEPENDENCIES.txt"; DestDir: "{app}"; Flags: ignoreversion
 ; Keep exclusions in sync with Copy-PackageDocs.ps1 and CMake install rules.

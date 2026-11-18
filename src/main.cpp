@@ -49,6 +49,10 @@
 #include "audio/WasapiOutput.h"
 #include "capture/DirectShowDevices.h"
 #include "capture/AudioSampleGrabber.h"
+#ifdef LLCV_DOLBY_CAPTURE
+#include "capture/DolbyGrabber.h"
+#include "veyra/source/AverMediaVendorAudio.h"
+#endif
 #ifdef LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC
 #include "capture/AudioInputRecovery.h"
 #endif
@@ -74,6 +78,7 @@
 #include "ui/ViewerHelpWindow.h"
 #include "ui/AudioOsdLayout.h"
 #include "ui/OverlayStyle.h"
+#include "ui/ViewerOverlayGeometry.h"
 #include "ui/AudioOnlyView.h"
 #include "ui/SpeakerIcon.h"
 #include "ui/PresentationModeUi.h"
@@ -144,6 +149,14 @@ static bool g_useScrgbPrototype = false;
 #ifdef LLCV_VSR_FEATURE
 #include "video/VsrExperiment.h"
 #include "video/CmaaNisUpscaler.h"
+#ifdef LLCV_RIFE_TEST
+#include "video/RifeHalfTest.h"
+#ifdef LLCV_INTERPOLATION_RELEASE
+#include "video/VfgRuntimeInstall.h"
+#include "video/VfgGpuProbe.h"
+#endif
+static std::atomic<llcv::presentation::VfgBlock> g_vfgPresentationBlock{llcv::presentation::VfgBlock::None};
+#endif
 #ifdef LLCV_SPATIAL_PROTOTYPE
 #include "video/SpatialUpscaler.h"
 static llcv::spatial::LiveTrace g_spatialTrace;
@@ -154,6 +167,10 @@ static std::atomic<llcv::vsr::Mode> g_vsrMode{llcv::vsr::Mode::Disabled};
 // Single request value keeps enable/sharpness coherent across the UI/render owners.
 static std::atomic<int> g_cmaaNisRequest{-1}; // See upscaling::Request; -1 selects VSR.
 static std::atomic<UINT> g_vsrGpuVendor{0};
+static std::atomic<bool> g_vfgRtx30{false};
+#ifdef LLCV_INTERPOLATION_RELEASE
+static std::atomic<LUID> g_vfgAdapterLuid{};
+#endif
 #endif
 
 // -----------------------------------------------------------------------------
@@ -168,11 +185,11 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
 #if defined(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
-constexpr wchar_t kAppVersionLabel[] = L"v2.2.1-audio-recovery-diagnostic";
+constexpr wchar_t kAppVersionLabel[] = L"v2.3.0-audio-recovery-diagnostic";
 #elif defined(LLCV_VSR_EXPERIMENT)
-constexpr wchar_t kAppVersionLabel[] = L"v2.2.1-vsr-test";
+constexpr wchar_t kAppVersionLabel[] = L"v2.3.0-vsr-test";
 #else
-constexpr wchar_t kAppVersionLabel[] = L"v2.2.1";
+constexpr wchar_t kAppVersionLabel[] = L"v2.3.0";
 #endif
 
 constexpr int kRecommendedCaptureBufferMs = 20;
@@ -436,6 +453,12 @@ enum class TransientHudContent { Volume, OneToOne, OneToOneUnavailable,
 #ifdef LLCV_VSR_FEATURE
     , VsrPending, VsrOn, VsrOff, VsrUnavailable, VsrRejected, VsrFailed
     , CmaaNisPending, CmaaNisOn, CmaaNisOff, CmaaNisScaleBypass, CmaaNisFailed
+#ifdef LLCV_RIFE_TEST
+    , RifePending, RifeOn, RifeOff, RifeUnavailable, RifeFailed, RifeLate
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+    , RifeAutoUi
+#endif
+#endif
 #endif
 };
 static void ShowTransientHud(TransientHudContent content);
@@ -451,26 +474,29 @@ static constexpr UINT WM_RECORDING_CAPTURE_ENDED=WM_APP+94;
 static std::optional<llcv::recording::Capabilities> g_recordingCapabilities;
 static int g_requestedSettingsTab=-1;
 static void UpdateViewerRecordingIndicator(const llcv::recording::Snapshot& snapshot) {
-    if (ExclusiveOutputSelected()) {
-        llcv::recording::PublishGpuIndicator(snapshot, IsEnglishUi(),
-            g_settings.settingsLightTheme, GetDpiForWindow(PresentationWindow(g_videoHost)));
-    } else {
-        llcv::recording::UpdateRecordingIndicator(g_videoHost, snapshot);
-    }
+    if (g_settings.audioOnly || !g_videoHost) return;
+    // Publish for both output paths. A native child of the flip-model video
+    // HWND is not composited by the application's presentation path.
+    llcv::recording::PublishGpuIndicator(snapshot, IsEnglishUi(),
+        g_settings.settingsLightTheme, GetDpiForWindow(PresentationWindow(g_videoHost)));
 }
 
 static bool HandleGpuRecordingMouse(HWND hwnd, UINT message, LPARAM parameter) {
-    if (!ExclusiveOutputSelected()) return false;
+    if (g_settings.audioOnly || !g_videoHost) return false;
+    const HWND surface = PresentationWindow(g_videoHost);
     RECT client{};
-    if (!GetClientRect(hwnd, &client)) return false;
+    if (!surface || !GetClientRect(surface, &client)) return false;
     const UINT width = static_cast<UINT>((std::max)(0L, client.right));
     const UINT height = static_cast<UINT>((std::max)(0L, client.bottom));
-    if (message == WM_LBUTTONUP)
-        return llcv::recording::HandleGpuIndicatorClick(hwnd, width, height,
-            GET_X_LPARAM(parameter), GET_Y_LPARAM(parameter));
+    if (message == WM_LBUTTONUP) {
+        POINT point{GET_X_LPARAM(parameter), GET_Y_LPARAM(parameter)};
+        if (hwnd != surface) MapWindowPoints(hwnd, surface, &point, 1);
+        return llcv::recording::HandleGpuIndicatorClick(GetAncestor(surface, GA_ROOT),
+            width, height, point.x, point.y);
+    }
     if (message == WM_SETCURSOR && LOWORD(parameter) == HTCLIENT) {
         POINT point{};
-        if (GetCursorPos(&point) && ScreenToClient(hwnd, &point) &&
+        if (GetCursorPos(&point) && ScreenToClient(surface, &point) &&
             llcv::recording::GpuIndicatorHitTest(width, height, point.x, point.y)) {
             SetCursor(LoadCursorW(nullptr, IDC_HAND));
             return true;
@@ -1196,6 +1222,20 @@ static bool OnPcmRingOverrun(void*, size_t droppedFrames) {
 static PcmRing g_ring{kRingFrames, &g_audioRingFrames,
                       OnPcmRingOverrun, nullptr};
 static bool Surround51Active() { return g_ring.Channels() == 6; }
+#ifdef LLCV_DOLBY_CAPTURE
+static bool DolbyActive(){return Surround51Active()&&g_settings.dolbyCapture;}
+static bool DeliverDolby(const veyra::source::VendorPcmBlock& block){
+    return llcv::dolby::Deliver(block,[](const int16_t* pcm,size_t frames){
+        g_ring.Push(pcm,frames);
+        g_audioLastCaptureCallbackMs.store(GetTickCount64(),std::memory_order_release);
+        g_audioCapturePacketFrames.store(UINT32(frames));g_audioCaptureFrames.fetch_add(frames);++g_audioCaptureCallbacks;
+    });
+}
+static llcv::capture_audio::Format DolbyFormat(){return {llcv::capture_audio::Encoding::IntegerPcm,llcv::capture_audio::Path::ConvertToSurround51,16,16,6,12,0x60f};}
+static HRESULT SurroundPin(IBaseFilter* f,IPin** p){return DolbyActive()?llcv::dolby::Pin(f,p):llcv::capture_audio::FindSurroundPin(f,p);}
+#else
+static constexpr auto SurroundPin=llcv::capture_audio::FindSurroundPin;
+#endif
 static std::atomic<bool> g_captureAudioRejected{false};
 // Set once a session is confirmed as video only: the output thread then
 // releases its endpoint (an Exclusive or ASIO device would otherwise stay
@@ -1229,8 +1269,16 @@ static bool ConfirmVideoOnlyStart(HWND owner, const wchar_t* stage, HRESULT fail
           L"아니요를 누르면 설정으로 돌아갑니다.",
         stage, static_cast<unsigned>(failure), HrText(failure).c_str(),
         !surround ? L"" : IsEnglishUi()
+#ifdef LLCV_DOLBY_CAPTURE
+            ? L"No valid 48 kHz surround input. For Dolby, select Dolby Digital 5.1 on the console. AVerMedia vendor capture requires the installed Multichannel Audio component."
+            : L"48 kHz 서라운드 입력이 없습니다. Dolby 모드에서는 콘솔 출력을 Dolby Digital 5.1로 설정하세요. AVerMedia 전용 경로는 공식 Multichannel Audio 설치가 필요합니다.");
+#elif defined(LLCV_RIFE_OPTIONAL) && !defined(LLCV_INTERPOLATION_RELEASE)
+            ? L"Requires 48 kHz surround PCM, or a direct AC-3 device and a 5.1 decoder. PCM-labelled bitstreams are unsupported."
+            : L"48 kHz 멀티채널 PCM 또는 AC-3를 직접 제공하는 장치와 5.1 디코더가 필요합니다. PCM으로 표시되는 압축 신호는 지원하지 않습니다.");
+#else
             ? L"\nConsole LPCM 5.1 needs a 48 kHz 5.1/7.1 PCM capture input; Dolby/DTS bitstreams are not supported.\n"
             : L"\n콘솔 LPCM 5.1에는 48 kHz 5.1/7.1 PCM 캡처 입력이 필요하며 Dolby/DTS 비트스트림은 지원하지 않습니다.\n");
+#endif
     const auto answer = llcv::capture::AfterVideoOnlyPrompt(MessageBoxW(owner, message, L"LLCV",
         MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1 | MB_SETFOREGROUND) == IDYES);
     if (answer.returnToSettingsQuietly) g_videoOnlyStartDeclined.store(true, std::memory_order_release);
@@ -1954,6 +2002,7 @@ static bool WaitForAudioRetry(unsigned milliseconds) {
 }
 
 static bool AudioRenderThreadAsio() {
+    if (!AudioOutputWanted()) return true;
     std::string driverName;
     if (!g_settings.asioDriverName.empty()) {
         const int required = WideCharToMultiByte(
@@ -1985,7 +2034,8 @@ static bool AudioRenderThreadAsio() {
     renderState.driftResampler.Prepare(32768);
     llcv::asio::Output output(driverName, g_videoHost, &FillAsioPcm,
                               &renderState);
-    if (!output.Start(&PrepareAsioMix)) {
+    if (!output.Start(&PrepareAsioMix, &AudioOutputWanted)) {
+        if (!AudioOutputWanted()) return true;
         fwprintf(stderr, L"[audio] ASIO start failed: %S\n",
                  output.Error().c_str());
         return false;
@@ -2039,7 +2089,7 @@ static bool AudioRenderThreadAsio() {
                     g_audioResamplePpm.store(0, std::memory_order_release);
                     g_audioResamplerActive.store(
                         state.autoCorrectionActive, std::memory_order_release);
-                })) {
+                }, &AudioOutputWanted)) {
                 sessionStartMs = GetTickCount64();
                 g_audioActualBufferFrames.store(
                     static_cast<UINT32>(output.BufferFrames()), std::memory_order_release);
@@ -2048,6 +2098,7 @@ static bool AudioRenderThreadAsio() {
                 restarted = true;
                 break;
             }
+            if (!AudioOutputWanted()) break;
             fwprintf(stderr, L"[audio] ASIO recovery failed: %S\n", output.Error().c_str());
         }
         if (!restarted) break;
@@ -2077,6 +2128,7 @@ static void RunAudioOutput() {
         }
         return;
     }
+    if (!AudioOutputWanted()) return;
     bool reinitializingEndpoint = false;
     AudioMode mode = ActiveAudioMode();
     if (mode == AudioMode::Asio) {
@@ -2425,11 +2477,19 @@ static RECT VideoSourceRectForStorage(RECT imageRect, int height, bool bottomUp)
 }
 
 struct DirectD3D11Renderer {
+#ifdef LLCV_RIFE_TEST
+    llcv::rife_test::Half rifeHalf;
+    llcv::rife_test::NotificationTracker rifeNotifications;
+#endif
     static constexpr UINT kUploadSurfaceCount = 3;
     static constexpr UINT kOsdOverlayWidth = 700;
+#ifdef LLCV_RIFE_OPTIONAL
+    static constexpr UINT kOsdOverlayHeight = 488;
+#else
     static constexpr UINT kOsdOverlayHeight = 440;
+#endif
     static constexpr float kOsdTextWidth = 668.0f;
-    static constexpr float kOsdTextHeight = 414.0f;
+    static constexpr float kOsdTextHeight = kOsdOverlayHeight - 26.0f;
 
     ID3D11Device* device = nullptr;
     ID3D11DeviceContext* context = nullptr;
@@ -2530,6 +2590,11 @@ struct DirectD3D11Renderer {
     UINT activeUploadSurface = 0;
     bool allowTearing = false;
     llcv::presentation::Readiness presentationReadiness;
+#ifdef LLCV_RIFE_TEST
+    llcv::presentation::VfgSecondSlotRecovery vfgSecondSlotRecovery;
+    unsigned vfgRefreshHz=0;
+    uint64_t vfgNextRefreshCheckMs=0;
+#endif
     bool sharpScalingActive = false;
     bool discardUpdateAvailable = false;
     bool occluded = false;
@@ -2716,6 +2781,13 @@ struct DirectD3D11Renderer {
 #endif
 
     void reset() {
+#ifdef LLCV_RIFE_TEST
+        rifeHalf.Reset();
+        vfgSecondSlotRecovery={};
+        vfgRefreshHz=0;
+        vfgNextRefreshCheckMs=0;
+        g_vfgPresentationBlock.store(llcv::presentation::VfgBlock::None);
+#endif
         if (swapChain && llcv::presentation::IsExclusive(g_settings.presentationMode)) {
             const HRESULT leave = swapChain->SetFullscreenState(FALSE, nullptr);
             if (FAILED(leave)) LogHr(L"Leave exclusive output during renderer reset",leave);
@@ -3007,7 +3079,11 @@ struct DirectD3D11Renderer {
         adapterVendor = adapterDesc.VendorId;
 #ifdef LLCV_VSR_FEATURE
         // Actual renderer is authoritative if the startup adapter has changed.
+#ifdef LLCV_INTERPOLATION_RELEASE
+        g_vfgAdapterLuid.store(adapterDesc.AdapterLuid, std::memory_order_release);
+#endif
         g_vsrGpuVendor.store(adapterDesc.VendorId, std::memory_order_release);
+        g_vfgRtx30.store(llcv::vsr::IsGeForceRtx30(adapterDesc.VendorId,adapterDesc.Description));
 #endif
         fwprintf(stderr,
                  L"[video-output] create: app=%s path=%s size=%ux%u "
@@ -3324,11 +3400,9 @@ struct DirectD3D11Renderer {
         // here. Fallback fonts preserve rendering on older DirectWrite versions.
         (void)overlayFonts.Initialize(dwriteFactory);
 #ifdef LLCV_RECORDING
-        if (ExclusiveOutputSelected()) {
-            hr = recordingIndicator.Initialize(device, d2dFactory, dwriteFactory,
-                overlayFonts, IsEnglishUi());
-            if (FAILED(hr)) return hr;
-        }
+        hr = recordingIndicator.Initialize(device, d2dFactory, dwriteFactory,
+            overlayFonts, IsEnglishUi());
+        if (FAILED(hr)) return hr;
 #endif
         hr = overlayFonts.CreateFormat(dwriteFactory, DWRITE_FONT_WEIGHT_MEDIUM,
             15.0f, IsEnglishUi(), &osdTextFormat);
@@ -3449,6 +3523,10 @@ struct DirectD3D11Renderer {
             hr = swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, description.Flags);
             if (FAILED(hr)) return hr;
         }
+#ifdef LLCV_RIFE_TEST
+        vfgNextRefreshCheckMs=0;
+        if(transitioned) rifeHalf.Invalidate();
+#endif
         outputWidth = width; outputHeight = height;
         fullscreenDisplaySize = g_fullscreen.load(std::memory_order_acquire);
         sharpScalingActive = false;
@@ -3870,7 +3948,36 @@ struct DirectD3D11Renderer {
             if (hudContent >= TransientHudContent::VsrPending) {
                 const wchar_t* ko = L"VSR 비교: F6\n현재: 기본 출력";
                 const wchar_t* en = L"VSR compare: F6\nOriginal output";
+#ifdef LLCV_RIFE_TEST
+                wchar_t rifeKo[96]{},rifeEn[96]{};
+                const auto selectedRife=llcv::rife_test::ScaleLabel(llcv::rife_test::selectedScale.load());
+#endif
                 switch (hudContent) {
+#ifdef LLCV_RIFE_TEST
+                case TransientHudContent::RifePending:
+                    swprintf_s(rifeKo,L"RIFE %s 준비 중",selectedRife);swprintf_s(rifeEn,L"RIFE %s preparing",selectedRife);ko=rifeKo;en=rifeEn;break;
+                case TransientHudContent::RifeOn:
+                    swprintf_s(rifeKo,L"RIFE %s ON\nF7: 끄기 · F8: 크기",llcv::rife_test::ScaleLabel(llcv::rife_test::activeScale.load()));
+                    swprintf_s(rifeEn,L"RIFE %s ON\nF7: OFF · F8: scale",llcv::rife_test::ScaleLabel(llcv::rife_test::activeScale.load()));ko=rifeKo;en=rifeEn;break;
+                case TransientHudContent::RifeOff:
+                    swprintf_s(rifeKo,L"RIFE %s OFF\nF7: 켜기 · F8: 크기",selectedRife);swprintf_s(rifeEn,L"RIFE %s OFF\nF7: ON · F8: scale",selectedRife);ko=rifeKo;en=rifeEn;break;
+                case TransientHudContent::RifeUnavailable: ko=L"RIFE 적용 불가\nFHD/QHD SDR NV12 필요"; en=L"RIFE unavailable\nNeeds FHD/QHD SDR NV12"; break;
+                case TransientHudContent::RifeFailed: ko=L"RIFE 실패·원본 유지\n진단 로그 확인"; en=L"RIFE failed / original output\nSee diagnostic log"; break;
+                case TransientHudContent::RifeLate:
+                    swprintf_s(rifeKo,L"RIFE %s 기한 초과 · 원본 유지\nF10: 화질 비교 (지연 증가)",selectedRife);
+                    swprintf_s(rifeEn,L"RIFE %s late · original output\nF10: quality comparison (more latency)",selectedRife);ko=rifeKo;en=rifeEn;break;
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+                case TransientHudContent::RifeAutoUi:{
+                    const int width=llcv::rife_test::SelectedHudWidth();
+#ifdef LLCV_RIFE_TRAJECTORY
+                    ko=width?L"HUD 이동 추적 켬":L"HUD 이동 추적 끔";en=width?L"HUD trajectory ON":L"HUD trajectory OFF";break;
+#else
+                    if(width){swprintf_s(rifeKo,L"자동 HUD 보호 %dpx\nF4: 끄기/16px/32px",width);swprintf_s(rifeEn,L"Auto HUD protection %d px\nF4: OFF/16 px/32 px",width);ko=rifeKo;en=rifeEn;}
+                    else {ko=L"자동 HUD 보호 OFF\nF4: 끄기/16px/32px";en=L"Auto HUD protection OFF\nF4: OFF/16 px/32 px";}break;
+#endif
+                }
+#endif
+#endif
                 case TransientHudContent::VsrPending: ko=L"VSR 전환 대기"; en=L"VSR switch pending"; break;
                 case TransientHudContent::VsrOn: ko=L"VSR ON\nF6: 끄기"; en=L"VSR ON\nF6: OFF"; break;
                 case TransientHudContent::VsrOff: ko=L"VSR OFF\nF6: 켜기"; en=L"VSR OFF\nF6: ON"; break;
@@ -3884,6 +3991,42 @@ struct DirectD3D11Renderer {
                 case TransientHudContent::CmaaNisFailed: ko=hdrOutput?L"NIS 사용 불가\n기본 출력 유지":L"CMAA2 → NIS 사용 불가\n기본 출력 유지"; en=hdrOutput?L"NIS unavailable\nUsing original output":L"CMAA2 → NIS unavailable\nUsing original output"; break;
                 default: break;
                 }
+#ifdef LLCV_RIFE_OPTIONAL
+                if(hudContent>=TransientHudContent::RifePending&&hudContent<=TransientHudContent::RifeLate){
+                    const wchar_t* actionsKo[]={L"준비 중",L"켜짐",L"꺼짐",L"사용 불가 · 원본 재생",L"오류 · 원본 재생",L"기한 초과 · 원본 재생"};
+                    const wchar_t* actionsEn[]={L"Preparing",L"On",L"Off",L"Unavailable · original",L"Error · original",L"Late · original"};
+                    const int i=int(hudContent)-int(TransientHudContent::RifePending);
+                    const auto preset=llcv::rife_test::selectedScale.load();
+                    swprintf_s(rifeKo,L"%s · %s\nF7: 켜기/끄기",llcv::rife_test::PresetLabel(preset,false),actionsKo[i]);
+                    swprintf_s(rifeEn,L"%s · %s\nF7: toggle",llcv::rife_test::PresetLabel(preset,true),actionsEn[i]);
+                    if(hudContent==TransientHudContent::RifeFailed && *llcv::rife_test::fallbackDetail.load()){
+                        const auto detail=llcv::rife_test::fallbackDetail.load();
+                        swprintf_s(rifeKo,L"%s · 보간 오류\n%s",llcv::rife_test::PresetLabel(preset,false),llcv::rife_test::FallbackLabel(detail,false));
+                        swprintf_s(rifeEn,L"%s · Interpolation error\n%s",llcv::rife_test::PresetLabel(preset,true),detail);
+                    }
+                    const auto blocked=g_vfgPresentationBlock.load();
+                    if(hudContent==TransientHudContent::RifeUnavailable && blocked!=llcv::presentation::VfgBlock::None){
+                        swprintf_s(rifeKo,L"%s · 원본 재생\n%s",llcv::rife_test::PresetLabel(preset,false),llcv::presentation::VfgBlockText(blocked,false));
+                        swprintf_s(rifeEn,L"%s · Original playback\n%s",llcv::rife_test::PresetLabel(preset,true),llcv::presentation::VfgBlockText(blocked,true));
+                    }
+                    ko=rifeKo;en=rifeEn;
+                }
+#endif
+#ifdef LLCV_FLYHIGH_TEST
+                if(hudContent>=TransientHudContent::RifePending&&hudContent<=TransientHudContent::RifeLate){
+                    const auto method=llcv::rife_test::MethodLabel();
+                    const wchar_t* action=IsEnglishUi()?L"preparing":L"준비 중";
+                    if(hudContent==TransientHudContent::RifeOn)action=L"ON";
+                    else if(hudContent==TransientHudContent::RifeOff)action=L"OFF";
+                    else if(hudContent==TransientHudContent::RifeLate)action=IsEnglishUi()?L"late / original":L"기한 초과 · 원본 유지";
+                    else if(hudContent==TransientHudContent::RifeFailed)action=IsEnglishUi()?L"error / original":L"실패 · 원본 유지";
+                    else if(hudContent==TransientHudContent::RifeUnavailable)action=IsEnglishUi()?L"unavailable / SDR NV12 required":L"적용 불가 · SDR NV12 필요";
+                    swprintf_s(rifeKo,L"%s %s\nF7: ON/OFF · F8: RIFE/FlyHigh",method,action);ko=en=rifeKo;
+                }
+                if(hudContent==TransientHudContent::RifeAutoUi&&llcv::rife_test::IsFlyHigh()){
+                    swprintf_s(rifeKo,L"FlyHigh HUD %s\nF4: ON/OFF",llcv::rife_test::flyHighHud.load()?L"ON":L"OFF");ko=en=rifeKo;
+                }
+#endif
                 wcscpy_s(volumeText, keys::Expand(IsEnglishUi() ? en : ko,g_settings.shortcuts).c_str());
             } else
 #endif
@@ -4190,11 +4333,9 @@ struct DirectD3D11Renderer {
         HRESULT hr = S_OK;
         bool recordingVisible = false;
 #ifdef LLCV_RECORDING
-        if (ExclusiveOutputSelected()) {
-            hr = recordingIndicator.Refresh();
-            if (FAILED(hr)) return hr;
-            recordingVisible = recordingIndicator.Visible();
-        }
+        hr = recordingIndicator.Refresh();
+        if (FAILED(hr)) return hr;
+        recordingVisible = recordingIndicator.Visible();
 #endif
         const bool osdVisible =
             g_osdVisible.load(std::memory_order_acquire);
@@ -4239,7 +4380,7 @@ struct DirectD3D11Renderer {
 
         auto draw = [&](ID3D11ShaderResourceView* texture,
                         LONG left, LONG top, LONG right, LONG bottom) {
-            if (FAILED(hr)) return;
+            if (FAILED(hr) || right <= left || bottom <= top) return;
             if (hdrOutput) {
                 hr = prepareHdrOverlay(left, top, right, bottom);
                 if (hr != S_OK) return;
@@ -4255,22 +4396,18 @@ struct DirectD3D11Renderer {
             context->Draw(4, 0);
         };
 
-        constexpr LONG margin = 16;
-        constexpr LONG osdWidth =
-            static_cast<LONG>(kOsdOverlayWidth);
-        constexpr LONG osdHeight =
-            static_cast<LONG>(kOsdOverlayHeight);
+        using namespace llcv::overlay_ui;
+        const SIZE outputSize{static_cast<LONG>(outputWidth), static_cast<LONG>(outputHeight)};
+        const RECT osdRect = osdVisible ? FitPanel(outputSize,
+            {static_cast<LONG>(kOsdOverlayWidth), static_cast<LONG>(kOsdOverlayHeight)}) : RECT{};
         if (osdVisible) {
-            draw(osdOverlayShaderView, margin, margin, margin + osdWidth,
-                 margin + osdHeight);
+            draw(osdOverlayShaderView, osdRect.left, osdRect.top, osdRect.right, osdRect.bottom);
         }
 
         if (volumeVisible) {
             constexpr LONG hudWidth = 260;
             constexpr LONG hudHeight = 82;
             constexpr LONG hudMargin = 24;
-            LONG x = hudMargin;
-            LONG y = hudMargin;
             const bool right =
                 g_settings.volumeHudPosition ==
                     VolumeHudPosition::TopRight ||
@@ -4281,25 +4418,27 @@ struct DirectD3D11Renderer {
                     VolumeHudPosition::BottomLeft ||
                 g_settings.volumeHudPosition ==
                     VolumeHudPosition::BottomRight;
-            if (right) {
-                x = (std::max)(hudMargin,
-                               static_cast<LONG>(outputWidth) - hudWidth -
-                                   hudMargin);
-            }
-            if (bottom) {
-                y = (std::max)(hudMargin,
-                               static_cast<LONG>(outputHeight) - hudHeight -
-                                   hudMargin);
-            } else if (!right && osdVisible) {
-                y = margin + osdHeight + 12;
+            auto hud = FitPanel(outputSize, {hudWidth, hudHeight}, hudMargin, right, bottom);
+            if (!bottom && !right && osdVisible) {
+                const auto below = At(hud, hud.left, osdRect.bottom + 12);
+                const auto beside = At(hud, osdRect.right + 12, hud.top);
+                if (Fits(below, outputSize)) hud = below;
+                else if (Fits(beside, outputSize)) hud = beside;
+                else hud = FitPanel(outputSize, {hudWidth, hudHeight}, hudMargin, false, true);
             }
             if (muteVisible && right && !bottom) {
                 const LONG reserved = muteRect.right - muteRect.left + 8;
-                if (x >= hudMargin + reserved) x -= reserved;
-                else y = muteRect.bottom + 8;
+                const auto beside = At(hud, hud.left - reserved, hud.top);
+                const auto below = At(hud, hud.left, muteRect.bottom + 8);
+                if (hud.left >= hudMargin + reserved) hud = beside;
+                else if (Fits(below, outputSize)) hud = below;
             }
-            draw(volumeOverlayShaderView, x, y, x + hudWidth,
-                 y + hudHeight);
+#ifdef LLCV_RECORDING
+            if (recordingVisible)
+                hud = ClearRecordingCard(hud, recordingIndicator.CardRect(outputWidth, outputHeight),
+                                         outputSize, right, bottom);
+#endif
+            draw(volumeOverlayShaderView, hud.left, hud.top, hud.right, hud.bottom);
         }
         if (audioVisible) {
             const llcv::audio_osd::Rect rect =
@@ -4392,7 +4531,33 @@ struct DirectD3D11Renderer {
         }
         return S_OK;
     }
-    HRESULT presentUploaded() {
+#ifdef LLCV_RIFE_TEST
+    unsigned VfgRefreshHz() {
+        const auto now=GetTickCount64();
+        if(now<vfgNextRefreshCheckMs) return vfgRefreshHz;
+        vfgNextRefreshCheckMs=now+1000;
+        // Recheck while VSync VFG is active: moving a window without resizing
+        // can switch outputs, and changing refresh does not require a new chain.
+        vfgRefreshHz=0;
+        HWND window=nullptr;
+        if(FAILED(swapChain->GetHwnd(&window))||!window) return 0;
+        MONITORINFOEXW monitor{};
+        monitor.cbSize=sizeof(monitor);
+        if(!GetMonitorInfoW(MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST),&monitor)) return 0;
+        DEVMODEW display{};
+        display.dmSize=sizeof(display);
+        if(EnumDisplaySettingsW(monitor.szDevice,ENUM_CURRENT_SETTINGS,&display)&&
+           (display.dmFields&DM_DISPLAYFREQUENCY))
+            vfgRefreshHz=display.dmDisplayFrequency;
+        return vfgRefreshHz;
+    }
+#endif
+
+    HRESULT presentUploaded([[maybe_unused]] int64_t arrivalUs=0,ID3D11VideoProcessorInputView* generatedInput=nullptr) {
+#ifdef LLCV_RIFE_TEST
+        bool waitForOriginalSlot=false;
+        bool generatedOnly=false;
+#endif
         const bool cmaaRequestChanged=cmaaNisAppliedRequest!=g_cmaaNisRequest.load(std::memory_order_acquire);
         if(cmaaRequestChanged) {
             const HRESULT hr=configureVideoOutput(captureWidth,captureHeight);
@@ -4415,9 +4580,94 @@ struct DirectD3D11Renderer {
 #endif
         const HRESULT visibility = pollOcclusion();
         if (visibility != S_OK) return visibility;
+#ifdef LLCV_RIFE_TEST
+        if(!generatedInput) {
+            using namespace llcv::rife_test;
+#ifdef LLCV_FLYHIGH_TEST
+            static thread_local uint64_t notifiedProvider=0;
+            const auto currentProvider=providerEpoch.load();
+            if(notifiedProvider!=currentProvider){rifeNotifications={};notifiedProvider=currentProvider;}
+#endif
+            if(toggleEvery){static unsigned frames=0;if(++frames%toggleEvery==0)Request(!requested.load());}
+            if(cycleScales){static unsigned frames=0;if(++frames%180==0)NextScale();}
+            const bool wantsInterpolation=requested.load(std::memory_order_acquire);
+            const auto scale=selectedScale.load(std::memory_order_acquire);
+            const auto mode=g_settings.presentationMode;
+            const bool syncVfg=wantsInterpolation&&IsVfg(scale)&&mode==PresentationMode::VSync;
+            const unsigned refreshHz=syncVfg?VfgRefreshHz():0;
+            auto modeBlock=wantsInterpolation&&IsVfg(scale)
+                ? llcv::presentation::VfgPresentationBlock(mode,captureFps,refreshHz,presentationReadiness.Enabled())
+                : llcv::presentation::VfgBlock::None;
+            vfgSecondSlotRecovery.ObserveRequest(syncVfg&&modeBlock==llcv::presentation::VfgBlock::None,
+                syncVfg?intentChanges.load(std::memory_order_acquire):0);
+            if(vfgSecondSlotRecovery.OriginalOnly())
+                modeBlock=llcv::presentation::VfgBlock::SyncRecovering;
+            g_vfgPresentationBlock.store(modeBlock,std::memory_order_relaxed);
+            if(!wantsInterpolation){
+#ifdef LLCV_RIFE_OPTIONAL
+                if(!componentsEnabled.load())rifeHalf.Reset();else
+#endif
+                rifeHalf.Invalidate();status=Status::Off;
+            }
+            else if(hdrOutput||
+#ifdef LLCV_RIFE_OPTIONAL
+                (inputFormat!=DXGI_FORMAT_NV12&&inputFormat!=DXGI_FORMAT_YUY2&&inputFormat!=DXGI_FORMAT_B8G8R8X8_UNORM&&inputFormat!=DXGI_FORMAT_R8G8B8A8_UNORM&&inputFormat!=DXGI_FORMAT_P010)||
+#else
+                inputFormat!=DXGI_FORMAT_NV12||
+#endif
+                !SupportsInput(scale,captureWidth,captureHeight)||
+                captureFps<24||captureFps>60||adapterVendor!=0x10de||
+                modeBlock!=llcv::presentation::VfgBlock::None||
+                (!IsVfg(scale)&&llcv::presentation::UsesVSync(mode))) {
+                rifeHalf.Invalidate();status=Status::Unsupported;
+            }else {
+                if(arrivalUs<=0)arrivalUs=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                if(auto* view=rifeHalf.Submit(device,context,videoDevice,videoContext,processor,enumerator,nv12Textures[activeUploadSurface],captureWidth,captureHeight,captureFps,arrivalUs)) {
+                    const auto result=presentUploaded(arrivalUs,view);
+                    if(result==S_OK){
+                        ++generated;
+                        ++modeGenerated[ScaleIndex(activeScale.load())];
+                        if(OsdTrackingActive())g_videoPresentedFrames.fetch_add(1,std::memory_order_relaxed);
+                        waitForOriginalSlot=llcv::presentation::UseVfgOriginalTimer(mode,captureFps,refreshHz);
+                        if(waitForOriginalSlot)rifeHalf.ScheduleOriginalSlot(captureFps);
+                        if(syncVfg){
+                            // The generated Present consumed the first credit.
+                            // Admit the original separately before drawing it.
+                            const HRESULT ready=presentationReadiness.Wait(llcv::presentation::VfgOriginalWaitMs(refreshHz));
+                            if(FAILED(ready)) return ready;
+                            if(ready==S_FALSE){
+                                // Drop just this expired original instead of queuing it
+                                // without a DXGI credit. Leave the handle armed so the
+                                // next available slot presents the latest capture sample.
+                                fwprintf(stderr,L"[video] VSync second-slot readiness timed out; retrying after original playback.\n");
+                                vfgSecondSlotRecovery.TimedOut(captureFps);
+                                g_vfgPresentationBlock.store(llcv::presentation::VfgBlock::SyncRecovering);
+                                status=Status::Unsupported;
+                                rifeHalf.Invalidate();
+                                generatedOnly=true;
+                            }
+                        }
+                    }
+                    else if(result==DXGI_STATUS_OCCLUDED)return result;
+                    else {Request(false);status=Status::Failed;rifeHalf.Invalidate();const auto removed=device->GetDeviceRemovedReason();if(FAILED(removed))return removed;}
+                }
+            }
+            if(const auto notice=rifeNotifications.Observe(requested.load(std::memory_order_acquire),selectedScale.load(),status.load(std::memory_order_acquire))){
+                const auto current=*notice;
+                ShowTransientHud(current==Status::Off?TransientHudContent::RifeOff:
+                    current==Status::Active?TransientHudContent::RifeOn:
+                    current==Status::Unsupported?TransientHudContent::RifeUnavailable:
+                    current==Status::Failed?TransientHudContent::RifeFailed:
+                    current==Status::Late?TransientHudContent::RifeLate:TransientHudContent::RifePending);
+            }
+            // A generated frame really was presented and counted above.
+            // The caller must not count or time a second, unpresented original.
+            if(generatedOnly) return S_FALSE;
+        }
+#endif
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE;
-        stream.pInputSurface = inputViews[activeUploadSurface];
+        stream.pInputSurface = generatedInput?generatedInput:inputViews[activeUploadSurface];
         if (pixelPerfectBorders && !skipRedundantBorderClear) {
             const float black[4]{0.0f, 0.0f, 0.0f, 1.0f};
             context->ClearRenderTargetView(backBufferRenderTarget, black);
@@ -4434,7 +4684,26 @@ struct DirectD3D11Renderer {
                                                outputWidth, outputHeight, activeUploadSurface);
         else
 #endif
-        hr = processVideo(stream);
+        {
+#ifdef LLCV_RIFE_TEST
+            D3D11_VIDEO_PROCESSOR_COLOR_SPACE savedColor{};
+            DXGI_COLOR_SPACE_TYPE savedRgb{};if(generatedInput&&rgbInput&&videoContext1)videoContext1->VideoProcessorGetStreamColorSpace1(processor,0,&savedRgb);
+            if(generatedInput){
+                // NV12 SDR does not initialize the optional videoContext1.
+                // Its RGB midpoint uses the same legacy full-range contract as
+                // this processor's SDR output; restore source YUV state below.
+                videoContext->VideoProcessorGetStreamColorSpace(processor,0,&savedColor);
+                D3D11_VIDEO_PROCESSOR_COLOR_SPACE rgbColor{};
+                rgbColor.RGB_Range=0;rgbColor.Nominal_Range=D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
+                videoContext->VideoProcessorSetStreamColorSpace(processor,0,&rgbColor);
+            }
+#endif
+            hr = processVideo(stream);
+#ifdef LLCV_RIFE_TEST
+            if(generatedInput&&rgbInput&&videoContext1)videoContext1->VideoProcessorSetStreamColorSpace1(processor,0,savedRgb);
+            else if(generatedInput)videoContext->VideoProcessorSetStreamColorSpace(processor,0,&savedColor);
+#endif
+        }
 #ifdef LLCV_VSR_EXPERIMENT
         vsrTiming.End(context, SUCCEEDED(hr));
 #endif
@@ -4462,6 +4731,9 @@ struct DirectD3D11Renderer {
         const UINT syncInterval = vsync ? 1u : 0u;
         const UINT flags = llcv::presentation::PresentFlags(
             g_settings.presentationMode, exclusiveActive, allowTearing);
+#ifdef LLCV_RIFE_TEST
+        if(waitForOriginalSlot)rifeHalf.WaitOriginalSlot(captureFps);
+#endif
 #ifdef LLCV_VSR_EXPERIMENT
         const auto presentStart = llcv::vsr::Timing::Clock::now();
 #endif
@@ -4471,6 +4743,10 @@ struct DirectD3D11Renderer {
 #endif
         hr = swapChain->Present(syncInterval, flags);
         presentationReadiness.Presented();
+#ifdef LLCV_RIFE_TEST
+        if(!generatedInput && hr==S_OK)
+            vfgSecondSlotRecovery.OriginalPresented();
+#endif
 #ifdef LLCV_VSR_EXPERIMENT
         if (hr == S_OK) vsrTiming.AddPresent(std::chrono::duration<double,std::milli>(
             llcv::vsr::Timing::Clock::now()-presentStart).count());
@@ -4573,6 +4849,27 @@ static bool AudioOnlyCaptureLoop() {
         if (mediaFilter) mediaFilter->SetSyncSource(nullptr);
 
         g_activeCaptureAudioDeviceName.clear();
+#ifdef LLCV_DOLBY_CAPTURE
+        if(g_settings.dolbyCapture&&!DolbyActive()){initializationStage=L"Dolby 5.1 requires WASAPI Shared";hr=VFW_E_TYPE_NOT_ACCEPTED;break;}
+        if(DolbyActive()&&g_settings.captureAudioDeviceId.empty()){
+            std::wstring devicePath;
+            IBaseFilter* identity=nullptr;
+            const auto found=FindCaptureFilter(g_settings.captureDeviceId,&identity,&g_activeCaptureDeviceName,&devicePath);
+            SafeRelease(identity);
+            veyra::source::AverMediaVendorAudio vendor;
+            if(SUCCEEDED(found)&&vendor.start(DeliverDolby,g_activeCaptureDeviceName,devicePath)){
+                initialized=true;g_captureAudioAvailable=true;g_activeCaptureAudioDeviceName=L"AVerMedia Dolby";
+                captureLease.Release();const auto started=GetTickCount64();
+                while(g_running.load()){
+                    if(vendor.state().failed||GetTickCount64()>(std::max)(started,g_audioLastCaptureCallbackMs.load())+10000){
+                        initializationStage=L"Dolby: no decoded 48 kHz 5.1 signal";g_captureAudioRejected=true;initialized=false;hr=VFW_E_TYPE_NOT_ACCEPTED;break;
+                    }
+                    Sleep(50);
+                }
+                vendor.stop();break;
+            }
+        }
+#endif
         if (g_settings.captureAudioDeviceId.empty()) {
             initializationStage = L"find selected capture device audio pin";
             hr = FindCaptureFilter(g_settings.captureDeviceId, &capture,
@@ -4582,7 +4879,7 @@ static bool AudioOnlyCaptureLoop() {
             if (FAILED(hr)) break;
             g_activeCaptureAudioDeviceName = g_activeCaptureDeviceName;
             hr = Surround51Active()
-                ? llcv::capture_audio::FindSurroundPin(capture, &audioPin)
+                ? SurroundPin(capture, &audioPin)
                 : FindOutputPinByName(capture, kAudioPinName, &audioPin);
             if (FAILED(hr) && !Surround51Active()) {
                 hr = FindOutputPinByMajorType(capture, MEDIATYPE_Audio,
@@ -4605,7 +4902,7 @@ static bool AudioOnlyCaptureLoop() {
                                   L"Selected Capture Audio Device");
             if (FAILED(hr)) break;
             hr = Surround51Active()
-                ? llcv::capture_audio::FindSurroundPin(audioCapture, &audioPin)
+                ? SurroundPin(audioCapture, &audioPin)
                 : FindOutputPinByMajorType(audioCapture, MEDIATYPE_Audio, &audioPin);
             if (Surround51Active()) g_captureAudioRejected.store(FAILED(hr));
         }
@@ -4615,8 +4912,16 @@ static bool AudioOnlyCaptureLoop() {
         initializationStage = L"negotiate supported capture audio format";
         llcv::capture_audio::Rejection rejection =
             llcv::capture_audio::Rejection::Malformed;
+#ifdef LLCV_DOLBY_CAPTURE
+        if(DolbyActive()){selectedAudioType=llcv::dolby::Type(audioPin);selectedAudioFormat=DolbyFormat();}
+        else
+#endif
         selectedAudioType = llcv::capture_audio::SelectSupportedType(
             audioPin, selectedAudioFormat, &rejection, Surround51Active());
+#if defined(LLCV_RIFE_OPTIONAL) && !defined(LLCV_INTERPOLATION_RELEASE)
+        const bool decodeAc3=!selectedAudioType&&Surround51Active()&&llcv::capture_audio::OffersAc3(audioPin);
+        if(decodeAc3)selectedAudioType=llcv::capture_audio::PcmDecoderTarget();
+#endif
         if (!selectedAudioType) {
             if (Surround51Active()) g_captureAudioRejected.store(true);
             fwprintf(stderr, L"[audio] capture input rejected: %s\n",
@@ -4626,6 +4931,12 @@ static bool AudioOnlyCaptureLoop() {
         }
         fwprintf(stderr, L"[audio] capture input: %s\n",
                  llcv::capture_audio::Describe(selectedAudioFormat).c_str());
+#if defined(LLCV_RIFE_OPTIONAL) && !defined(LLCV_INTERPOLATION_RELEASE)
+#ifdef LLCV_DOLBY_CAPTURE
+        if(!DolbyActive())
+#endif
+        if(!decodeAc3)
+#endif
         SuggestCaptureBuffer(audioPin, selectedAudioFormat.blockAlign);
 
         initializationStage = L"build audio-only sample path";
@@ -4643,9 +4954,7 @@ static bool AudioOnlyCaptureLoop() {
         if (FAILED(hr)) break;
         audioGrabber->SetOneShot(FALSE);
         audioGrabber->SetBufferSamples(FALSE);
-        audioCallback = CreateAudioSampleCallback(selectedAudioFormat);
-        hr = audioGrabber->SetCallback(audioCallback, 0);
-        if (FAILED(hr)) break;
+
 
         hr = CoCreateInstance(kNullRendererClassId, nullptr,
                               CLSCTX_INPROC_SERVER,
@@ -4660,8 +4969,23 @@ static bool AudioOnlyCaptureLoop() {
         if (FAILED(hr = GetFirstPin(audioNullRenderer, PINDIR_INPUT,
                                     &audioNullIn))) break;
         if (Surround51Active()) g_captureAudioRejected.store(true);
+#if defined(LLCV_RIFE_OPTIONAL) && !defined(LLCV_INTERPOLATION_RELEASE)
+        if(decodeAc3){hr=llcv::capture_audio::ConnectAc3Decoder(graph,audioPin,audioGrabberIn,selectedAudioFormat);if(FAILED(hr))break;}
+        else
+#endif
         if (FAILED(hr = graph->ConnectDirect(audioPin, audioGrabberIn,
                                              selectedAudioType))) break;
+#ifdef LLCV_DOLBY_CAPTURE
+        if(DolbyActive())audioCallback=new llcv::dolby::Grabber(llcv::dolby::ClassifyWire(*selectedAudioType),DeliverDolby,g_captureAudioRejected);
+        else
+#endif
+        audioCallback = CreateAudioSampleCallback(selectedAudioFormat);
+        hr = audioGrabber->SetCallback(audioCallback, 0);
+        if (FAILED(hr)) break;
+#ifdef LLCV_DOLBY_CAPTURE
+        if(DolbyActive()){g_captureAudioRejected.store(false);}
+        else
+#endif
         if (Surround51Active()) {
             hr = llcv::capture_audio::VerifySurroundConnection(audioGrabberIn, selectedAudioFormat);
             if (FAILED(hr)) break;
@@ -5179,7 +5503,21 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
         if (FAILED(hr)) break;
         // A device whose audio branch cannot be built can still be viewed.
         // The graph is not running yet, so the branch can be detached.
+#ifdef LLCV_DOLBY_CAPTURE
+        std::unique_ptr<veyra::source::AverMediaVendorAudio> vendorAudio;
+#endif
         const auto connectCaptureAudio = [&]() -> HRESULT {
+#ifdef LLCV_DOLBY_CAPTURE
+            if(g_settings.dolbyCapture&&!DolbyActive()){initializationStage=L"Dolby 5.1 requires WASAPI Shared";hr=VFW_E_TYPE_NOT_ACCEPTED;return hr;}
+            if(DolbyActive()&&g_settings.captureAudioDeviceId.empty()){
+                vendorAudio=std::make_unique<veyra::source::AverMediaVendorAudio>();
+                if(vendorAudio->start(DeliverDolby,g_activeCaptureDeviceName,selectedVideoDevicePath)){
+                    selectedAudioFormat=DolbyFormat();g_activeCaptureAudioDeviceName=L"AVerMedia Dolby";
+                    g_captureAudioAvailable=true;g_captureAudioRejected=false;return S_OK;
+                }
+                vendorAudio.reset(); // No matching installed component: try explicitly negotiated audio instead.
+            }
+#endif
             // Prefer an audio pin on the selected video filter. Many USB UVC
             // capture devices instead expose their capture audio as a separate
             // DirectShow audio-input filter, which is added to this same graph.
@@ -5189,7 +5527,7 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
             hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
             if (g_settings.captureAudioDeviceId.empty()) {
                 hr = Surround51Active()
-                    ? llcv::capture_audio::FindSurroundPin(capture, &audioPin)
+                    ? SurroundPin(capture, &audioPin)
                     : FindOutputPinByName(capture, kAudioPinName, &audioPin);
                 if (FAILED(hr) && !Surround51Active()) {
                     hr = FindOutputPinByMajorType(capture, MEDIATYPE_Audio, &audioPin);
@@ -5211,7 +5549,7 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
                 audioSource = audioCapture;
                 initializationStage = L"find audio output pin on separate capture filter";
                 hr = Surround51Active()
-                    ? llcv::capture_audio::FindSurroundPin(audioSource, &audioPin)
+                    ? SurroundPin(audioSource, &audioPin)
                     : FindOutputPinByMajorType(audioSource, MEDIATYPE_Audio, &audioPin);
                 if (Surround51Active()) g_captureAudioRejected.store(FAILED(hr));
             }
@@ -5221,8 +5559,16 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
             initializationStage = L"negotiate supported capture audio format";
             llcv::capture_audio::Rejection audioFormatRejection =
                 llcv::capture_audio::Rejection::Malformed;
+#ifdef LLCV_DOLBY_CAPTURE
+            if(DolbyActive()){selectedAudioType=llcv::dolby::Type(audioPin);selectedAudioFormat=DolbyFormat();}
+            else
+#endif
             selectedAudioType = llcv::capture_audio::SelectSupportedType(
                 audioPin, selectedAudioFormat, &audioFormatRejection, Surround51Active());
+#if defined(LLCV_RIFE_OPTIONAL) && !defined(LLCV_INTERPOLATION_RELEASE)
+            const bool decodeAc3=!selectedAudioType&&Surround51Active()&&llcv::capture_audio::OffersAc3(audioPin);
+            if(decodeAc3)selectedAudioType=llcv::capture_audio::PcmDecoderTarget();
+#endif
             if (!selectedAudioType) {
                 if (Surround51Active()) g_captureAudioRejected.store(true);
                 fwprintf(stderr, L"[audio] capture input rejected: %s\n",
@@ -5233,6 +5579,12 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
             }
             fwprintf(stderr, L"[audio] capture input: %s\n",
                      llcv::capture_audio::Describe(selectedAudioFormat).c_str());
+#if defined(LLCV_RIFE_OPTIONAL) && !defined(LLCV_INTERPOLATION_RELEASE)
+#ifdef LLCV_DOLBY_CAPTURE
+            if(!DolbyActive())
+#endif
+            if(!decodeAc3)
+#endif
             SuggestCaptureBuffer(audioPin, selectedAudioFormat.blockAlign);
 
             initializationStage = L"build supported PCM/float audio sample path";
@@ -5251,9 +5603,7 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
             if (FAILED(hr)) return hr;
             audioGrabber->SetOneShot(FALSE);
             audioGrabber->SetBufferSamples(FALSE);
-            audioCallback = CreateAudioSampleCallback(selectedAudioFormat);
-            hr = audioGrabber->SetCallback(audioCallback, 0);
-            if (FAILED(hr)) return hr;
+
 
             hr = CoCreateInstance(kNullRendererClassId, nullptr,
                                   CLSCTX_INPROC_SERVER,
@@ -5268,8 +5618,23 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
             if (FAILED(hr = GetFirstPin(audioNullRenderer, PINDIR_INPUT,
                                         &audioNullIn))) return hr;
             if (Surround51Active()) g_captureAudioRejected.store(true);
+#if defined(LLCV_RIFE_OPTIONAL) && !defined(LLCV_INTERPOLATION_RELEASE)
+            if(decodeAc3){hr=llcv::capture_audio::ConnectAc3Decoder(graph,audioPin,audioGrabberIn,selectedAudioFormat);if(FAILED(hr))return hr;}
+            else
+#endif
             if (FAILED(hr = graph->ConnectDirect(audioPin, audioGrabberIn,
                                                  selectedAudioType))) return hr;
+#ifdef LLCV_DOLBY_CAPTURE
+            if(DolbyActive())audioCallback=new llcv::dolby::Grabber(llcv::dolby::ClassifyWire(*selectedAudioType),DeliverDolby,g_captureAudioRejected);
+            else
+#endif
+            audioCallback = CreateAudioSampleCallback(selectedAudioFormat);
+            hr = audioGrabber->SetCallback(audioCallback, 0);
+            if (FAILED(hr)) return hr;
+#ifdef LLCV_DOLBY_CAPTURE
+            if(DolbyActive()){g_captureAudioRejected.store(false);}
+            else
+#endif
             if (Surround51Active()) {
                 hr = llcv::capture_audio::VerifySurroundConnection(audioGrabberIn, selectedAudioFormat);
                 g_captureAudioRejected.store(FAILED(hr));
@@ -5417,7 +5782,18 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
         const auto firstFrameStart = std::chrono::steady_clock::now();
         const auto firstFrameDeadline = firstFrameStart + std::chrono::seconds(10);
         initializationStage = L"wait for first valid capture frame";
+#ifdef LLCV_DOLBY_CAPTURE
+        auto dolbyCheck=GetTickCount64();const auto dolbyStarted=dolbyCheck;
+#endif
         while (g_running.load()) {
+#ifdef LLCV_DOLBY_CAPTURE
+            if(DolbyActive()&&g_captureAudioAvailable.load()&&GetTickCount64()-dolbyCheck>=500){
+                dolbyCheck=GetTickCount64();
+                if((vendorAudio&&vendorAudio->state().failed)||dolbyCheck>(std::max)(dolbyStarted,g_audioLastCaptureCallbackMs.load())+10000){
+                    initializationStage=L"Dolby: no decoded 48 kHz 5.1 signal";g_captureAudioRejected=true;initialized=false;hr=VFW_E_TYPE_NOT_ACCEPTED;break;
+                }
+            }
+#endif
             if (ExclusiveOutputSelected() && g_presentationClosing.load(std::memory_order_acquire))
                 break;
             // Focus and modal-window transitions must be serviced even when
@@ -5645,6 +6021,10 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
             } else {
                 hr = videoSample->GetPointer(&sampleData);
                 if (SUCCEEDED(hr) && sampleData) {
+#if defined(LLCV_RIFE_TEST) && !defined(LLCV_INTERPOLATION_RELEASE)
+                    if(rendererInputFormat==VideoPixelFormat::Nv12)
+                        llcv::rife_test::CaptureSequence(sampleData,preset.width,preset.height,stride,arrivalUs);
+#endif
 #ifdef LLCV_SPATIAL_PROTOTYPE
                     if ((rendererInputFormat==VideoPixelFormat::Nv12 && stride==1920) ||
                         (rendererInputFormat==VideoPixelFormat::P010 && stride==3840))
@@ -5676,7 +6056,7 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
             // an NV12 frame; the next capture callback still replaces stale
             // compressed input rather than extending an application queue.
             if (compressedVideo && !hasDecodedFrame) continue;
-            hr = renderer.presentUploaded();
+            hr = renderer.presentUploaded(arrivalUs);
             if (hr == DXGI_STATUS_OCCLUDED) {
                 continue;
             }
@@ -5688,6 +6068,7 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
                 initialized = false;
                 break;
             }
+            if (hr == S_FALSE) continue; // VFG already presented and counted the midpoint.
             const int64_t presentedUs =
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -6181,8 +6562,12 @@ static void UpdateAudioClient3Status(SettingsDialogState* state) {
         // between the previous mode and the current scan/verdict.
         return;
     }
+#ifdef LLCV_DOLBY_CAPTURE
+    if(state->surround51Check&&SendMessageW(state->surround51Check,CB_GETCURSEL,0,0)>0){
+#else
     if (state->surround51Check && SendMessageW(state->surround51Check,
             BM_GETCHECK, 0, 0) == BST_CHECKED) {
+#endif
         SetSettingsText(state->audioStatus, keys::Expand(IsEnglishUi()
             ? L"Console 5.1: output period is negotiated on start; actual value in Tab diagnostics."
             : L"콘솔 5.1: 출력 주기는 시작 시 협상 · 실제 값은 Tab 진단에서 확인",state->shortcutBindings).c_str());
@@ -7275,8 +7660,14 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
             state->muteBackgroundCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_settings.audioOnly = SendMessageW(
             state->audioOnlyCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+#ifdef LLCV_DOLBY_CAPTURE
+        const auto surroundChoice=SendMessageW(state->surround51Check,CB_GETCURSEL,0,0);
+        g_settings.consoleSurround51=surroundChoice==1||surroundChoice==2;
+        g_settings.dolbyCapture=surroundChoice==2;
+#else
         g_settings.consoleSurround51 = SendMessageW(
             state->surround51Check, BM_GETCHECK, 0, 0) == BST_CHECKED;
+#endif
         // The override only has meaning on an explicit P010 selection. Clear
         // any older saved value when switching back to a normal SDR format.
         g_settings.forceHdr10 =
@@ -7452,6 +7843,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         const UINT vendor = g_vsrGpuVendor.load(std::memory_order_acquire);
         state->vsrGpuUnavailable = !llcv::vsr::NvidiaAdapter(vendor);
         state->vsrGpuUnknown = vendor == 0;
+#ifdef LLCV_INTERPOLATION_RELEASE
+        const auto gpu = llcv::vfg::ProbeGpuSupport(vendor, g_vfgAdapterLuid.load(std::memory_order_acquire));
+        state->vfgGpuSupported = gpu != llcv::vfg::GpuSupport::Unavailable;
+        state->vfgRtx30 = gpu == llcv::vfg::GpuSupport::ExperimentalAmpere;
+#else
+        state->vfgRtx30=g_vfgRtx30.load();
+#endif
         const llcv::settings_ui::SettingsControlInitialValues initial{
             g_settings, IsEnglishUi(), state->asioAvailable, kAppVersionLabel,
             state->initialVideoPreset, state->captureDevices,
@@ -7482,6 +7880,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             }};
         llcv::settings_ui::CreateSettingsDialogControls(
             state, hwnd, instance, initial, population);
+#ifdef LLCV_INTERPOLATION_RELEASE
+        SetTimer(hwnd, llcv::settings_ui::control_id::IDC_SETTINGS_VFG_DOWNLOAD, 350, nullptr);
+#endif
 #ifdef LLCV_RECORDING
         state->recordingOptions=llcv::recording::sessionOptions;
         llcv::settings_ui::CreateRecordingSettings(state,hwnd);
@@ -7724,19 +8125,33 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
 
     case WM_DESTROY:
         StopSettingsQueries(state);
+#ifdef LLCV_INTERPOLATION_RELEASE
+        KillTimer(hwnd, llcv::settings_ui::control_id::IDC_SETTINGS_VFG_DOWNLOAD);
+#endif
 #ifdef LLCV_RECORDING
         KillTimer(hwnd,2071);
 #endif
         break;
-#ifdef LLCV_RECORDING
+#if defined(LLCV_RECORDING) || defined(LLCV_INTERPOLATION_RELEASE)
     case WM_TIMER:
+#ifdef LLCV_INTERPOLATION_RELEASE
+        if (state && wParam == llcv::settings_ui::control_id::IDC_SETTINGS_VFG_DOWNLOAD) {
+            if (state->activeTab == SettingsTab::Interpolation)
+                llcv::settings_ui::RefreshVfgDownloadControl(state);
+            return 0;
+        }
+#endif
+#ifdef LLCV_RECORDING
         if(state && wParam==2071 && state->activeTab==SettingsTab::Recording){
             state->recordingSnapshot=llcv::recording::recorder.GetSnapshot();
             state->recordingClosing=llcv::recording::ControlsClosing();
             llcv::settings_ui::ShowRecordingSettings(state);
             RequestRecordingEncoders(state,hwnd);
         }
+#endif
         return 0;
+#endif
+#ifdef LLCV_RECORDING
     case WM_NCDESTROY:
         if(g_recordingSettingsWindow==hwnd){
             g_recordingSettingsWindow=nullptr;
@@ -7755,6 +8170,81 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         return 0;
 #endif
     case WM_COMMAND:
+#ifdef LLCV_INTERPOLATION_RELEASE
+        if (state && LOWORD(wParam) == llcv::settings_ui::control_id::IDC_SETTINGS_VFG_DOWNLOAD && HIWORD(wParam) == BN_CLICKED) {
+            using namespace llcv::vfg_runtime;
+            const auto current = GetStatus().stage;
+            if (state->activeTab != SettingsTab::Interpolation || !state->InterpolationGpuAvailable() ||
+                (current != Stage::Idle && current != Stage::Failed)) return 0;
+            const auto title = state->english ? L"Download VFG components" : L"VFG 구성품 받기";
+            const auto description = state->english
+                ? L"Download about 416 MiB from NVIDIA (pypi.nvidia.com) and install the verified VFG components for this Windows user?\n\nNo sign-in is required. NVIDIA's terms apply. Playback works without VFG."
+                : L"NVIDIA(pypi.nvidia.com)에서 약 416 MiB를 받아 이 Windows 사용자 폴더에 VFG 구성품을 설치합니다.\n\n로그인은 필요하지 않습니다. NVIDIA 약관이 적용됩니다. 구성품 없이도 원본을 재생할 수 있습니다.\n\n다운로드를 시작하시겠습니까?";
+            if (MessageBoxW(hwnd, description, title, MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2) == IDYES) {
+                StartDownload();
+                llcv::settings_ui::RefreshVfgDownloadControl(state);
+            }
+            return 0;
+        }
+#endif
+#ifdef LLCV_FLYHIGH_TEST
+        if(state&&LOWORD(wParam)==llcv::rife_test::ProviderCommand&&HIWORD(wParam)==CBN_SELCHANGE){
+            const auto index=SendMessageW(state->interpolationProviderCombo,CB_GETCURSEL,0,0);
+            if(index>=0&&index<=1){llcv::rife_test::SelectProvider(static_cast<llcv::rife_test::Provider>(index));UpdateAdvancedControlVisibility(state);ShowTransientHud(llcv::rife_test::requested.load()?TransientHudContent::RifePending:TransientHudContent::RifeOff);}
+            return 0;
+        }
+#endif
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+        if(state&&LOWORD(wParam)==llcv::rife_test::AutoUiCommand&&HIWORD(wParam)==CBN_SELCHANGE){
+            const auto index=SendMessageW(state->rifeAutoUiCombo,CB_GETCURSEL,0,0);
+#ifdef LLCV_FLYHIGH_TEST
+            if(llcv::rife_test::IsFlyHigh()){
+                if(index>=0&&index<=1){llcv::rife_test::flyHighHud=index==1;ShowTransientHud(TransientHudContent::RifeAutoUi);}
+                return 0;
+            }
+#endif
+            if(index>=0&&index<=2){llcv::rife_test::SetSelectedHudWidth(index==1?16:index==2?32:0);ShowTransientHud(TransientHudContent::RifeAutoUi);}
+            return 0;
+        }
+#endif
+#ifdef LLCV_RIFE_TEST
+#if defined(LLCV_RIFE_OPTIONAL) && !defined(LLCV_INTERPOLATION_RELEASE)
+        if(state&&LOWORD(wParam)==llcv::rife_test::ProviderCommand&&HIWORD(wParam)==CBN_SELCHANGE){
+            if(IsWindowEnabled(state->interpolationProviderCombo))llcv::rife_test::SelectScale((SendMessageW(state->interpolationProviderCombo,CB_GETCURSEL,0,0)==1?llcv::rife_test::lastVfg:llcv::rife_test::lastRife).load());
+            UpdateAdvancedControlVisibility(state);return 0;
+        }
+#endif
+        if(state&&LOWORD(wParam)==llcv::rife_test::CheckCommand&&HIWORD(wParam)==BN_CLICKED){
+#ifdef LLCV_RIFE_OPTIONAL
+            llcv::rife_test::EnableComponents(state->InterpolationGpuAvailable()&&SendMessageW(state->rifeHalfCheck,BM_GETCHECK,0,0)==BST_CHECKED);
+            llcv::settings_ui::UpdateInterpolationAvailability(state);
+#else
+            llcv::rife_test::Request(SendMessageW(state->rifeHalfCheck,BM_GETCHECK,0,0)==BST_CHECKED);
+#endif
+            ShowTransientHud(llcv::rife_test::requested.load()?TransientHudContent::RifePending:TransientHudContent::RifeOff);
+            return 0;
+        }
+        if(state&&LOWORD(wParam)==llcv::rife_test::ScaleCommand&&HIWORD(wParam)==CBN_SELCHANGE){
+            const auto index=SendMessageW(state->rifeScaleCombo,CB_GETCURSEL,0,0);
+            if(index==CB_ERR) return 0;
+            const auto scale=static_cast<llcv::rife_test::Scale>(SendMessageW(state->rifeScaleCombo,CB_GETITEMDATA,index,0));
+#ifdef LLCV_INTERPOLATION_RELEASE
+            if(!llcv::rife_test::IsVfg(scale)) return 0;
+#endif
+            if(llcv::rife_test::SelectScale(scale)){
+#ifdef LLCV_RIFE_OPTIONAL
+                UpdateAdvancedControlVisibility(state);
+#endif
+                ShowTransientHud(llcv::rife_test::requested.load()?TransientHudContent::RifePending:TransientHudContent::RifeOff);
+            }
+            return 0;
+        }
+        if(state&&LOWORD(wParam)==llcv::rife_test::QualityCommand&&HIWORD(wParam)==BN_CLICKED){
+            llcv::rife_test::SetQualityComparison(SendMessageW(state->rifeQualityCheck,BM_GETCHECK,0,0)==BST_CHECKED);
+            ShowTransientHud(llcv::rife_test::requested.load()?TransientHudContent::RifePending:TransientHudContent::RifeOff);
+            return 0;
+        }
+#endif
 #ifdef LLCV_RECORDING
         if(state)state->recordingSnapshot=llcv::recording::recorder.GetSnapshot();
         if(state && HIWORD(wParam)==BN_CLICKED && LOWORD(wParam)==llcv::settings_ui::kRecordingPause){
@@ -7783,6 +8273,16 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         if (state && HIWORD(wParam)==BN_CLICKED && LOWORD(wParam)>=IDC_SETTINGS_SHORTCUT_FIRST &&
             LOWORD(wParam)<IDC_SETTINGS_SHORTCUT_FIRST+keys::Count) {
             llcv::settings_ui::BeginShortcutEdit(state,LOWORD(wParam)-IDC_SETTINGS_SHORTCUT_FIRST);
+            return 0;
+        }
+        if (state && state->shortcutListToggle && LOWORD(wParam)==IDC_SETTINGS_SHORTCUT_LIST && HIWORD(wParam)==BN_CLICKED) {
+            llcv::settings_ui::SettingsVisualUpdate repaint(hwnd);
+            llcv::settings_ui::CancelShortcutEdit(state);
+            state->showAllShortcuts=!state->showAllShortcuts;
+            state->compactPages[llcv::settings_ui::SettingsNavigationIndex(state->activeTab)]=0;
+            LayoutSettingsControls(state,state->layoutDpi);
+            UpdateAdvancedControlVisibility(state);
+            SetFocus(state->shortcutListToggle);
             return 0;
         }
         if (state && LOWORD(wParam)==IDC_SETTINGS_SHORTCUT_RESET && HIWORD(wParam)==BN_CLICKED) {
@@ -7848,26 +8348,94 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             }
             return 0;
         }
+#ifdef LLCV_RIFE_OPTIONAL
+#ifdef LLCV_DOLBY_CAPTURE
+        if(state&&LOWORD(wParam)==IDC_SURROUND_FORMAT_HELP&&HIWORD(wParam)==BN_CLICKED){
+            MessageBoxW(hwnd,state->english?
+                L"Leave this on Stereo for two-channel audio. For surround sound, match the format to your console's output.\n\n"
+                L"LPCM 5.1: Choose this for multichannel PCM. Your capture device must support 6- or 8-channel PCM.\n\n"
+                L"Dolby Digital 5.1: Choose this for Dolby Digital output. AVerMedia's dedicated capture mode also needs its Multichannel Audio software.\n\n"
+                L"Both surround modes use WASAPI Shared at 48 kHz. Neither converts stereo to 5.1." :
+                L"스테레오: 2채널 입력에 사용합니다.\n\n"
+                L"LPCM 5.1: 콘솔 출력이 다채널 PCM일 때 선택합니다.\n"
+                L"캡처 장치도 6채널 또는 8채널 PCM을 지원해야 합니다.\n\n"
+                L"Dolby Digital 5.1: 콘솔 출력이 Dolby Digital일 때 선택합니다.\n"
+                L"AVerMedia 전용 모드에는 Multichannel Audio가 필요합니다.\n\n"
+                L"두 5.1 옵션 모두 WASAPI Shared(48 kHz)에서 사용합니다.\n"
+                L"스테레오 입력을 5.1채널로 바꾸지는 않습니다.",
+                state->english?L"Capture audio format":L"캡처 오디오 형식 안내",MB_OK|MB_ICONINFORMATION);
+            return 0;
+        }
+#endif
+        if(state && LOWORD(wParam)==IDC_INTERPOLATION_QUALITY_HELP && HIWORD(wParam)==BN_CLICKED){
+#ifdef LLCV_INTERPOLATION_RELEASE
+            constexpr bool vfg=true;
+#else
+            const bool vfg=llcv::rife_test::IsVfg(llcv::rife_test::selectedScale.load());
+#endif
+            const wchar_t* guide = vfg
+                ? (state->english
+                    ? L"VFG generates at the SDR capture resolution: 1920 × 1080, 2560 × 1440 or 3840 × 2160. It works in low-latency, VSync and exclusive fullscreen modes. VSync needs a display refresh rate at least twice the capture rate, e.g. 120 Hz for 60 fps.\n\nLow is faster. Try Medium for moving outlines. Higher resolutions take more GPU time; if Tab often reports late frames, switch to Low or lower the capture resolution."
+                    : L"FHD(1920 × 1080), QHD(2560 × 1440), 4K UHD(3840 × 2160) SDR 입력을 지원합니다. 중간 프레임은 캡처 해상도로 생성합니다.\n\n"
+                      L"저지연(일반 출력), VSync, 독점 전체화면에서 사용할 수 있습니다. VSync에서는 모니터 주사율이 캡처 FPS의 두 배 이상이어야 합니다. 예: 60fps 캡처 → 120Hz 모니터.\n\n"
+                      L"낮음: 처리 속도를 우선합니다.\n"
+                      L"중간: 움직이는 물체의 윤곽이 자주 깨질 때 선택합니다.\n\n"
+                      L"두 옵션의 출력 해상도는 같습니다.\n"
+                      L"해상도가 높을수록 처리 시간이 늘어납니다. Tab 진단에 ‘기한 초과’가 자주 표시되면 ‘낮음’을 선택하거나 캡처 해상도를 낮춥니다.")
+                : (state->english
+                    ? L"RIFE requires a compatible NVIDIA GPU, 1080p SDR capture at 24–60 fps and a low-latency display mode. Tested on an RTX 3080; no minimum GPU has been established.\n\n"
+                      L"All three modes generate 1080p frames. Only the motion estimation resolution changes.\n"
+                      L"Performance (40%) · 768 × 432 — start here for 60 fps input.\n"
+                      L"Balanced (50%) · 960 × 540 — start here for 30 fps input.\n"
+                      L"Quality (70%) · 1344 × 756 — try at 30 fps if there is GPU time to spare.\n\n"
+                      L"At 60 fps, the default deadline is 8.33 ms from capture arrival. If a generated frame is late, the original is shown. Check late frames in Tab diagnostics."
+                    : L"RIFE는 호환되는 NVIDIA GPU와 FHD SDR 24~60fps 캡처 입력이 필요합니다. 화면 표시 방식은 ‘저지연’을 사용합니다.\n"
+                      L"RTX 3080에서 검증했으며, 최소 GPU 사양은 확인되지 않았습니다.\n\n"
+                      L"세 옵션 모두 FHD 프레임을 생성합니다. 비율은 움직임을 분석하는 해상도만 바꿉니다.\n"
+                      L"성능 (40%) · 768 × 432 — 60fps 입력에서 권장합니다.\n"
+                      L"균형 (50%) · 960 × 540 — 30fps 입력에서 권장합니다.\n"
+                      L"화질 (70%) · 1344 × 756 — 30fps에서 GPU에 여유가 있을 때 선택합니다.\n\n"
+                      L"60fps에서는 기본적으로 캡처 프레임 도착 후 8.33ms 안에 보간을 마쳐야 합니다. 늦으면 원본을 표시하며, 횟수는 Tab 진단에서 확인합니다.");
+            auto detail=keys::Expand(guide,state->shortcutBindings);
+#ifdef LLCV_INTERPOLATION_RELEASE
+            detail+=state->english?L"\n\nVFG requires NVIDIA Ada or Blackwell. The NVIDIA runtime is not included."
+                                  :L"\n\nNVIDIA Ada 또는 Blackwell GPU가 필요합니다. NVIDIA 실행 파일은 기본 설치판에 포함되지 않습니다.";
+#ifdef LLCV_VFG_AMPERE_COMPAT
+            detail+=state->english?L"\n\nThis build also tests unofficial RTX 30 (SM 8.6) compatibility with the verified runtime."
+                                  :L"\n\n이 빌드는 검증된 런타임으로 RTX 30(SM 8.6)의 비공식 호환도 시험합니다.";
+#endif
+#else
+            if(vfg&&state->vfgRtx30)
+                detail+=state->english?L"\n\nNVIDIA does not officially support VFG on RTX 30. LLCV has tested the RTX 3080."
+                                      :L"\n\nRTX 30 시리즈는 NVIDIA의 공식 VFG 지원 대상이 아닙니다. LLCV에서는 RTX 3080으로 확인했습니다.";
+            if(vfg)detail+=state->english?L"\n\nOpen-source notices: VFG_COMPAT_NOTICES.md beside the app."
+                                         :L"\n\n오픈소스 고지: 실행 파일과 같은 폴더의 VFG_COMPAT_NOTICES.md";
+#endif
+            MessageBoxW(hwnd,detail.c_str(),
+                vfg ? (state->english ? L"NVIDIA VFG quality" : L"NVIDIA VFG 품질")
+                    : (state->english ? L"RIFE requirements and quality" : L"RIFE 사양 및 품질 안내"),MB_OK|MB_ICONINFORMATION);
+            return 0;
+        }
+#endif
         if (LOWORD(wParam) == IDC_SETTINGS_VSR_GUIDE && HIWORD(wParam) == BN_CLICKED && state) {
-            // This is guidance, not a hardware capability/activation check.
-            // Request acceptance alone cannot establish NVIDIA's active state.
-            const std::wstring guide = IsEnglishUi()
-                ? L"SDR: CMAA2 reduces jagged edges before NIS upscaling. Default sharpness: 0.15.\n"
-                  L"CMAA2 High smooths more edges; Preserve retains more text and thin-line detail.\n"
-                  L"SDR and HDR10, up to 2× per axis. Native size and downscaling use the normal path.\n"
-                  L"HDR10 uses NIS alone, retaining PQ/BT.2020 and limiting contour changes against the unfiltered image.\n"
-                  L"CMAA2 correction is saved for SDR and does not apply in HDR10.\n"
-                  L"F6 toggles the selected method without changing it or its sharpness.\n"
-                  L"Display only: recordings/screenshots keep the capture source; OSD is drawn afterward.\n\n"
-                : L"SDR은 CMAA2로 계단현상을 보정한 뒤 NIS로 확대합니다. 기본 선명도는 0.15입니다.\n"
-                  L"높음은 경계를 더 적극적으로 보정하고, 보존형은 글씨·얇은 선의 원래 형태를 더 유지합니다.\n"
-                  L"SDR·HDR10에서 가로·세로 최대 2배 확대를 지원합니다. 원본 크기·축소는 기존 경로를 사용합니다.\n"
-                  L"HDR10은 NIS만 사용하며 PQ·BT.2020을 유지하고 원본 보간 영상 기준으로 과한 윤곽 변화를 제한합니다.\n"
-                  L"CMAA2 보정 선택은 SDR용으로 저장되며 HDR10에는 적용하지 않습니다.\n"
-                  L"F6은 선택한 방식과 선명도를 유지하면서 켜고 끕니다.\n"
-                  L"화면 표시에만 적용되며 녹화·스크린샷 원본은 유지합니다. OSD는 처리 후 표시합니다.\n\n";
-            MessageBoxW(hwnd, (guide+keys::Expand(llcv::ui_text::VsrSetupGuide(IsEnglishUi()),state->shortcutBindings)).c_str(),
-                IsEnglishUi() ? L"Upscaling — Setup guide" : L"업스케일링 — 설정 안내",
+            const auto method = SendMessageW(state->upscalerCombo, CB_GETCURSEL, 0, 0);
+            const bool en = IsEnglishUi();
+            const wchar_t* guide = method == 2 ? llcv::ui_text::VsrSetupGuide(en)
+                : method == 1 ? (en
+                    ? L"On SDR input, choose High to smooth jagged edges or Preserve to keep text and thin lines closer to the original. Adjust NIS sharpness to taste; the default is 0.15.\n\nHDR10 uses NIS only. Scaling works up to 2× per axis. F6 toggles the effect for playback only; recordings and screenshots keep the source image."
+                    : L"SDR 영상의 CMAA2 보정은 두 가지입니다.\n"
+                      L"높음: 계단현상을 더 적극적으로 줄입니다.\n"
+                      L"보존형: 글씨와 가는 선의 원래 모양을 더 잘 유지합니다.\n\n"
+                      L"NIS 선명도의 기본값은 0.15입니다. HDR10에서는 NIS만 적용합니다.\n"
+                      L"가로·세로 최대 2배까지 확대할 수 있습니다.\n\n"
+                      L"F6으로 효과를 켜거나 끌 수 있습니다. 녹화와 스크린샷에는 적용되지 않습니다.")
+                : (en ? L"Choose CMAA2 → NIS to smooth jagged edges in SDR and sharpen an enlarged picture. HDR10 uses NIS only.\n\nChoose NVIDIA VSR to use RTX Video Super Resolution on a supported NVIDIA GPU. Select a method and open this help again for setup instructions."
+                      : L"CMAA2 → NIS\nSDR 영상의 계단현상을 줄이고 확대 화면을 선명하게 표시합니다.\n"
+                        L"HDR10에서는 NIS만 사용합니다.\n\n"
+                        L"NVIDIA VSR\n지원하는 NVIDIA GPU에서 RTX Video Super Resolution으로 영상을 보정합니다.\n\n"
+                        L"방식을 선택한 뒤 이 도움말을 다시 열면 해당 설정 방법을 확인할 수 있습니다.");
+            MessageBoxW(hwnd, keys::Expand(guide,state->shortcutBindings).c_str(),
+                en ? L"Upscaling" : L"업스케일링",
                 MB_OK | MB_ICONINFORMATION);
             return 0;
         }
@@ -8973,6 +9541,10 @@ static LRESULT CALLBACK VideoHostSubclassProc(
         SetCursor(nullptr);
         return TRUE;
     }
+#ifdef LLCV_RECORDING
+    if (HandleGpuRecordingMouse(hwnd, msg, lParam))
+        return msg == WM_SETCURSOR ? TRUE : 0;
+#endif
     if (msg == WM_NCHITTEST) {
         const HWND parent = GetParent(hwnd);
         if (parent && AudioOsdHitTarget(parent, POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}) ==
@@ -9434,12 +10006,74 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
                   : UI_TEXT(L"끔 · 원본 PCM");
     // Keep the fixed diagnostics panel's line count: the warning belongs next
     // to actual input FPS, not on a new row below the audio diagnostics.
-    wchar_t captureRateWarning[64]{};
+    wchar_t captureRateWarning[384]{};
     if (!g_settings.audioOnly && RequestsExactCaptureRate() &&
         g_captureFrameRateOverdelivery.load(std::memory_order_relaxed)) {
         swprintf_s(captureRateWarning, IsEnglishUi()
             ? L" · Above requested %d" : L" · 요청 %d 초과", RequestedVideoFrameRate());
     }
+#ifdef LLCV_RIFE_TEST
+#ifdef LLCV_RIFE_OPTIONAL
+    if (llcv::rife_test::componentsEnabled.load(std::memory_order_acquire)) {
+        using namespace llcv::rife_test;
+        // Only sampled on a Tab-panel refresh. No timers, GPU queries or I/O.
+        struct Sample {uint64_t t,ok,late,busy,jobs,us;};
+        static thread_local std::array<Sample,24> points{};
+        static thread_local size_t next=0;
+        static thread_local uint64_t prevIntent=0,prevSession=0;
+        static thread_local Scale prevScale=Scale::Half;
+        const auto scale=selectedScale.load();const auto intent=intentChanges.load();
+        const auto session=g_osdTrackingStartMs.load();
+        const Sample now{nowMs,generated.load(),late.load(),busy.load(),jobs.load(),gpuUs.load()};
+        const auto& last=points[(next+points.size()-1)%points.size()];
+        if(scale!=prevScale||prevIntent!=intent||prevSession!=session||(last.t&&now.t-last.t>2000)){
+            points={};next=0;
+        }
+        prevScale=scale;prevIntent=intent;prevSession=session;
+        auto oldest=now;
+        for(const auto& p:points)if(p.t&&now.t-p.t<=10000&&p.t<oldest.t)oldest=p;
+        if(!points[(next+points.size()-1)%points.size()].t||
+           now.t-points[(next+points.size()-1)%points.size()].t>=500){
+            points[next]=now;next=(next+1)%points.size();
+        }
+        wchar_t fg[240]{},timing[40]=L"—";
+        if(now.jobs>oldest.jobs)swprintf_s(timing,L"%.2f ms",double(now.us-oldest.us)/(now.jobs-oldest.jobs)/1000);
+        const auto state=status.load();const auto enabled=requested.load();
+        swprintf_s(fg,IsEnglishUi()?L"\nInterpolation %s · last frame: %s %s\nLast %.1fs   Generated %llu · late %llu · busy %llu · GPU %s":
+            L"\n보간          %s · 직전 프레임: %s %s\n최근 %.1f초    생성 %llu · 기한 초과 %llu · 처리 중 건너뜀 %llu · GPU %s",
+            PresetLabel(scale,IsEnglishUi()),StateLabel(enabled,state,IsEnglishUi()),!enabled?L"":
+                state==Status::Failed?FallbackLabel(fallbackDetail.load(),IsEnglishUi()):
+                state==Status::Unsupported?llcv::presentation::VfgBlockText(g_vfgPresentationBlock.load(),IsEnglishUi()):L"",
+            (now.t-oldest.t)/1000.,now.ok-oldest.ok,now.late-oldest.late,now.busy-oldest.busy,timing);
+        wcscat_s(captureRateWarning,fg);
+    }
+#else
+    const auto rifeState=llcv::rife_test::status.load();
+    const wchar_t* rifeText=llcv::rife_test::StateLabel(llcv::rife_test::requested.load(),rifeState);
+    swprintf_s(captureRateWarning,L" · RIFE %s %s%s",llcv::rife_test::ScaleLabel(llcv::rife_test::selectedScale.load()),rifeText,
+        llcv::rife_test::qualityComparison.load()?L" · quality":L"");
+#ifdef LLCV_FLYHIGH_TEST
+    swprintf_s(captureRateWarning,L" · %s %s%s",llcv::rife_test::MethodLabel(),rifeText,llcv::rife_test::qualityComparison.load()?L" · quality":L"");
+#endif
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+    const int protect=llcv::rife_test::SelectedHudWidth();
+    if(protect
+#ifdef LLCV_FLYHIGH_TEST
+        &&!llcv::rife_test::IsFlyHigh()
+#endif
+        ){
+#ifdef LLCV_RIFE_TRAJECTORY
+            wcscat_s(captureRateWarning,L" · HUD trajectory");
+#else
+            wchar_t label[32]{};swprintf_s(label,L" · HUD %dpx",protect);wcscat_s(captureRateWarning,label);
+#endif
+        }
+#ifdef LLCV_FLYHIGH_TEST
+    if(llcv::rife_test::IsFlyHigh())wcscat_s(captureRateWarning,llcv::rife_test::flyHighHud.load()?L" · HUD ON":L" · HUD OFF");
+#endif
+#endif
+#endif
+#endif
     const wchar_t* osdFormat = IsEnglishUi()
         ? L"Capture diagnostics                              [Tab close]\n"
           L"Path          %s · %s\n"
@@ -9500,6 +10134,9 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
          ActiveAudioMode() == AudioMode::WasapiExclusive
              ? L"WASAPI Exclusive"
              : ActiveAudioMode() == AudioMode::Asio ? L"ASIO"
+#ifdef LLCV_DOLBY_CAPTURE
+                                                        : DolbyActive()?L"WASAPI Shared · Dolby → PCM 5.1"
+#endif
                                                         : Surround51Active() ? L"WASAPI Shared · PCM 5.1" : L"WASAPI Shared",
         outputName.c_str(),
         1000.0 * audioFrames / kSampleRate,
@@ -9853,9 +10490,58 @@ static void DrainRecordingBeforeDestroy(HWND hwnd) {
 // Shared by the viewer window and child-focus message loop. Resolve modifiers
 // once per key event; no allocations or work on the capture/render threads.
 static bool HandleViewerShortcut(HWND hwnd, WPARAM key, LPARAM flags, unsigned modifiers) {
-    if (key>=256) return false;
+    if (!key || key>=256) return false;
     const auto found=std::find(g_settings.shortcuts.begin(),g_settings.shortcuts.end(),
         static_cast<unsigned>(key)|modifiers);
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+#ifdef LLCV_RIFE_OPTIONAL
+    if(keys::Match(g_settings.shortcuts,keys::Action::HudCorrection,UINT(key),modifiers)){
+        if(!llcv::rife_test::componentsEnabled.load()||llcv::rife_test::IsVfg(llcv::rife_test::selectedScale.load())||!llcv::vsr::NvidiaAdapter(g_vsrGpuVendor.load()))return false;
+#else
+    if(key==VK_F4&&!modifiers&&found==g_settings.shortcuts.end()){
+#endif
+        if(!(flags&(LPARAM{1}<<30))){
+#ifdef LLCV_FLYHIGH_TEST
+            if(llcv::rife_test::IsFlyHigh())llcv::rife_test::flyHighHud=!llcv::rife_test::flyHighHud.load();else
+#endif
+            #ifdef LLCV_RIFE_OPTIONAL
+            llcv::rife_test::SetSelectedHudWidth(llcv::rife_test::SelectedHudWidth()?0:16);
+#else
+            llcv::rife_test::NextAutoUiWidth();
+#endif
+            ShowTransientHud(TransientHudContent::RifeAutoUi);}
+        return true;
+    }
+#endif
+#ifdef LLCV_RIFE_TEST
+#ifdef LLCV_RIFE_OPTIONAL
+    if(keys::Match(g_settings.shortcuts,keys::Action::FrameInterpolation,UINT(key),modifiers)){
+        if(!llcv::rife_test::componentsEnabled.load()||!llcv::vsr::NvidiaAdapter(g_vsrGpuVendor.load()))return false;
+#else
+    if(key==VK_F7&&!modifiers&&found==g_settings.shortcuts.end()){
+#endif
+        if(!(flags&(LPARAM{1}<<30))){llcv::rife_test::Request(!llcv::rife_test::requested.load());ShowTransientHud(llcv::rife_test::requested.load()?TransientHudContent::RifePending:TransientHudContent::RifeOff);}
+        return true;
+    }
+#ifndef LLCV_RIFE_OPTIONAL
+#if !defined(LLCV_RIFE_UHD_PROBE) || !defined(LLCV_RIFE_TRAJECTORY)
+    if(key==VK_F8&&!modifiers&&found==g_settings.shortcuts.end()){
+        if(!(flags&(LPARAM{1}<<30))){
+#ifdef LLCV_FLYHIGH_TEST
+            llcv::rife_test::NextProvider();
+#else
+            llcv::rife_test::NextScale();
+#endif
+            ShowTransientHud(llcv::rife_test::requested.load()?TransientHudContent::RifePending:TransientHudContent::RifeOff);}
+        return true;
+    }
+#endif
+    if(key==VK_F10&&!modifiers&&found==g_settings.shortcuts.end()){
+        if(!(flags&(LPARAM{1}<<30))){llcv::rife_test::SetQualityComparison(!llcv::rife_test::qualityComparison.load());ShowTransientHud(llcv::rife_test::requested.load()?TransientHudContent::RifePending:TransientHudContent::RifeOff);}
+        return true;
+    }
+#endif
+#endif
     if (found==g_settings.shortcuts.end()) return false;
     const auto action=static_cast<keys::Action>(found-g_settings.shortcuts.begin());
     // These two have their own modeless-help / source-frame routing below.
@@ -9938,11 +10624,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         SetTimer(hwnd, 1, g_settings.audioOnly ? 33 : 500, nullptr);
 #ifdef LLCV_RECORDING
-        if (!g_settings.audioOnly) {
-            if (!ExclusiveOutputSelected())
-                llcv::recording::AttachRecordingIndicator(g_videoHost,hwnd,IsEnglishUi(),g_settings.settingsLightTheme);
-            UpdateViewerRecordingIndicator(llcv::recording::recorder.GetSnapshot());
-        }
+        UpdateViewerRecordingIndicator(llcv::recording::recorder.GetSnapshot());
 #endif
         return 0;
 
@@ -10842,8 +11524,115 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     llcv::settings::AppSettings smokeValidation{};
     if (!llcv::settings::ApplySmokeVideoOptions(smokeArgs, smokeValidation)) return 2;
     LoadSettings();
+#ifdef LLCV_INTERPOLATION_RELEASE
+    llcv::vfg_runtime::Initialize(UserDataDirectory());
+#endif
+#if defined(LLCV_RIFE_TEST) && !defined(LLCV_INTERPOLATION_RELEASE)
+    // Direct launches get useful isolated defaults as well as scripted runs.
+    g_settings.capturePreset=VideoPreset::R1920x1080;
+    g_settings.videoPreset=VideoPreset::R1920x1080;
+    g_settings.displayMatchesCapture=true;g_settings.videoFrameRate=60;
+    g_settings.capture40Fps=false;g_settings.pixelFormat=VideoPixelFormat::Nv12;
+    g_settings.presentationMode=PresentationMode::AllowTearing;
+#ifdef LLCV_RIFE_UHD_PROBE
+    g_settings.capturePreset=g_settings.videoPreset=VideoPreset::R3840x2160;
+    g_settings.videoFrameRate=30;
+    llcv::rife_test::SelectScale(llcv::rife_test::Scale::Half);
+    llcv::rife_test::Request(true);
+#endif
+    const auto rifeResolution=CommandLineOptionValue(L"--rife-resolution");
+    if(!rifeResolution.empty()){
+        if(rifeResolution!=L"fhd"&&rifeResolution!=L"qhd")return 2;
+        if(rifeResolution==L"qhd"){g_settings.capturePreset=VideoPreset::R2560x1440;g_settings.videoPreset=VideoPreset::R2560x1440;}
+    }
+#endif
     bool smokeVideoOverride = false;
     if (!llcv::settings::ApplySmokeVideoOptions(smokeArgs, g_settings, &smokeVideoOverride)) return 2;
+#if defined(LLCV_RIFE_TEST) && !defined(LLCV_INTERPOLATION_RELEASE)
+    // Do not change capture-board tone-mapping controls in the private viewer.
+    smokeVideoOverride=true;
+    g_settings.checkForUpdates=false;
+    const auto rifeQuality=CommandLineOptionValue(L"--rife-compare-quality");
+#ifdef LLCV_RIFE_TRAJECTORY
+#ifndef LLCV_RIFE_OPTIONAL
+    llcv::rife_test::Request(true);
+#endif
+    llcv::rife_test::SelectAutoUiWidth(16);
+    llcv::rife_test::SetQualityComparison(true);
+#endif
+#ifdef LLCV_FLYHIGH_TEST
+    const auto method=CommandLineOptionValue(L"--interpolation-method");
+    if(!method.empty()&&method!=L"rife"&&method!=L"flyhigh")return 2;
+    llcv::rife_test::SelectProvider(method==L"rife"?llcv::rife_test::Provider::Rife:llcv::rife_test::Provider::FlyHigh);
+    const auto flyHud=CommandLineOptionValue(L"--flyhigh-hud");
+    if(!flyHud.empty()&&flyHud!=L"on"&&flyHud!=L"off")return 2;
+    llcv::rife_test::flyHighHud=flyHud!=L"off";
+#endif
+    if(!rifeQuality.empty()&&rifeQuality!=L"yes"&&rifeQuality!=L"no")return 2;
+    llcv::rife_test::SetQualityComparison(rifeQuality==L"yes");
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+    const auto autoUi=CommandLineOptionValue(L"--rife-auto-ui");
+    if(autoUi==L"16")llcv::rife_test::SelectAutoUiWidth(16);
+#ifdef LLCV_RIFE_TRAJECTORY
+    else if(autoUi==L"off")llcv::rife_test::SelectAutoUiWidth(0);
+    else if(!autoUi.empty())return 2;
+#else
+    else if(autoUi==L"32")llcv::rife_test::SelectAutoUiWidth(32);
+    else if(!autoUi.empty()&&autoUi!=L"off")return 2;
+#endif
+#endif
+    const auto rifeScale=CommandLineOptionValue(L"--rife-scale");
+    if(!rifeScale.empty()){
+#ifdef LLCV_RIFE_TRAJECTORY
+        if(rifeScale==L"40")llcv::rife_test::SelectScale(llcv::rife_test::Scale::Fast);
+        else if(rifeScale==L"70")llcv::rife_test::SelectScale(llcv::rife_test::Scale::High);
+#ifdef LLCV_RIFE_OPTIONAL
+        else if(rifeScale==L"vfg-low")llcv::rife_test::SelectScale(llcv::rife_test::Scale::VfgLow);
+        else if(rifeScale==L"vfg-medium")llcv::rife_test::SelectScale(llcv::rife_test::Scale::VfgMedium);
+#endif
+        else if(rifeScale==L"50")llcv::rife_test::SelectScale(llcv::rife_test::Scale::Half);
+        else return 2;
+#else
+        if(rifeScale==L"75")llcv::rife_test::SelectScale(llcv::rife_test::Scale::ThreeQuarter);
+        else if(rifeScale==L"50")llcv::rife_test::SelectScale(llcv::rife_test::Scale::Half);
+        else if(rifeScale==L"25")llcv::rife_test::SelectScale(llcv::rife_test::Scale::Quarter);
+        else return 2;
+#endif
+    }
+#ifdef LLCV_RIFE_OPTIONAL
+    if(llcv::rife_test::IsVfg(llcv::rife_test::selectedScale.load())&&!autoUi.empty())
+        llcv::rife_test::SetSelectedHudWidth(autoUi==L"16"?16:0);
+#endif
+    llcv::rife_test::cycleScales=CommandLineOptionValue(L"--rife-cycle-scales")==L"yes";
+    const bool rifeAutomation=llcv::rife_test::AllowAutomaticChanges(
+        std::find(smokeArgs.begin(),smokeArgs.end(),L"--smoke-test")!=smokeArgs.end()||
+        std::find(smokeArgs.begin(),smokeArgs.end(),L"--smoke-test-60")!=smokeArgs.end(),
+        CommandLineOptionValue(L"--rife-automated-check")==L"yes");
+    // Never allow unattended mode cycling in an interactive comparison.
+    if(llcv::rife_test::cycleScales&&!rifeAutomation)return 2;
+    llcv::rife_test::pairDirectory=CommandLineOptionValue(L"--rife-save-pair");
+    if(!llcv::rife_test::pairDirectory.empty())llcv::rife_test::pairAfterJobs=30;
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+    if(!llcv::rife_test::pairDirectory.empty())llcv::rife_test::pairAfterJobs=120;
+#endif
+    llcv::rife_test::sequenceDirectory=CommandLineOptionValue(L"--rife-save-sequence");
+    if(!llcv::rife_test::sequenceDirectory.empty())llcv::rife_test::pairAfterJobs=0;
+    const auto rifeLive=CommandLineOptionValue(L"--rife-live-test");
+    if(!rifeLive.empty()) {
+        if(rifeLive!=L"on"&&rifeLive!=L"off"&&rifeLive!=L"toggle")return 2;
+        if(rifeLive==L"toggle"&&!rifeAutomation)return 2;
+        g_settings.skipStartupSettings=true;g_settings.audioOnly=false;
+#ifdef LLCV_RIFE_OPTIONAL
+        llcv::rife_test::componentsEnabled.store(rifeLive!=L"off");
+#endif
+        llcv::rife_test::Request(rifeLive!=L"off");
+        if(rifeLive==L"toggle")llcv::rife_test::toggleEvery=120;
+        const auto upscale=CommandLineOptionValue(L"--rife-upscale");
+        if(!upscale.empty()&&upscale!=L"cmaa"&&upscale!=L"vsr")return 2;
+        g_settings.vsrEnabled=upscale==L"vsr";g_settings.cmaaNisEnabled=upscale==L"cmaa";
+        if(!upscale.empty()){g_settings.displayMatchesCapture=false;g_settings.videoPreset=VideoPreset::R2560x1440;g_settings.pixelPerfect=false;}
+    }
+#endif
 #ifdef LLCV_UPSCALING_TELEMETRY
     // Only the separately named diagnostic viewer defines this flag. Its
     // TestProfile boundary prevents reading/migrating/writing real settings.
@@ -10965,7 +11754,21 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     // Identify the default renderer once, before settings or immediate start.
     // No extension requests, capture probes or per-frame checks are added.
     const auto vsrAdapter = llcv::vsr::ProbeDefaultAdapter();
+#ifdef LLCV_INTERPOLATION_RELEASE
+    g_vfgAdapterLuid.store(vsrAdapter.luid, std::memory_order_release);
+#endif
     g_vsrGpuVendor.store(vsrAdapter.vendor, std::memory_order_release);
+    g_vfgRtx30.store(vsrAdapter.rtx30);
+#ifdef LLCV_INTERPOLATION_RELEASE
+    {
+        using namespace llcv::rife_test;
+        SelectScale(Scale::VfgMedium);
+        if (const auto method=CommandLineOptionValue(L"--smoke-test-frame-interpolation"); !method.empty()) {
+            if (!smokeVideoOverride || method!=L"vfg") return 2;
+            EnableComponents(true);
+        }
+    }
+#endif
     if (!llcv::vsr::NvidiaAdapter(vsrAdapter.vendor)) g_settings.vsrEnabled = false;
     const bool reviewStartupVersion = !g_suppressSettingsSave &&
         llcv::settings::StartupReviewRequired(SettingsPath(),kAppVersionLabel);
@@ -10973,7 +11776,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         (forceSettings || shiftLaunch || reviewStartupVersion || !g_settings.skipStartupSettings ||
          !llcv::presentation::SupportsCapture(g_settings.presentationMode,
                                                g_settings.pixelFormat, g_settings.audioOnly));
-    if (showStartupSettings &&
+    // Exercise settings and playback in the same disposable smoke profile.
+    // Require explicit video overrides so this route never sends vendor HDR controls.
+    const bool settingsSmokeTest = std::find(smokeArgs.begin(), smokeArgs.end(),
+                                             L"--smoke-test-ui") != smokeArgs.end();
+    if (settingsSmokeTest && (!smokeTest || !smokeVideoOverride || audioOnlySmokeTest || exclusiveProbe))
+        return 2;
+    if ((showStartupSettings || settingsSmokeTest) &&
         !ShowSettingsDialog(hInst, forceSettings,nullptr,reviewStartupVersion)) return 0;
     g_activeAudioMode.store(g_settings.audioMode, std::memory_order_release);
     if (g_settings.audioOnly) {
@@ -11141,6 +11950,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
 #ifdef LLCV_SPATIAL_PROTOTYPE
         g_spatialInteractivePreview ? L"LLCV · CMAA2 → NIS 0.15 · ON | F9: 비교 전환"
                                    : L"LLCV · Spatial Upscaling Prototype",
+#elif defined(LLCV_RIFE_OPTIONAL)
+        L"LLCV",
+#elif defined(LLCV_RIFE_UHD_PROBE) && defined(LLCV_RIFE_TRAJECTORY)
+        L"LLCV · 4K30 Half · F4 HUD 보정 · F7 보간",
+#elif defined(LLCV_RIFE_AUTO_UI_TEST)
+        L"LLCV · RIFE · F7 보간 · F4 자동 HUD 보호 · F8 크기",
+#elif defined(LLCV_RIFE_TEST)
+        L"LLCV · RIFE 테스트 · F7 켜기/끄기 · F8 크기 전환",
 #else
         L"LLCV",
 #endif
@@ -11267,8 +12084,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                     g_restartToSettings.store(true, std::memory_order_release);
                 } else if (Surround51Active() && g_captureAudioRejected.load(std::memory_order_acquire)) {
                     MessageBoxW(hwnd, IsEnglishUi()
+#ifdef LLCV_DOLBY_CAPTURE
+                        ? L"No valid 48 kHz surround input. For Dolby, select Dolby Digital 5.1 on the console. AVerMedia vendor capture requires the installed Multichannel Audio component."
+                        : L"48 kHz 서라운드 입력이 없습니다. Dolby 모드에서는 콘솔 출력을 Dolby Digital 5.1로 설정하세요. AVerMedia 전용 경로는 공식 Multichannel Audio 설치가 필요합니다.",
+#elif defined(LLCV_RIFE_OPTIONAL) && !defined(LLCV_INTERPOLATION_RELEASE)
+                        ? L"Requires 48 kHz surround PCM, or a direct AC-3 device and a 5.1 decoder. PCM-labelled bitstreams are unsupported."
+                        : L"48 kHz 멀티채널 PCM 또는 AC-3를 직접 제공하는 장치와 5.1 디코더가 필요합니다. PCM으로 표시되는 압축 신호는 지원하지 않습니다.",
+#else
                         ? L"The capture device did not provide a compatible 48 kHz 5.1/7.1 PCM input.\n\nSet the console to 5.1 LPCM and use a multichannel capture input. If unsupported, turn off Console LPCM 5.1 and select stereo on the console. Dolby/DTS bitstreams are not supported."
                         : L"캡처 장치에서 호환되는 48 kHz 5.1/7.1 PCM 입력을 받지 못했습니다.\n\n콘솔을 5.1 LPCM으로 설정하고 다채널 캡처 입력을 선택하세요. 지원하지 않는 장치라면 콘솔 LPCM 5.1 옵션을 끄고 콘솔도 스테레오로 바꿔 주세요. Dolby/DTS 비트스트림은 지원하지 않습니다.",
+#endif
                         L"LLCV", MB_OK | MB_ICONERROR);
                     g_restartToSettings.store(true, std::memory_order_release);
                 } else if (g_captureAudioRejected.load(std::memory_order_acquire)) {
@@ -11445,6 +12270,42 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
                  static_cast<unsigned long long>(
                      g_videoReplacedFrames.load(std::memory_order_acquire)),
                  g_videoAppLatencyUs.load(std::memory_order_acquire) / 1000.0);
+#ifdef LLCV_RIFE_TEST
+        fwprintf(stderr,L"[rife-live] generated=%llu late=%llu busy=%llu state=%d\n",
+            static_cast<unsigned long long>(llcv::rife_test::generated.load()),
+            static_cast<unsigned long long>(llcv::rife_test::late.load()),
+            static_cast<unsigned long long>(llcv::rife_test::busy.load()),
+            int(llcv::rife_test::status.load()));
+        fwprintf(stderr,L"[rife-live] policy=%s selected=%s\n",llcv::rife_test::qualityComparison.load()?L"quality-compare":L"low-latency",llcv::rife_test::ScaleLabel(llcv::rife_test::selectedScale.load()));
+#ifdef LLCV_FLYHIGH_TEST
+        fwprintf(stderr,L"[flyhigh] method=%s completed-intermediates=%llu late=%llu busy=%llu native-hud=%d\n",
+            llcv::rife_test::MethodLabel(),static_cast<unsigned long long>(llcv::rife_test::flyHighGenerated.load()),
+            static_cast<unsigned long long>(llcv::rife_test::flyHighLate.load()),static_cast<unsigned long long>(llcv::rife_test::flyHighBusy.load()),llcv::rife_test::flyHighHud.load());
+#endif
+        fwprintf(stderr,L"[rife-live] intent-changes=%llu automated-toggle-every=%u automated-scale-cycle=%d\n",
+            static_cast<unsigned long long>(llcv::rife_test::intentChanges.load()),llcv::rife_test::toggleEvery,llcv::rife_test::cycleScales);
+        fwprintf(stderr,L"[rife-pair] saved=%u failed=%u\n",llcv::rife_test::pairsSaved.load(),llcv::rife_test::pairSaveFailures.load());
+        fwprintf(stderr,L"[rife-sequence] saved=%u\n",llcv::rife_test::sequencesSaved.load());
+#ifdef LLCV_RIFE_AUTO_UI_TEST
+        fwprintf(stderr,L"[rife-auto-ui] selected=%d source pixels; causal GPU detection, no frame queue\n",llcv::rife_test::SelectedHudWidth());
+        fwprintf(stderr,L"[rife-auto-ui] seed-inputs=%llu pair-inputs=%llu explicit-host-resets=%llu\n",
+            static_cast<unsigned long long>(llcv::rife_test::hudSeedInputs.load()),
+            static_cast<unsigned long long>(llcv::rife_test::hudPairInputs.load()),
+            static_cast<unsigned long long>(llcv::rife_test::hudExplicitResets.load()));
+#endif
+        const auto rifeJobs=llcv::rife_test::jobs.load();
+        fwprintf(stderr,L"[rife-live] GPU pack+inference+unpack mean=%.3f ms max=%.3f ms samples=%llu\n",
+            rifeJobs?double(llcv::rife_test::gpuUs.load())/rifeJobs/1000:0,
+            llcv::rife_test::maxGpuUs.load()/1000.0,static_cast<unsigned long long>(rifeJobs));
+        for(auto scale:llcv::rife_test::Scales){
+            const auto index=llcv::rife_test::ScaleIndex(scale),count=llcv::rife_test::modeJobs[index].load();
+            fwprintf(stderr,L"[rife-scale] mode=%s generated=%llu late=%llu jobs=%llu gpu-mean=%.3f ms cancelled=%llu\n",
+                llcv::rife_test::ScaleLabel(scale),static_cast<unsigned long long>(llcv::rife_test::modeGenerated[index].load()),
+                static_cast<unsigned long long>(llcv::rife_test::modeLate[index].load()),static_cast<unsigned long long>(count),
+                count?double(llcv::rife_test::modeGpuUs[index].load())/count/1000:0,
+                static_cast<unsigned long long>(llcv::rife_test::modeCancelled[index].load()));
+        }
+#endif
         fwprintf(
             stderr,
             L"[smoke-audio] packet=%u frames/%.2f ms interval=%.2f ms "

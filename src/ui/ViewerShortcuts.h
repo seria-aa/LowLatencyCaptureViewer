@@ -33,30 +33,66 @@ inline constexpr std::array<Shortcut,shortcuts::Count> kShortcuts{{
     ,{L"F9",L"녹화 시작 / 종료",L"Start / stop recording",true}
 #endif
     ,{L"M",L"재생 음소거 켜기/끄기",L"Toggle playback mute",false}
-}};
-inline const wchar_t* VideoOnlyHint(bool english) {
-#ifdef LLCV_RECORDING
-    return english ? L"F3, F5, F6, F9 and F12 are available in video mode."
-                   : L"F3 · F5 · F6 · F9 · F12는 영상 모드에서 사용합니다.";
-#else
-    return english ? L"F3, F5, F6 and F12 are available in video mode."
-                   : L"F3 · F5 · F6 · F12는 영상 모드에서 사용합니다.";
+#ifdef LLCV_RIFE_OPTIONAL
+    ,{L"F4",L"HUD 보정 켜기/끄기",L"Toggle HUD correction",true}
+    ,{L"F7",L"프레임 보간 켜기/끄기",L"Toggle frame interpolation",true}
 #endif
+}};
+// Display order belongs to the UI; action indices also identify saved bindings.
+inline constexpr auto kDisplayOrder = [] {
+#ifdef LLCV_INTERPOLATION_RELEASE
+    std::array<size_t,shortcuts::Count-1> order{};
+#else
+    std::array<size_t,shortcuts::Count> order{};
+#endif
+    const auto rank=[](unsigned key) {
+        return key>=VK_F1 && key<=VK_F24 ? key-VK_F1 :
+            key==VK_TAB ? 24u : key==VK_ESCAPE ? 26u : 25u;
+    };
+    size_t count=0;
+    for (size_t i=0;i<shortcuts::Count;++i) {
+#ifdef LLCV_INTERPOLATION_RELEASE
+        if (i==static_cast<size_t>(shortcuts::Action::HudCorrection)) continue;
+#endif
+        size_t pos=count++;
+        while (pos && rank(shortcuts::Defaults[order[pos-1]])>rank(shortcuts::Defaults[i])) {
+            order[pos]=order[pos-1]; --pos;
+        }
+        order[pos]=i;
+    }
+    return order;
+}();
+// F1 is a playback reference, not a second copy of the editable F2 list.
+inline constexpr shortcuts::Action kQuickActions[]{
+    shortcuts::Action::Fullscreen, shortcuts::Action::Mute, shortcuts::Action::Vsr,
+#ifdef LLCV_RIFE_OPTIONAL
+    shortcuts::Action::FrameInterpolation,
+#endif
+#ifdef LLCV_RECORDING
+    shortcuts::Action::Recording,
+#endif
+    shortcuts::Action::Screenshot
+};
+inline const wchar_t* VideoOnlyHint(bool english) {
+    return english ? L"* Video mode only" : L"* 영상 모드 전용";
 }
 inline const wchar_t* Shortcuts(bool english, bool alignedColumns = false) {
     static const auto text=[] {
         std::array<std::wstring,4> result;
-        for (int aligned=0;aligned<2;++aligned) for (int language=0;language<2;++language) for (const auto& shortcut:kShortcuts) {
+        for (int aligned=0;aligned<2;++aligned) for (int language=0;language<2;++language) for (auto index:kDisplayOrder) {
+            const auto& shortcut=kShortcuts[index];
             auto& value=result[aligned*2+language];
             if (!value.empty()) value+=L"\r\n";
-            value+=shortcut.key; value+=aligned ? L"\t" : L"  "; value+=language ? shortcut.english : shortcut.korean;
+            value+=shortcuts::Defaults[index] ? shortcut.key : (language ? L"Unassigned" : L"미지정");
+            value+=aligned ? L"\t" : L"  "; value+=language ? shortcut.english : shortcut.korean;
             if (shortcut.videoOnly) value+=language ? L" (video mode)" : L" (영상 모드)";
         }
         return result;
     }();
     return text[(alignedColumns ? 2 : 0)+(english ? 1 : 0)].c_str();
 }
-inline std::wstring KeyLabel(size_t index,const shortcuts::Bindings& bindings) {
+inline std::wstring KeyLabel(size_t index,const shortcuts::Bindings& bindings,bool english=false) {
+    if (index<shortcuts::Count && !bindings[index]) return english ? L"Unassigned" : L"미지정";
     return index<shortcuts::Count ? shortcuts::Label(bindings[index]) : L"Esc";
 }
 } // namespace llcv::viewer_help

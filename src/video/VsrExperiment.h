@@ -13,9 +13,21 @@ namespace llcv::vsr {
 enum class Mode { Disabled, Off, On };
 enum class State { Untouched, Bypassed, Off, Requested, Rejected, Unknown };
 constexpr bool NvidiaAdapter(UINT vendor) { return vendor == 0x10de; }
+// Display hint only; device/effect initialization still decides availability.
+inline bool IsGeForceRtx30(UINT vendor,const wchar_t* name){
+    if(!NvidiaAdapter(vendor)||!name)return false;
+    const auto token=wcsstr(name,L"GeForce RTX 30");
+    if(!token)return false;
+    const wchar_t* suffix=token+wcslen(L"GeForce RTX 30");
+    return suffix[0]>=L'0'&&suffix[0]<=L'9'&&suffix[1]>=L'0'&&suffix[1]<=L'9'&&
+           (suffix[2]==0||suffix[2]==L' ');
+}
 struct AdapterProbe {
+    bool rtx30=false;
+    bool prefersVfg=false;
     HRESULT result = E_FAIL;
     UINT vendor = 0;
+    LUID luid{};
 };
 // Startup only, using the same default-device policy as the renderer. This
 // identifies the selected vendor, not RTX capability or effect activation.

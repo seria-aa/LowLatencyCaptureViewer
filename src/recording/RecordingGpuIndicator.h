@@ -30,6 +30,7 @@ public:
     bool Visible() const noexcept { return visible_; }
     ID3D11ShaderResourceView* ShaderView() const noexcept { return view_.Get(); }
     RECT QuadRect(UINT width, UINT height) const noexcept;
+    RECT CardRect(UINT width, UINT height) const noexcept;
 
 private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture_;
@@ -39,6 +40,7 @@ private:
     Microsoft::WRL::ComPtr<IDWriteTextFormat> format_;
     uint64_t revision_ = UINT64_MAX;
     UINT dpi_ = 96;
+    RECT card_{};
     bool visible_ = false;
 };
 

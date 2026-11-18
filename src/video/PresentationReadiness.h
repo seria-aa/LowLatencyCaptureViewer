@@ -27,10 +27,11 @@ class Readiness {
             ready_ = true;
     }
     void Presented() { ready_ = false; }
-    HRESULT Poll() {
+    HRESULT Poll() { return Wait(0); }
+    HRESULT Wait(DWORD timeoutMs) {
         if (Ready())
             return S_OK;
-        const DWORD result = WaitForSingleObject(handle_, 0);
+        const DWORD result = WaitForSingleObject(handle_, timeoutMs);
         if (result == WAIT_OBJECT_0) {
             ready_ = true;
             return S_OK;

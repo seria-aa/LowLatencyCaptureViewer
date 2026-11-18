@@ -31,7 +31,7 @@ public:
     Output& operator=(const Output&) = delete;
 
     // Owner-thread callback after initialization, immediately before start.
-    bool Start(void (*beforeStart)(void*) = nullptr);
+    bool Start(void (*beforeStart)(void*) = nullptr, bool (*stillWanted)() = nullptr);
     void Stop();
     bool Running() const { return running_; }
     long BufferFrames() const { return bufferFrames_; }

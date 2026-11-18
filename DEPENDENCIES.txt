@@ -1,4 +1,4 @@
-LLCV v2.2.1 - dependencies
+LLCV v2.3.0 - dependencies
 =========================
 
 License: GNU General Public License v3.0 or later. See the root LICENSE file.
@@ -33,7 +33,7 @@ long sessions if the diagnostics show repeated imbalance.
 No mpv.exe, third-party codec pack or companion executable is required.
 Recording mux DLLs are included with the application.
 
-Recording (v2.2.1)
+Recording (v2.3.0)
 ------------------
 H.264/HEVC/AV1 crash-tolerant MP4 storage uses a mux-only FFmpeg 8.1.3 build:
 avformat-62.dll, avcodec-62.dll and avutil-60.dll. Encoding still uses the
@@ -47,6 +47,16 @@ LLCV_RECORDING_FFMPEG_ROOT to its install directory. Source SHA256 and build
 configuration are pinned in that script. Preserve the SDK's licenses directory
 when distributing the application. FFmpeg source: https://ffmpeg.org/
 The recording-OFF application does not link or load these libraries.
+
+Optional frame interpolation (v2.3.0)
+------------------------------------
+The base installer and portable ZIP do not ship CUDA, TensorRT, VFG runtime
+DLLs or RIFE engines. They use delayed loading only after users opt in.
+RIFE requires a qualified GPU-specific engine and matching TensorRT/CUDA
+runtime. VFG uses the native NVIDIA path on Ada or Blackwell GPUs. This build
+also includes GPL-3.0-only experimental compatibility for SM 8.6 with an
+exact NVIDIA runtime; see VFG-RTX30-NOTICE.txt. No NVIDIA DLLs or models are
+bundled, and RIFE is not exposed in the release.
 
 Settings typography
 -------------------

@@ -140,6 +140,7 @@ void CheckFields(HWND body) {
     std::vector<RECT> fields;
     HDC dc=GetDC(body);
     for (HWND child=GetWindow(body,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT)) {
+        if (!(GetWindowLongPtrW(child,GWL_STYLE)&WS_VISIBLE)) continue;
         RECT r{}; GetWindowRect(child,&r); MapWindowPoints(nullptr,body,reinterpret_cast<POINT*>(&r),2);
         Check(r.left>=0 && r.right<=bounds.right,"text stays within body width");
         if (r.top<0 || r.bottom>bounds.bottom-MulDiv(16,WindowTestAccess::Dpi(body),96))
@@ -164,7 +165,8 @@ void CheckFields(HWND body) {
     }
     ReleaseDC(body,dc);
     // Each keyboard description is beside its key, not a prose paragraph.
-    for (int i=0;i<static_cast<int>(llcv::viewer_help::kShortcuts.size());++i) {
+    for (int i=0;i<static_cast<int>(std::size(llcv::viewer_help::kDisplayOrder));++i) {
+        if (!(GetWindowLongPtrW(GetDlgItem(body,205+2*i),GWL_STYLE)&WS_VISIBLE)) continue;
         RECT key{},action{};
         GetWindowRect(GetDlgItem(body,205+2*i),&key);
         GetWindowRect(GetDlgItem(body,206+2*i),&action);
@@ -194,6 +196,7 @@ void Snapshot(HWND window,const std::filesystem::path& path) {
     const HWND body=GetDlgItem(window,100);
     HDC textDc=GetDC(body);
     for(HWND child=GetWindow(body,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT)) {
+        if (!(GetWindowLongPtrW(child,GWL_STYLE)&WS_VISIBLE)) continue;
         RECT field{}; GetWindowRect(child,&field); OffsetRect(&field,-r.left,-r.top);
         SendMessageW(body,WM_CTLCOLORSTATIC,reinterpret_cast<WPARAM>(textDc),reinterpret_cast<LPARAM>(child));
         const COLORREF ink=GetTextColor(textDc);
@@ -295,7 +298,7 @@ void TestDisplayLayouts(TestWindow& help,HWND owner,const char* snapshots) {
         auto custom=keys::Defaults;
         if(bindings) {
             if(bindings==2) for(size_t i=0;i<custom.size();++i)
-                custom[i]=keys::Ctrl|keys::Alt|keys::Shift|(VK_F13+unsigned(i));
+                custom[i]=keys::Ctrl|keys::Alt|keys::Shift|(i<12 ? VK_F13+unsigned(i) : 'A'+unsigned(i-12));
             custom[0]=keys::Ctrl|keys::Alt|keys::Shift|VK_RIGHT;
             custom[8]=keys::Ctrl|keys::Alt|keys::Shift|VK_HOME;
         }
@@ -528,6 +531,7 @@ int main(int argc,char** argv) {
     for (bool english:{false,true}) {
         auto custom=llcv::shortcuts::Defaults;
         custom[0]=VK_F9;
+        custom[2]=0; // An explicitly cleared binding must disappear from F1.
 #ifdef LLCV_RECORDING
         custom[static_cast<size_t>(llcv::shortcuts::Action::Recording)]=llcv::shortcuts::Ctrl|'R';
 #endif
@@ -537,12 +541,19 @@ int main(int argc,char** argv) {
         help.SetBindings(custom);
         help.Toggle(owner,english,L"v-test",SW_HIDE);
         HWND dialog=help.Handle(), body=GetDlgItem(dialog,100);
-        Check(Text(GetDlgItem(body,205))==L"F9","help shows reassigned help key");
+        const auto footer=Text(FindWindowExW(dialog,nullptr,L"STATIC",nullptr));
+        for(size_t i=0;i<llcv::viewer_help::kDisplayOrder.size();++i){
+            auto index=llcv::viewer_help::kDisplayOrder[i];
+            HWND key=GetDlgItem(body,205+2*int(i)),desc=GetDlgItem(body,206+2*int(i));
+            Check(!!(GetWindowLongPtrW(key,GWL_STYLE)&WS_VISIBLE)==!!custom[index] &&
+                  !!(GetWindowLongPtrW(desc,GWL_STYLE)&WS_VISIBLE)==!!custom[index],"only bound F1 rows are visible");
+            if(custom[index])Check(Text(key)==llcv::viewer_help::KeyLabel(index,custom,english),"F1 uses actual binding");
+        }
         std::wstring content;
         for (HWND field=GetWindow(body,GW_CHILD);field;field=GetWindow(field,GW_HWNDNEXT))
             content+=Text(field)+L"\n";
         Check(content.find(L"F12")==std::wstring::npos && content.find(L"F10")!=std::wstring::npos &&
-              content.find(L"Ctrl+Alt+Shift+Space")!=std::wstring::npos && content.find(L"Ctrl+Q")!=std::wstring::npos,
+              content.find(L"Ctrl+Alt+Shift+Space")!=std::wstring::npos && footer.find(L"Ctrl+Q")!=std::wstring::npos && footer.find(L"F9")!=std::wstring::npos,
               "help rows, video-only hint and screenshot instructions use current bindings");
         CheckFields(body);
 #ifdef LLCV_RECORDING
@@ -588,7 +599,7 @@ int main(int argc,char** argv) {
         auto custom=llcv::shortcuts::Defaults;
         if(remapped) {
             if(remapped==2) for(size_t i=0;i<custom.size();++i)
-                custom[i]=llcv::shortcuts::Ctrl|llcv::shortcuts::Alt|llcv::shortcuts::Shift|(VK_F13+unsigned(i));
+                custom[i]=llcv::shortcuts::Ctrl|llcv::shortcuts::Alt|llcv::shortcuts::Shift|(i<12 ? VK_F13+unsigned(i) : 'A'+unsigned(i-12));
             custom[0]=llcv::shortcuts::Ctrl|llcv::shortcuts::Alt|llcv::shortcuts::Shift|VK_RIGHT;
             custom[8]=llcv::shortcuts::Ctrl|llcv::shortcuts::Alt|llcv::shortcuts::Shift|VK_HOME;
         }
@@ -596,7 +607,7 @@ int main(int argc,char** argv) {
         help.SetBindings(custom); help.Toggle(owner,english,L"v-test",SW_HIDE,light);
         const UINT dpi=GetDpiForWindow(help.Handle());
         MINMAXINFO minimum{}; SendMessageW(help.Handle(),WM_GETMINMAXINFO,0,reinterpret_cast<LPARAM>(&minimum));
-        RECT frame{0,0,MulDiv(760,dpi,96),MulDiv(640,dpi,96)};
+        RECT frame{0,0,MulDiv(detail::kMinimumClientWidth,dpi,96),MulDiv(detail::kMinimumClientHeight,dpi,96)};
         AdjustWindowRectExForDpi(&frame,static_cast<DWORD>(GetWindowLongPtrW(help.Handle(),GWL_STYLE)),FALSE,
             static_cast<DWORD>(GetWindowLongPtrW(help.Handle(),GWL_EXSTYLE)),dpi);
         MONITORINFO monitor{sizeof(monitor)};
@@ -604,7 +615,7 @@ int main(int argc,char** argv) {
         Check(minimum.ptMinTrackSize.x==std::min(frame.right-frame.left,monitor.rcWork.right-monitor.rcWork.left) &&
               minimum.ptMinTrackSize.y==std::min(frame.bottom-frame.top,monitor.rcWork.bottom-monitor.rcWork.top),
               "native minimum keeps two-column guide readable without scrolling");
-        for(int height:{640,680,768}) for(int width:{760,820,1024,820}) {
+        for(int height:{detail::kMinimumClientHeight,640,680,768}) for(int width:{760,820,1024,820}) {
             ResizeClient(help.Handle(),width,height);
             CheckFooter(help.Handle()); CheckFields(GetDlgItem(help.Handle(),100));
             if(saveSnapshots && remapped && width==760 && height==640)

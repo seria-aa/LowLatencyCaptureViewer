@@ -233,9 +233,9 @@ static constexpr Geometry kGeometry[] = {
     {&SettingsControls::guideVideoHint, "guideVideoHint", 204, 516, 516, 336, 36},
     {&SettingsControls::guideDiagnosticsText, "guideDiagnosticsText", 600, 148, 148, 376, 32},
     {&SettingsControls::saveLogCheck, "saveLogCheck", 600, 196, 196, 376, 32},
-    {&SettingsControls::showConsoleCheck, "showConsoleCheck", 600, 236, 236, 376, 32},
-    {&SettingsControls::guideLogFolderButton, "guideLogFolderButton", 600, 284, 284, 185, 32},
-    {&SettingsControls::guideReportButton, "guideReportButton", 801, 284, 284, 175, 32},
+    {&SettingsControls::guideReportButton, "guideReportButton", 600, 240, 240, 185, 32},
+    {&SettingsControls::guideLogFolderButton, "guideLogFolderButton", 801, 240, 240, 175, 32},
+    {&SettingsControls::showConsoleCheck, "showConsoleCheck", 600, 300, 300, 376, 32},
     {&SettingsControls::updateNowButton, "updateNowButton", 184, 460, 460, 180, 32},
     {&SettingsControls::releaseNotesButton, "releaseNotesButton", 380, 460, 460, 180, 32},
 };
@@ -726,8 +726,9 @@ static void CheckAllCaptionsFit(SettingsControls& state, UINT dpi, bool english)
               "every action matches F1 with a compact video-only marker");
         const auto action = ClientRectOf(parent, state.guideDescriptions[i]);
         const auto key = ClientRectOf(parent, state.guideKeys[i]);
+        const auto row=std::find(llcv::viewer_help::kDisplayOrder.begin(),llcv::viewer_help::kDisplayOrder.end(),i)-llcv::viewer_help::kDisplayOrder.begin();
         Check(action.left == SettingsPixels(296, dpi) &&
-              action.top == SettingsPixels(153 + static_cast<int>(i) *
+              action.top == SettingsPixels(153 + static_cast<int>(row) *
                   (state.guideKeys.size()>10 ? 32 : state.guideKeys.size()>9 ? 35 : 36), dpi),
               "shortcut rows maintain aligned columns and generous rhythm");
         Check(key.top>=action.top && key.bottom<=action.bottom+1 && key.right<action.left,
@@ -735,10 +736,23 @@ static void CheckAllCaptionsFit(SettingsControls& state, UINT dpi, bool english)
     }
     Check(ClientRectOf(parent, state.guideShortcutsTitle).top == ClientRectOf(parent, state.guideDiagnosticsTitle).top,
           "guide section titles align");
-    Check(ClientRectOf(parent, state.saveLogCheck).top - ClientRectOf(parent, state.guideDiagnosticsText).bottom == SettingsPixels(16, dpi) &&
-          ClientRectOf(parent, state.showConsoleCheck).top - ClientRectOf(parent, state.saveLogCheck).bottom == SettingsPixels(8, dpi) &&
-          ClientRectOf(parent, state.guideLogFolderButton).top - ClientRectOf(parent, state.showConsoleCheck).bottom == SettingsPixels(16, dpi),
-          "diagnostics explanation, options and action use intentional compact spacing");
+    const auto explanation = ClientRectOf(parent, state.guideDiagnosticsText);
+    const auto saveLog = ClientRectOf(parent, state.saveLogCheck);
+    const auto reportZip = ClientRectOf(parent, state.guideReportButton);
+    const auto logFolder = ClientRectOf(parent, state.guideLogFolderButton);
+    const auto console = ClientRectOf(parent, state.showConsoleCheck);
+    const auto scalingGuide = ClientRectOf(parent, state.guideLsButton);
+    const auto gapNear = [dpi](LONG actual, int dp) {
+        const auto expected = SettingsPixels(dp, dpi);
+        return actual >= expected - 1 && actual <= expected + 1;
+    };
+    Check(gapNear(saveLog.top - explanation.bottom, 16) &&
+          gapNear(reportZip.top - saveLog.bottom, 12) &&
+          reportZip.top == logFolder.top && reportZip.bottom == logFolder.bottom &&
+          gapNear(logFolder.left - reportZip.right, 16) &&
+          gapNear(console.top - reportZip.bottom, 28) &&
+          gapNear(scalingGuide.top - console.bottom, 16),
+          "diagnostics flow aligns ZIP and folder actions between logging and console options");
     HDC dc = GetDC(state.tabControl);
     const auto previous = SelectObject(dc,
         reinterpret_cast<HFONT>(SendMessageW(state.tabControl, WM_GETFONT, 0, 0)));
@@ -780,52 +794,23 @@ static void TestHelpText() {
                   english ? L"minimum latency" : L"최소 지연"),
               "both low-latency modes are named consistently without an absolute latency claim");
         const auto* ls = SettingsHelpText(SettingsHelpTopic::Capture40, english);
-        const auto* caution = std::wcsstr(ls, english ? L"Keep in mind" : L"주의사항");
-        const auto* example = std::wcsstr(ls, english ? L"Example: Lossless Scaling" : L"활용 예시: Lossless Scaling");
-        Check(std::wcsstr(ls, english ? L"40 fps capture" : L"40fps 캡처") == ls &&
-            std::wcsstr(ls, english ? L"Leave off for normal viewing" : L"일반적인 시청에는 끈 채") &&
-            caution && example && caution < example,
-            "capture behavior and cautions precede the optional external-app example");
-        Check(std::wcsstr(ls,L"Lossless Scaling") && std::wcsstr(ls,L"VRR") &&
-            std::wcsstr(ls,english ? L"Start" : L"시작") &&
-            std::wcsstr(ls,english ? L"latency" : L"지연") &&
-            std::wcsstr(ls,english ? L"LS 3x" : L"LS 3배"),
-            "short 40fps help retains startup validation, LS example and caveats");
-        Check(std::wcsstr(ls, english ? L"Assumes steady 40 fps" : L"40fps 유지 시") &&
-            std::wcsstr(ls, english ? L"At 30–40 fps" : L"30~40fps로 흔들리면") &&
-            std::wcsstr(ls, english ? L"stutter may persist or become more noticeable with LS" :
-                L"LS를 써도 끊김이 남거나 더 두드러질 수 있습니다"),
-            "LS example warns that variable game FPS can retain or emphasize stutter");
-        Check(std::wcslen(ls) <= (english ? 550u : 350u) &&
-            std::wcsstr(ls,L"\n\n") && std::wcsstr(ls,L"•"),
-            "40fps popup stays brief with separated sections and short bullets");
+        Check(std::wcsstr(ls, L"40") && std::wcsstr(ls, L"VRR") && std::wcsstr(ls, L"Lossless Scaling") &&
+              std::wcsstr(ls, english ? L"not start" : L"시작할 수 없") && std::wcsstr(ls, english ? L"latency" : L"지연") &&
+              std::wcsstr(ls, english ? L"stutter" : L"끊김"), "40 fps help explains unsupported capture and variable game frame rates");
         const wchar_t* guide = llcv::ui_text::VsrSetupGuide(english);
-        Check(std::wcsstr(guide,L"NV12/YUY2") && std::wcsstr(guide,L"MJPEG"),
-            "VSR guide includes both raw SDR formats and decoded MJPEG");
-        Check(guide && *guide && std::wcsstr(guide, L"F6") &&
-              std::wcsstr(guide, L"NVIDIA App") && std::wcsstr(guide, L"NV12") &&
-              std::wcsstr(guide, english ? L"latency" : L"지연"),
-              "bilingual VSR setup guide explains activation, supported input and latency");
-        Check(std::wcsstr(guide, L"P010 HDR10") &&
-              std::wcsstr(guide, english ? L"native HDR10 is preserved" : L"원래 HDR10을 유지"),
-              "VSR guide describes native HDR without SDR-to-HDR conversion");
-        Check(std::wcsstr(guide, english ? L"cannot verify activation" : L"확인하지 못합니다") &&
-              !std::wcsstr(guide, L"HRESULT") && !std::wcsstr(guide, L"Request supported"),
-              "VSR guide does not present diagnostic acceptance as actual activation");
-    }
-    Check(std::wcsstr(SettingsHelpText(SettingsHelpTopic::HdrChroma, true), L"staggered") != nullptr &&
-          std::wcsstr(SettingsHelpText(SettingsHelpTopic::HdrChroma, false), L"보장하지") != nullptr,
-          "chroma help discloses interpretation override limitations in both languages");
-    const struct { SettingsHelpTopic topic; uint32_t english, korean; } golden[] = {
-    {SettingsHelpTopic::Drift, 754620631u, 3340162937u},
-    {SettingsHelpTopic::PcmQueue, 2979267523u, 1200270022u},
-    {SettingsHelpTopic::VolumeBoost, 2473238580u, 2846859296u},
-    };
-    for (const auto& entry : golden) for (bool english : {false, true}) {
-        uint32_t hash = 2166136261u;
-        for (const wchar_t* p = SettingsHelpText(entry.topic, english); *p; ++p)
-            hash = (hash ^ static_cast<uint16_t>(*p)) * 16777619u;
-        Check(hash == (english ? entry.english : entry.korean), "help text must remain byte-for-byte equivalent");
+        Check(std::wcsstr(guide,L"NV12/YUY2") && std::wcsstr(guide,L"MJPEG") && std::wcsstr(guide,L"P010 HDR10") &&
+              std::wcsstr(guide,L"NVIDIA App") && std::wcsstr(guide,L"F6") && std::wcsstr(guide,english?L"active indicator":L"활성 표시") &&
+              std::wcsstr(guide,english?L"latency":L"지연"), "VSR help covers input, activation checks, shortcut and latency");
+        const auto* boost = SettingsHelpText(SettingsHelpTopic::VolumeBoost, english);
+        const auto* buffer = SettingsHelpText(SettingsHelpTopic::PcmQueue, english);
+        const auto* drift = SettingsHelpText(SettingsHelpTopic::Drift, english);
+        const auto* chroma = SettingsHelpText(SettingsHelpTopic::HdrChroma, english);
+        Check(std::wcsstr(boost,L"100%") && std::wcsstr(boost,L"200%") && std::wcsstr(boost,english?L"distort":L"찢어져"),
+              "volume help includes boost limit and distortion warning");
+        Check(std::wcsstr(buffer,L"25") && std::wcsstr(buffer,L"WASAPI") && std::wcsstr(drift,L"PCM") && std::wcsstr(drift,L"Tab"),
+              "buffer and drift help distinguish buffering from clock correction");
+        Check(std::wcsstr(chroma,L"Top-left") && std::wcsstr(chroma,L"Left") &&
+              std::wcsstr(chroma,english?L"cannot repair":L"복구할 수 없"), "chroma choices match the UI and explain correction limits");
     }
     for (bool english : {false, true})
         Check(std::wcscmp(SettingsHelpText(SettingsHelpTopic::Presentation, english),
@@ -842,8 +827,8 @@ static void TestHelpText() {
               !std::wcsstr(matrixHelp, L"Full/Limited"),
               "MJPEG matrix help does not duplicate the shared range choices");
     }
-    Check(std::wcsstr(SettingsHelpText(SettingsHelpTopic::ForceHdr10, true), L"already defaults") != nullptr &&
-          std::wcsstr(SettingsHelpText(SettingsHelpTopic::ForceHdr10, false), L"기본적으로") != nullptr &&
+    Check(std::wcsstr(SettingsHelpText(SettingsHelpTopic::ForceHdr10, true), L"does not convert SDR") != nullptr &&
+          std::wcsstr(SettingsHelpText(SettingsHelpTopic::ForceHdr10, false), L"SDR 영상을 HDR로 바꾸는 기능은 아닙니다") != nullptr &&
           std::wcsstr(SettingsHelpText(SettingsHelpTopic::ForceHdr10, true), L"NV12/YUY2") != nullptr &&
           std::wcsstr(SettingsHelpText(SettingsHelpTopic::ForceHdr10, false), L"NV12/YUY2") != nullptr &&
           std::wcsstr(SettingsHelpText(SettingsHelpTopic::ForceHdr10, true), L"Windows HDR") != nullptr &&

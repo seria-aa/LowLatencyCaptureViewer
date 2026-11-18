@@ -34,7 +34,7 @@ the default 1080p output uses about 174 MiB. Audio, encoder and GPU allocations 
 
 1. Set the save folder, codec and quality under **Recording**.
 2. Start SDR/stereo playback, then press **F9** to record. Press it again to finalize.
-3. Use **Open folder** to check the result. Wait until **Finalizing** completes before opening the file.
+3. During recording, **● REC** and the elapsed time appear at the bottom right. When **Finalizing** completes, choose **Open video** or **Open folder**.
 
 **F2** opens general settings, not the Recording tab. While recording or paused, it first asks
 whether to finish the recording; **No** keeps playback and the recording state unchanged.

@@ -175,7 +175,10 @@ bool SettingsTheme::IsSecondary(HWND hwnd) const {
     return hwnd == c.pageSubtitle || hwnd == c.videoCapabilityStatus || hwnd == c.captureAudioStatus ||
         hwnd == c.vsrStatus || hwnd == c.screenshotHelp || hwnd == c.skipStartupHint || hwnd == c.frameOptionsHint ||
         hwnd == c.preventSleepHint ||
-        hwnd == c.versionWatermark || hwnd == c.fullscreenCursorHint || hwnd == c.fullscreenPositionHint || hwnd == c.surround51Hint ||
+        hwnd == c.versionWatermark || hwnd == c.fullscreenCursorHint || hwnd == c.fullscreenPositionHint ||
+#ifndef LLCV_DOLBY_CAPTURE
+        hwnd == c.surround51Hint ||
+#endif
         hwnd == c.relativeSizeWarning || hwnd == c.guideDiagnosticsText || hwnd == c.guideVideoHint || hwnd == c.updateText ||
         hwnd == c.updateStatus || hwnd == c.audioStatus;
 }
@@ -186,7 +189,7 @@ bool SettingsTheme::IsCardControl(HWND hwnd) const {
     return hwnd && ((c.frameOptionsOpen &&
         (hwnd == c.frameOptionsTitle || hwnd == c.frameOptionsClose || hwnd == c.frameOptionsHint ||
          hwnd == c.unlistedFpsCheck || hwnd == c.capture40Check || hwnd == c.capture40Help)) ||
-        hwnd == c.guideShortcutsTitle || hwnd == c.shortcutResetButton || hwnd == c.guideVideoHint ||
+        hwnd == c.guideShortcutsTitle || hwnd == c.shortcutResetButton || hwnd == c.shortcutListToggle || hwnd == c.guideVideoHint ||
         std::find(c.guideKeys.begin(), c.guideKeys.end(), hwnd) != c.guideKeys.end() ||
         std::find(c.guideDescriptions.begin(), c.guideDescriptions.end(), hwnd) != c.guideDescriptions.end());
 }
@@ -212,9 +215,15 @@ void SettingsTheme::PaintCards(HDC dc) {
         else { bounds = rect; found = true; }
     };
     const bool compact = SettingsCompactLayout(&c);
-    if (compact) {
+    if (compact
+#ifdef LLCV_RIFE_OPTIONAL
+        || c.activeTab==SettingsTab::GuideDiagnostics
+#endif
+    ) {
+        includeShortcut(c.guideShortcutsTitle);
         includeShortcut(c.guideVideoHint);
         includeShortcut(c.shortcutResetButton);
+        includeShortcut(c.shortcutListToggle);
         for (HWND child : c.guideKeys) includeShortcut(child);
         for (HWND child : c.guideDescriptions) includeShortcut(child);
     } else {
@@ -300,7 +309,10 @@ void SettingsTheme::PaintControl(HWND hwnd, HDC dc, bool combo, bool hover) {
                 label.top += std::max(0L, ((label.bottom - label.top) - (measured.bottom - measured.top)) / 2);
             }
         } else {
-            const bool primary = hwnd == controls_->startButton;
+            const auto editing=controls_->editingShortcut;
+            const bool capturing=editing>=0 && static_cast<size_t>(editing)<controls_->guideKeys.size() &&
+                                 hwnd==controls_->guideKeys[editing];
+            const bool primary = hwnd == controls_->startButton || capturing;
             const bool pressed = (SendMessageW(hwnd, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0;
             COLORREF fill = !enabled ? palette_.kControlDisabled : primary ? palette_.kAccent : palette_.kControl;
             if (enabled && hover) fill = primary ? palette_.kPrimaryHover : palette_.kHover;
@@ -309,11 +321,7 @@ void SettingsTheme::PaintControl(HWND hwnd, HDC dc, bool combo, bool hover) {
             if (enabled && primary) textColor = palette_.kBackground;
             label.left += Pixels(7); label.right -= Pixels(7);
             if (pressed) OffsetRect(&label, 0, Pixels(1));
-            const bool shortcut=std::find(controls_->guideKeys.begin(),controls_->guideKeys.end(),hwnd)!=controls_->guideKeys.end();
-            if (shortcut) {
-                label.left+=Pixels(3); flags|=DT_LEFT;
-            }
-            else flags |= DT_CENTER;
+            flags |= DT_CENTER;
         }
     }
     SetTextColor(dc, textColor);
@@ -611,6 +619,20 @@ LRESULT CALLBACK SettingsTheme::ChildProc(HWND hwnd, UINT message, WPARAM wParam
         return result; // labels never acquire hover, focus or click behavior
     }
     const bool combo = found->combo;
+#ifdef LLCV_INTERPOLATION_RELEASE
+    if (message == WM_SETTEXT && hwnd == theme.controls_->vfgDownloadButton &&
+        IsWindowVisible(hwnd)) {
+        // BUTTON can paint its new caption synchronously, before our themed
+        // WM_PAINT. Keep progress changes on the buffered paint path instead.
+        // Only suppress drawing for a visible button: WM_SETREDRAW restores
+        // WS_VISIBLE when re-enabled, which must not reveal a hidden control.
+        DefSubclassProc(hwnd, WM_SETREDRAW, FALSE, 0);
+        const auto result = DefSubclassProc(hwnd, message, wParam, lParam);
+        DefSubclassProc(hwnd, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return result;
+    }
+#endif
     switch (message) {
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: {

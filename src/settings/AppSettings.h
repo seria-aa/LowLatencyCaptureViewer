@@ -105,6 +105,9 @@ struct AppSettings {
     bool settingsLightTheme = false; // App chrome; persisted key retained for compatibility.
     AudioMode audioMode = AudioMode::WasapiShared;
     bool consoleSurround51 = false;
+#ifdef LLCV_DOLBY_CAPTURE
+    bool dolbyCapture = false;
+#endif
     int wasapiBufferMs = 20;
     uint32_t wasapiSharedPeriodFrames = 0;
     DriftCorrectionMode driftCorrection = DriftCorrectionMode::Auto;

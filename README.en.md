@@ -5,7 +5,7 @@
 A low-latency Windows viewer for video and audio from HDMI capture devices.
 Use it to play console games without OBS, or listen in audio-only mode.
 
-**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.2.1.md) · [한국어](README.md)
+**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.3.0.md) · [한국어](README.md)
 
 <br>
 
@@ -17,12 +17,12 @@ Use it to play console games without OBS, or listen in audio-only mode.
 
 <br>
 
-## What's new in 2.2.1
+## What's new in 2.3.0
 
-Adds **High/Preserve CMAA2 correction for SDR** and **NIS with contour protection for HDR10**.
-Places upscaling controls side by side and moves screenshot preferences to App settings.
-Refines spacing, alignment and keyboard order, and adds a **Release notes** button in App settings.
-[Full release notes](docs/release-notes-v2.2.1.md)
+Optional **frame interpolation** for supported NVIDIA GPUs is off by default. The current release candidate does not bundle the runtimes or models.
+A compact **REC badge and timer** appears during recording. Windows Explorer shows the duration of normally completed MP4s.
+Start video-only if capture audio cannot connect. Press F1 to see all assigned shortcuts.
+[Full release notes](docs/release-notes-v2.3.0.md) · [Frame interpolation guide](docs/FRAME_INTERPOLATION.md)
 
 <br>
 

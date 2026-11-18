@@ -175,6 +175,14 @@ LoadResult LoadFromIni(const std::wstring& path) {
 #endif
     if (ReadString(path,L"Shortcuts",L"Mute",L"missing")==L"missing")
         shortcuts::AddMuteDefault(settings.shortcuts);
+#ifdef LLCV_RIFE_OPTIONAL
+    for(auto action:{shortcuts::Action::HudCorrection,shortcuts::Action::FrameInterpolation}){
+        const auto i=static_cast<size_t>(action);
+        if(ReadString(path,L"Shortcuts",shortcuts::Names[i],L"missing")!=L"missing")continue;
+        auto used=[&](unsigned key){for(size_t j=0;j<shortcuts::Count;++j)if(i!=j&&settings.shortcuts[j]==key)return true;return false;};
+        if(used(settings.shortcuts[i]))for(unsigned k=VK_F13;k<=VK_F24;++k)if(!used(shortcuts::Ctrl|k)){settings.shortcuts[i]=shortcuts::Ctrl|k;break;}
+    }
+#endif
     if (!shortcuts::Valid(settings.shortcuts)) settings.shortcuts=shortcuts::Defaults;
     settings.settingsLightTheme = _wcsicmp(
         ReadString(path, L"General", L"SettingsTheme", L"Dark").c_str(), L"Light") == 0;
@@ -197,6 +205,9 @@ LoadResult LoadFromIni(const std::wstring& path) {
     settings.audioOnlyHeight = std::clamp(
         ReadInt(path, L"Window", L"AudioOnlyHeight", 230), 230, 16384);
     settings.consoleSurround51 = ReadBool(path, L"Audio", L"ConsoleSurround51");
+#ifdef LLCV_DOLBY_CAPTURE
+    settings.dolbyCapture=settings.consoleSurround51&&ReadBool(path,L"Audio",L"DolbyCapture");
+#endif
 
     const std::wstring audioMode =
         ReadString(path, L"Audio", L"Mode", L"Shared");
@@ -467,6 +478,9 @@ static DWORD WriteSettings(const std::wstring& file, const AppSettings& settings
     WriteInt(path, L"Window", L"AudioOnlyWidth", settings.audioOnlyWidth);
     WriteInt(path, L"Window", L"AudioOnlyHeight", settings.audioOnlyHeight);
     WriteInt(path, L"Audio", L"ConsoleSurround51", settings.consoleSurround51 ? 1 : 0);
+#ifdef LLCV_DOLBY_CAPTURE
+    WriteInt(path,L"Audio",L"DolbyCapture",settings.dolbyCapture?1:0);
+#endif
 
     const wchar_t* audioMode = L"Shared";
     if (settings.audioMode == AudioMode::WasapiExclusive) {

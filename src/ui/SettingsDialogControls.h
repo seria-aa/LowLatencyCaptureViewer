@@ -60,6 +60,8 @@ inline constexpr int IDC_SETTINGS_SCREENSHOT_FOLDER = 2048;
 inline constexpr int IDC_SETTINGS_UPSCALER = 2049;
 inline constexpr int IDC_SETTINGS_NIS_SHARPNESS = 2083;
 inline constexpr int IDC_SETTINGS_VSR_GUIDE = 2050;
+inline constexpr int IDC_INTERPOLATION_QUALITY_HELP = 2092;
+inline constexpr int IDC_SURROUND_FORMAT_HELP = 2093;
 inline constexpr int IDC_SETTINGS_DISPLAY_RESOLUTION = 2051;
 inline constexpr int IDC_SETTINGS_VIDEO_REFRESH = 2052;
 inline constexpr int IDC_SETTINGS_THEME = 2053;
@@ -70,6 +72,7 @@ inline constexpr int IDC_SETTINGS_CAPTURE_40 = 2057;
 inline constexpr int IDC_SETTINGS_CAPTURE_40_HELP = 2058;
 inline constexpr int IDC_SETTINGS_LS_GUIDE = 2059;
 inline constexpr int IDC_SETTINGS_SHORTCUT_RESET = 2060;
+inline constexpr int IDC_SETTINGS_SHORTCUT_LIST = 2094;
 inline constexpr int IDC_SETTINGS_FULLSCREEN_POSITION = 2061;
 inline constexpr int IDC_SETTINGS_UNLISTED_FPS = 2078;
 inline constexpr int IDC_SETTINGS_SDR_RANGE = 2079;
@@ -79,6 +82,7 @@ inline constexpr int IDC_SETTINGS_FRAME_OPTIONS_CLOSE = 2082;
 inline constexpr int IDC_SETTINGS_CREATE_REPORT = 2084;
 inline constexpr int IDC_SETTINGS_CMAA_QUALITY = 2085;
 inline constexpr int IDC_SETTINGS_RELEASE_NOTES = 2086;
+inline constexpr int IDC_SETTINGS_VFG_DOWNLOAD = 2095;
 inline constexpr int IDC_SETTINGS_SHORTCUT_FIRST = 2100;
 } // namespace control_id
 

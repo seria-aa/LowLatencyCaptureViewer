@@ -19,6 +19,10 @@ AdapterProbe ProbeDefaultAdapter() {
         FAILED(probe.result = dxgi->GetAdapter(&adapter)) ||
         FAILED(probe.result = adapter->GetDesc(&desc))) return probe;
     probe.vendor = desc.VendorId;
+    probe.luid = desc.AdapterLuid;
+    probe.rtx30=IsGeForceRtx30(desc.VendorId,desc.Description);
+    probe.prefersVfg=NvidiaAdapter(desc.VendorId) &&
+        (wcsstr(desc.Description,L"GeForce RTX 40") || wcsstr(desc.Description,L"GeForce RTX 50"));
     return probe;
 }
 SupportProbe ProbeSupport() {
