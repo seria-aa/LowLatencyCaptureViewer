@@ -155,6 +155,7 @@ static bool g_useScrgbPrototype = false;
 #include "video/VfgRuntimeInstall.h"
 #include "video/VfgPreferences.h"
 #include "video/VfgGpuProbe.h"
+#include "video/PlaybackGpu.h"
 #endif
 static std::atomic<llcv::presentation::VfgBlock> g_vfgPresentationBlock{llcv::presentation::VfgBlock::None};
 #endif
@@ -186,11 +187,11 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
 #if defined(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
-constexpr wchar_t kAppVersionLabel[] = L"v2.3.1-audio-recovery-diagnostic";
+constexpr wchar_t kAppVersionLabel[] = L"v2.3.2-audio-recovery-diagnostic";
 #elif defined(LLCV_VSR_EXPERIMENT)
-constexpr wchar_t kAppVersionLabel[] = L"v2.3.1-vsr-test";
+constexpr wchar_t kAppVersionLabel[] = L"v2.3.2-vsr-test";
 #else
-constexpr wchar_t kAppVersionLabel[] = L"v2.3.1";
+constexpr wchar_t kAppVersionLabel[] = L"v2.3.2";
 #endif
 
 constexpr int kRecommendedCaptureBufferMs = 20;
@@ -456,6 +457,9 @@ enum class TransientHudContent { Volume, OneToOne, OneToOneUnavailable,
     , CmaaNisPending, CmaaNisOn, CmaaNisOff, CmaaNisScaleBypass, CmaaNisFailed
 #ifdef LLCV_RIFE_TEST
     , RifePending, RifeOn, RifeOff, RifeUnavailable, RifeFailed, RifeLate
+#ifdef LLCV_INTERPOLATION_RELEASE
+    , PlaybackGpuFallback
+#endif
 #ifdef LLCV_RIFE_AUTO_UI_TEST
     , RifeAutoUi
 #endif
@@ -2953,6 +2957,43 @@ struct DirectD3D11Renderer {
                        DXGI_COLOR_SPACE_TYPE hdrColorSpace = DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020,
                        bool topDown = true,
                        DirectShowColorMetadata rgbMetadata = {}) {
+#ifdef LLCV_INTERPOLATION_RELEASE
+        const bool manual = !g_settings.playbackGpuId.empty();
+        const HMONITOR exclusiveMonitor = ExclusiveOutputSelected()
+            ? MonitorFromWindow(PresentationWindow(hwnd), MONITOR_DEFAULTTONEAREST) : nullptr;
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> choice;
+        if (manual) {
+            const auto adapters = llcv::video_gpu::Enumerate();
+            const auto* preferred = llcv::video_gpu::Find(adapters, g_settings.playbackGpuId);
+            if (preferred && (!exclusiveMonitor || llcv::video_gpu::OwnsMonitor(preferred->device.Get(), exclusiveMonitor)))
+                choice = preferred->device;
+        }
+        const bool manualUnavailable = manual && !choice;
+        if (!choice) choice = llcv::video_gpu::Automatic(exclusiveMonitor);
+        if (choice) {
+            const HRESULT chosen = initializeOnAdapter(hwnd, width, height, fps, pixelFormat,
+                hdrInputMetadataAvailable, color, hdrColorSpace, topDown, rgbMetadata, choice.Get());
+            if (SUCCEEDED(chosen)) {
+                if (manualUnavailable) ShowTransientHud(TransientHudContent::PlaybackGpuFallback);
+                return chosen;
+            }
+            fwprintf(stderr, L"[video-output] playback GPU initialization failed (0x%08X); trying Windows default.\n",
+                     static_cast<unsigned>(chosen));
+        }
+        const HRESULT fallback = initializeOnAdapter(hwnd, width, height, fps, pixelFormat,
+            hdrInputMetadataAvailable, color, hdrColorSpace, topDown, rgbMetadata, nullptr);
+        if (SUCCEEDED(fallback) && (manual || choice)) ShowTransientHud(TransientHudContent::PlaybackGpuFallback);
+        return fallback;
+#else
+        return initializeOnAdapter(hwnd, width, height, fps, pixelFormat,
+            hdrInputMetadataAvailable, color, hdrColorSpace, topDown, rgbMetadata, nullptr);
+#endif
+    }
+
+    HRESULT initializeOnAdapter(HWND hwnd, int width, int height, int fps,
+                       VideoPixelFormat pixelFormat, bool hdrInputMetadataAvailable,
+                       llcv::video_color::Configuration color, DXGI_COLOR_SPACE_TYPE hdrColorSpace,
+                       bool topDown, DirectShowColorMetadata rgbMetadata, IDXGIAdapter* preferred) {
         reset();
         captureWidth = width; captureHeight = height; captureFps = fps;
         if (pixelFormat == VideoPixelFormat::P010 && !hdrInputMetadataAvailable) {
@@ -2998,7 +3039,8 @@ struct DirectD3D11Renderer {
 #endif
         D3D_FEATURE_LEVEL featureLevel{};
         HRESULT hr = D3D11CreateDevice(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, nullptr, 0,
+            preferred, preferred ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
+            nullptr, flags, nullptr, 0,
             D3D11_SDK_VERSION, &device, &featureLevel, &context);
         if (FAILED(hr)) return hr;
         discardUpdateAvailable =
@@ -3962,6 +4004,9 @@ struct DirectD3D11Renderer {
                     swprintf_s(rifeEn,L"RIFE %s ON\nF7: OFF · F8: scale",llcv::rife_test::ScaleLabel(llcv::rife_test::activeScale.load()));ko=rifeKo;en=rifeEn;break;
                 case TransientHudContent::RifeOff:
                     swprintf_s(rifeKo,L"RIFE %s OFF\nF7: 켜기 · F8: 크기",selectedRife);swprintf_s(rifeEn,L"RIFE %s OFF\nF7: ON · F8: scale",selectedRife);ko=rifeKo;en=rifeEn;break;
+#ifdef LLCV_INTERPOLATION_RELEASE
+                case TransientHudContent::PlaybackGpuFallback: ko=L"지정한 GPU로 재생할 수 없어 다른 GPU를 사용합니다."; en=L"Preferred playback GPU unavailable. Using another GPU."; break;
+#endif
                 case TransientHudContent::RifeUnavailable: ko=L"RIFE 적용 불가\nFHD/QHD SDR NV12 필요"; en=L"RIFE unavailable\nNeeds FHD/QHD SDR NV12"; break;
                 case TransientHudContent::RifeFailed: ko=L"RIFE 실패·원본 유지\n진단 로그 확인"; en=L"RIFE failed / original output\nSee diagnostic log"; break;
                 case TransientHudContent::RifeLate:
@@ -6193,6 +6238,7 @@ struct ExclusiveScanWork {
 struct SettingsDialogState : llcv::settings_ui::SettingsControls {
 #ifdef LLCV_INTERPOLATION_RELEASE
     bool vfgCheckboxEdited = false;
+    std::vector<llcv::video_gpu::Adapter> playbackGpus;
 #endif
     std::unique_ptr<llcv::settings_ui::SettingsModeCache<llcv::diagnostics::ReportResult>> reportQuery;
     std::unique_ptr<llcv::settings_ui::SettingsModeCache<SettingsVideoModes>> videoModeCache;
@@ -7558,6 +7604,14 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
         if (monitorIndex == 0) g_settings.preferredDisplayMonitor.clear();
         else if (monitorIndex > 0 && static_cast<size_t>(monitorIndex) <= state->displayMonitors.size())
             g_settings.preferredDisplayMonitor = state->displayMonitors[monitorIndex - 1].id;
+#ifdef LLCV_INTERPOLATION_RELEASE
+        const LRESULT gpuRow = SendMessageW(state->playbackGpuCombo, CB_GETCURSEL, 0, 0);
+        const LRESULT gpuItem = gpuRow == CB_ERR ? CB_ERR :
+            SendMessageW(state->playbackGpuCombo, CB_GETITEMDATA, gpuRow, 0);
+        if (gpuItem == 0) g_settings.playbackGpuId.clear();
+        else if (gpuItem > 0 && static_cast<size_t>(gpuItem) <= state->playbackGpus.size())
+            g_settings.playbackGpuId = state->playbackGpus[gpuItem - 1].id;
+#endif
         // The disconnected entry preserves its saved identity until reconnected.
         g_settings.presentationMode = llcv::presentation_ui::ModeFromSelection(
             static_cast<int>(presentationIndex));
@@ -7807,6 +7861,79 @@ static void RequestSettingsReport(SettingsDialogState* state, HWND hwnd) {
     SetSettingsText(state->guideReportButton,state->english?L"Creating ZIP…":L"자료 만드는 중…");
     state->reportQuery->Request({});
 }
+#ifdef LLCV_INTERPOLATION_RELEASE
+static void SetSettingsPlaybackGpuStatus(SettingsDialogState* state, UINT vendor, const LUID& luid) {
+    state->vsrGpuUnavailable = !llcv::vsr::NvidiaAdapter(vendor);
+    state->vsrGpuUnknown = vendor == 0;
+    const auto gpu = llcv::vfg::InspectPlaybackGpu(vendor, luid);
+    state->vfgGpuSupported = gpu.current != llcv::vfg::GpuSupport::Unavailable;
+    state->vfgRtx30 = gpu.current == llcv::vfg::GpuSupport::ExperimentalAmpere;
+    state->vfgOtherCompatibleGpu = gpu.otherCompatibleGpu;
+    state->vfgGpuCheckFailed = gpu.currentCheckFailed;
+    fwprintf(stderr, L"[vfg] settings GPU: vendor=0x%04X supported=%d alternate=%d probeFailed=%d\n",
+             vendor, state->vfgGpuSupported, state->vfgOtherCompatibleGpu, state->vfgGpuCheckFailed);
+}
+
+static void PopulatePlaybackGpuChoices(SettingsDialogState* state) {
+    state->playbackGpus = llcv::video_gpu::Enumerate();
+    LRESULT selected = 0;
+    for (size_t i = 0; i < state->playbackGpus.size(); ++i) {
+        const auto& gpu = state->playbackGpus[i];
+        if (!llcv::video_gpu::Find(state->playbackGpus, gpu.id)) continue;
+        const auto row = SendMessageW(state->playbackGpuCombo, CB_ADDSTRING, 0,
+                                      reinterpret_cast<LPARAM>(gpu.name.c_str()));
+        if (row < 0) continue;
+        SendMessageW(state->playbackGpuCombo, CB_SETITEMDATA, row, static_cast<LPARAM>(i + 1));
+        if (gpu.id == g_settings.playbackGpuId) selected = row;
+    }
+    if (selected == 0 && !g_settings.playbackGpuId.empty()) {
+        const auto row = SendMessageW(state->playbackGpuCombo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(state->english ? L"Saved GPU unavailable · using Automatic"
+                                                  : L"저장된 GPU 없음 · 자동 사용"));
+        if (row > 0) {
+            SendMessageW(state->playbackGpuCombo, CB_SETITEMDATA, row, -1);
+            selected = row;
+        }
+    }
+    SendMessageW(state->playbackGpuCombo, CB_SETCURSEL, selected, 0);
+}
+
+static llcv::vsr::AdapterProbe ProbePlaybackChoice(IDXGIAdapter1* selected, HMONITOR exclusiveMonitor) {
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> automatic;
+    if (!selected || (exclusiveMonitor && !llcv::video_gpu::OwnsMonitor(selected, exclusiveMonitor))) {
+        automatic = llcv::video_gpu::Automatic(exclusiveMonitor);
+        selected = automatic.Get();
+    }
+    const auto probe = llcv::vsr::ProbeDefaultAdapter(selected);
+    return selected && FAILED(probe.result) ? llcv::vsr::ProbeDefaultAdapter() : probe;
+}
+
+static void RefreshPlaybackGpuChoice(SettingsDialogState* state) {
+    const auto row = SendMessageW(state->playbackGpuCombo, CB_GETCURSEL, 0, 0);
+    if (row == CB_ERR) return;
+    const auto data = SendMessageW(state->playbackGpuCombo, CB_GETITEMDATA, row, 0);
+    auto* selected = data > 0 && static_cast<size_t>(data) <= state->playbackGpus.size()
+        ? state->playbackGpus[data - 1].device.Get() : nullptr;
+    const auto presentation = llcv::presentation_ui::ModeFromSelection(
+        static_cast<int>(SendMessageW(state->presentationCombo, CB_GETCURSEL, 0, 0)));
+    HMONITOR monitor = nullptr;
+    if (llcv::presentation::IsExclusive(presentation)) {
+        const auto display = SendMessageW(state->displayMonitorCombo, CB_GETCURSEL, 0, 0);
+        monitor = display > 0 && static_cast<size_t>(display) <= state->displayMonitors.size()
+            ? state->displayMonitors[display - 1].handle : state->viewerMonitor;
+        if (!monitor) monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    }
+    const auto probe = ProbePlaybackChoice(selected, monitor);
+    SetSettingsPlaybackGpuStatus(state, probe.vendor, probe.luid);
+    using namespace llcv::rife_test;
+    if (state->InterpolationGpuAvailable() && !state->vfgCheckboxEdited &&
+        g_settings.vfgEnabled && !componentsEnabled.load()) {
+        EnableComponents(true);
+        Request(g_settings.vfgPlaybackEnabled);
+    }
+}
+#endif
+
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                                          WPARAM wParam, LPARAM lParam) {
     auto* state = reinterpret_cast<SettingsDialogState*>(
@@ -7851,9 +7978,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         state->vsrGpuUnavailable = !llcv::vsr::NvidiaAdapter(vendor);
         state->vsrGpuUnknown = vendor == 0;
 #ifdef LLCV_INTERPOLATION_RELEASE
-        const auto gpu = llcv::vfg::ProbeGpuSupport(vendor, g_vfgAdapterLuid.load(std::memory_order_acquire));
-        state->vfgGpuSupported = gpu != llcv::vfg::GpuSupport::Unavailable;
-        state->vfgRtx30 = gpu == llcv::vfg::GpuSupport::ExperimentalAmpere;
+        SetSettingsPlaybackGpuStatus(state, vendor, g_vfgAdapterLuid.load(std::memory_order_acquire));
 #else
         state->vfgRtx30=g_vfgRtx30.load();
 #endif
@@ -7888,6 +8013,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         llcv::settings_ui::CreateSettingsDialogControls(
             state, hwnd, instance, initial, population);
 #ifdef LLCV_INTERPOLATION_RELEASE
+        PopulatePlaybackGpuChoices(state);
         SetTimer(hwnd, llcv::settings_ui::control_id::IDC_SETTINGS_VFG_DOWNLOAD, 350, nullptr);
 #endif
 #ifdef LLCV_RECORDING
@@ -8178,10 +8304,31 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
 #endif
     case WM_COMMAND:
 #ifdef LLCV_INTERPOLATION_RELEASE
+        if (state && HIWORD(wParam) == CBN_SELCHANGE &&
+            (LOWORD(wParam) == llcv::settings_ui::control_id::IDC_SETTINGS_PLAYBACK_GPU ||
+             LOWORD(wParam) == llcv::settings_ui::control_id::IDC_SETTINGS_DISPLAY_MONITOR ||
+             LOWORD(wParam) == llcv::settings_ui::control_id::IDC_SETTINGS_PRESENTATION)) {
+            llcv::settings_ui::SettingsVisualUpdate visualUpdate(hwnd);
+            RefreshPlaybackGpuChoice(state);
+            UpdateAdvancedControlVisibility(state);
+            if (LOWORD(wParam) == llcv::settings_ui::control_id::IDC_SETTINGS_PLAYBACK_GPU) return 0;
+        }
         if (state && LOWORD(wParam) == llcv::settings_ui::control_id::IDC_SETTINGS_VFG_DOWNLOAD && HIWORD(wParam) == BN_CLICKED) {
+            if (state->activeTab != SettingsTab::Interpolation) return 0;
+            if (state->ShowVfgGpuSwitch()) {
+                if (reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd, L"open",
+                        L"ms-settings:display-advancedgraphics", nullptr, nullptr, SW_SHOWNORMAL)) <= 32) {
+                    MessageBoxW(hwnd, state->english
+                        ? L"Open Windows Settings → System → Display → Graphics. Add LowLatencyCaptureViewer.exe, select the NVIDIA GPU, and restart LLCV."
+                        : L"Windows 설정 → 시스템 → 디스플레이 → 그래픽을 엽니다. LowLatencyCaptureViewer.exe를 추가해 NVIDIA GPU를 선택한 뒤 LLCV를 다시 실행합니다.",
+                        state->english ? L"Windows graphics settings" : L"Windows 그래픽 설정",
+                        MB_OK | MB_ICONINFORMATION);
+                }
+                return 0;
+            }
             using namespace llcv::vfg_runtime;
             const auto current = GetStatus().stage;
-            if (state->activeTab != SettingsTab::Interpolation || !state->InterpolationGpuAvailable() ||
+            if (!state->InterpolationGpuAvailable() ||
                 (current != Stage::Idle && current != Stage::Failed)) return 0;
             const auto title = state->english ? L"Download VFG components" : L"VFG 구성품 받기";
             const auto description = state->english
@@ -11773,9 +11920,19 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     // Identify the default renderer once, before settings or immediate start.
     // No extension requests, capture probes or per-frame checks are added.
-    const auto vsrAdapter = llcv::vsr::ProbeDefaultAdapter();
 #ifdef LLCV_INTERPOLATION_RELEASE
+    const auto vsrAdapter = [&] {
+        if (g_settings.audioOnly) return llcv::vsr::ProbeDefaultAdapter();
+        const auto adapters = g_settings.playbackGpuId.empty() ? std::vector<llcv::video_gpu::Adapter>{}
+            : llcv::video_gpu::Enumerate();
+        const auto* preferred = llcv::video_gpu::Find(adapters, g_settings.playbackGpuId);
+        HMONITOR monitor = ExclusiveOutputSelected() ? SavedViewerMonitor() : nullptr;
+        if (ExclusiveOutputSelected() && !monitor) monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+        return ProbePlaybackChoice(preferred ? preferred->device.Get() : nullptr, monitor);
+    }();
     g_vfgAdapterLuid.store(vsrAdapter.luid, std::memory_order_release);
+#else
+    const auto vsrAdapter = llcv::vsr::ProbeDefaultAdapter();
 #endif
     g_vsrGpuVendor.store(vsrAdapter.vendor, std::memory_order_release);
     g_vfgRtx30.store(vsrAdapter.rtx30);

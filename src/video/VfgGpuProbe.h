@@ -20,4 +20,14 @@ constexpr GpuSupport SupportForArchitecture(int major, int minor) {
 // Match the D3D11 adapter exactly; another GPU in the system cannot qualify it.
 GpuSupport ProbeGpuSupport(UINT vendor, const LUID& adapter) noexcept;
 
+struct PlaybackGpuStatus {
+    GpuSupport current = GpuSupport::Unavailable;
+    bool otherCompatibleGpu = false;
+    bool currentCheckFailed = false;
+};
+
+// Settings only. An alternate GPU is advisory, not permission to run
+// frame generation on a device different from the D3D11 adapter.
+PlaybackGpuStatus InspectPlaybackGpu(UINT vendor, const LUID& adapter) noexcept;
+
 }

@@ -29,9 +29,8 @@ struct AdapterProbe {
     UINT vendor = 0;
     LUID luid{};
 };
-// Startup only, using the same default-device policy as the renderer. This
-// identifies the selected vendor, not RTX capability or effect activation.
-AdapterProbe ProbeDefaultAdapter();
+// Identify the intended playback device without requesting NVIDIA effects.
+AdapterProbe ProbeDefaultAdapter(IDXGIAdapter* adapter = nullptr);
 constexpr bool Eligible(UINT vendor, DXGI_FORMAT format, bool hdr,
                         UINT width, UINT height, UINT outputWidth, UINT outputHeight) {
     // Native-resolution de-artifacting uses the same processor request as

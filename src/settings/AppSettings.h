@@ -181,6 +181,7 @@ struct AppSettings {
     std::wstring monitorDevice;
     // Explicit startup display; empty preserves the last-window-position policy.
     std::wstring preferredDisplayMonitor;
+    std::wstring playbackGpuId; // Empty uses automatic GPU selection.
 };
 
 // Enabled legacy preferences take priority; OFF remembers the last selection.

@@ -29,6 +29,12 @@ void SetSettingsText(HWND control, const wchar_t* text) {
 #ifdef LLCV_INTERPOLATION_RELEASE
 void RefreshVfgDownloadControl(SettingsControls* state) {
     if (!state || !state->vfgDownloadButton) return;
+    if (state->ShowVfgGpuSwitch()) {
+        SetSettingsText(state->vfgDownloadButton, state->english
+            ? L"Windows graphics settings" : L"Windows 그래픽 설정");
+        SetSettingsControlVisible(state->vfgDownloadButton, state->activeTab == SettingsTab::Interpolation);
+        return;
+    }
     const auto status = llcv::vfg_runtime::GetStatus();
     using llcv::vfg_runtime::Stage;
     const auto tr = [state](const wchar_t* ko, const wchar_t* en) { return state->english ? en : ko; };
@@ -608,8 +614,16 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
 
     place(state->videoDisplaySection, 600, 108, 376, 20);
     place(state->presentationCombo, 600, 164, 376, 120);
+#ifdef LLCV_INTERPOLATION_RELEASE
+    place(state->displayMonitorLabel, 600, 200, 180, 20);
+    place(state->displayMonitorCombo, 600, 228, 180, 180);
+    place(state->playbackGpuLabel, 796, 200, 180, 20);
+    place(state->playbackGpuCombo, 796, 228, 180, 180);
+    SendMessageW(state->playbackGpuCombo, CB_SETDROPPEDWIDTH, SettingsPixels(360, dpi), 0);
+#else
     place(state->displayMonitorLabel, 600, 200, 376, 20);
     place(state->displayMonitorCombo, 600, 228, 376, 180);
+#endif
     SendMessageW(state->displayMonitorCombo, CB_SETDROPPEDWIDTH, SettingsPixels(560, dpi), 0);
     place(state->pixelCheck, 800, 326, 176, 24);
     place(state->scalingLabel, 600, 264, 376, 20);
@@ -626,7 +640,6 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
 #ifdef LLCV_RIFE_AUTO_UI_TEST
     place(state->rifeHalfCheck,184,120,376,32);
 #if defined(LLCV_INTERPOLATION_RELEASE)
-    // Reserve a separate rectangle so a native label repaint cannot cover ?.
     place(state->rifeScaleLabel,184,176,340,20);
 #else
     place(state->rifeScaleLabel,184,176,376,20);
@@ -748,6 +761,9 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
                         state->videoCombo, state->displayResolutionCombo, state->frameRateCombo,
                         state->upscalerCombo, state->cmaaQualityCombo, state->nisSharpnessCombo,
 #ifdef LLCV_RIFE_AUTO_UI_TEST
+#ifdef LLCV_INTERPOLATION_RELEASE
+                        state->playbackGpuCombo,
+#endif
                         state->rifeScaleCombo, state->rifeAutoUiCombo,
 #if defined(LLCV_FLYHIGH_TEST) || defined(LLCV_RIFE_OPTIONAL)
                         state->interpolationProviderCombo,
@@ -909,6 +925,10 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
 #endif
     SetSettingsControlVisible(state->surround51Check, audio, shared);
     SetSettingsControlVisible(state->surround51Hint, audio, shared);
+#ifdef LLCV_INTERPOLATION_RELEASE
+    SetSettingsControlVisible(state->playbackGpuLabel, video);
+    SetSettingsControlVisible(state->playbackGpuCombo, video);
+#endif
     for (HWND control : {state->videoCaptureSection,
                          state->videoRefreshButton,
                          state->videoDisplaySection,
@@ -1086,6 +1106,12 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
         : (state->english?L"HUD correction":L"HUD 보정"));
     const wchar_t* inputHint=
 #ifdef LLCV_INTERPOLATION_RELEASE
+        state->ShowVfgGpuSwitch() ? (state->english
+            ? L"Another VFG-capable GPU was found. Select it under Video → Playback GPU."
+            : L"다른 호환 GPU가 감지되었습니다. 영상 → 재생 그래픽카드에서 NVIDIA GPU를 선택합니다.") :
+        state->vfgGpuCheckFailed && !state->InterpolationGpuAvailable() ? (state->english
+            ? L"Could not check the playback GPU. Check the graphics driver and restart LLCV."
+            : L"재생 GPU를 확인하지 못했습니다. 그래픽 드라이버를 확인한 뒤 LLCV를 다시 실행합니다.") :
         !state->InterpolationGpuAvailable()?(state->english?L"VFG is not available on this GPU.":L"이 GPU에서는 VFG를 사용할 수 없습니다."):
 #ifdef LLCV_VFG_AMPERE_COMPAT
         state->vfgRtx30?(state->english?L"RTX 30: experimental compatibility · F7: toggle VFG":L"RTX 30: 실험적 호환 · F7: VFG 켜기/끄기"):

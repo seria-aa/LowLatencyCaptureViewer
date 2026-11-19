@@ -1,4 +1,10 @@
-LLCV v2.3.1 x64 (continued from the v0.14.2 rework)
+LLCV v2.3.2 x64 (continued from the v0.14.2 rework)
+
+v2.3.2 playback GPU selection
+----------------------------
+- Automatic prefers discrete graphics; Video settings can select a specific GPU.
+- Lists a physical GPU only once even if its driver exposes multiple adapters.
+- See tests/RELEASE_V2_3_2_AUDIT.md for verification.
 
 v2.3.1 VFG settings persistence
 ------------------------------
