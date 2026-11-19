@@ -34,6 +34,22 @@ Start video-only if capture audio cannot connect. Press F1 to see all assigned s
 
 <br>
 
+## Display latency compared with OBS
+
+Example measurements with **frame interpolation enabled** on an instrumented build based on LLCV 2.3.0. These are not new measurements of v2.3.2.
+
+| Presentation (fps) | Mean source-frame display latency | Compared with OBS fullscreen |
+| --- | ---: | ---: |
+| OBS fullscreen projector (60) | 43.5 ms | Baseline |
+| LLCV low latency · VFG Low (60 → 120) | 45.1 ms | +1.5 ms |
+| LLCV low latency · VFG Medium (60 → 120) | 47.9 ms | +4.4 ms |
+| LLCV exclusive fullscreen · VFG Low (60 → 120) | 29.9 ms | −13.6 ms |
+| LLCV exclusive fullscreen · VFG Medium (60 → 120) | 32.5 ms | −11.0 ms |
+
+GC573 · RTX 3080 · FHD 60 fps NV12 SDR capture · 4K 144 Hz monitor · OBS 32.2.2. Two runs per condition; the OBS fullscreen runs were measured separately. This is the mean time from the source frame's display event to the matching original frame's display event in the viewer. It does not measure button-to-screen latency, and 120 fps is the interpolation target. Deltas use the unrounded means.
+
+<br>
+
 ## Install and run
 
 Requires Windows 10/11 x64 and a capture-device driver.

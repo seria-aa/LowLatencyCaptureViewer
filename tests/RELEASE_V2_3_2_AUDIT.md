@@ -17,6 +17,10 @@ runtime and supported architecture policy are unchanged.
 - Extracted the portable ZIP and passed the release package validator for
   v2.3.2. All 100 payload hashes match the installer build manifest, including
   multiplicities. Setup and the packaged EXE report 2.3.2.
+- Rebuilt both packages after adding the OBS comparison to the READMEs.
+  The table reports the earlier instrumented v2.3.0 results, not new
+  measurements. The embedded executable hash is unchanged from the 204-test
+  build. The two packaging tests passed again with the updated documentation.
 - The packaged installer was not run. A separate Windows environment was not
   available for a clean install or in-place upgrade. Hybrid-GPU playback has
   not been tested on a physical iGPU + dGPU machine. No installed app profile
@@ -25,5 +29,5 @@ runtime and supported architecture policy are unchanged.
 | File | SHA-256 |
 | --- | --- |
 | Viewer EXE | `82EC78185453CA4606AA8FFF4503F4801F40CA8A9295B5F67E40F46F4A27DD3D` |
-| Setup | `A5A1CAD36DDC28E803DFF7C00FE0E1D48AF82E6C3B53AB9BF711699AA2F99C01` |
-| Portable ZIP | `DAF5CF460A1AA831713FEC4EBDF857613BF8E8BF2CE4D09B8CFE6436EED1A42E` |
+| Setup | `A10EED15F7DCB97931C8B5EABA44279AD4F5C4434C78D7C3DDCAF3706FA3A304` |
+| Portable ZIP | `212BCA51F4DC2E0AC934B09D6033C2CAB0DA23ACF1C78D2BFAC06B8CA8E845D3` |
