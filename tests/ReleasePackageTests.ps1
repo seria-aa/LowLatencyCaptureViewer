@@ -82,7 +82,7 @@ try {
     if (-not $diagnosticError.Contains('Audio-input recovery diagnostic')) {
         throw "Diagnostic build was not rejected by its marker: $diagnosticError"
     }
-    if ($Version -eq '2.3.0') {
+    if ([version]$Version -ge [version]'2.3.0') {
         Move-Item -LiteralPath (Join-Path $diagnosticBuild 'llcv-audio-recovery-diagnostic.txt') `
             -Destination (Join-Path $diagnosticBuild 'disabled-marker.txt')
         $stamp = Join-Path $diagnosticBuild 'llcv-release-vfg-sm86.sha256'

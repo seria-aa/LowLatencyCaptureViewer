@@ -432,6 +432,11 @@ LoadResult LoadFromIni(const std::wstring& path) {
     const int nisSharpness = ReadInt(path, L"Video", L"NisSharpness", 15);
     settings.nisSharpnessPercent = nisSharpness >= 0 && nisSharpness <= 100 ? nisSharpness : 15;
     settings.cmaaPreserve = ReadInt(path, L"Video", L"CmaaPreserve", 0) == 1;
+    settings.vfgEnabled = ReadInt(path, L"Video", L"VfgEnabled", 0) == 1;
+    settings.vfgPlaybackEnabled = settings.vfgEnabled &&
+        ReadInt(path, L"Video", L"VfgPlaybackEnabled", 1) == 1;
+    settings.vfgLowQuality = ReadInt(path, L"Video", L"VfgLowQuality", 0) == 1;
+    settings.vfgWaitForFrame = ReadInt(path, L"Video", L"VfgWaitForFrame", 0) == 1;
     if (settings.cmaaNisEnabled) settings.vsrEnabled = false;
     settings.preferredUpscaler = ReadInt(path, L"Video", L"PreferredUpscaler", 1) == 0
         ? UpscalingMethod::NvidiaVsr : UpscalingMethod::CmaaNis;
@@ -614,6 +619,10 @@ static DWORD WriteSettings(const std::wstring& file, const AppSettings& settings
     WriteInt(path, L"Video", L"PreferredUpscaler", static_cast<int>(SelectedUpscaler(settings)));
     WriteInt(path, L"Video", L"NisSharpness", std::clamp(settings.nisSharpnessPercent, 0, 100));
     WriteInt(path, L"Video", L"CmaaPreserve", settings.cmaaPreserve ? 1 : 0);
+    WriteInt(path, L"Video", L"VfgEnabled", settings.vfgEnabled ? 1 : 0);
+    WriteInt(path, L"Video", L"VfgPlaybackEnabled", settings.vfgEnabled && settings.vfgPlaybackEnabled ? 1 : 0);
+    WriteInt(path, L"Video", L"VfgLowQuality", settings.vfgLowQuality ? 1 : 0);
+    WriteInt(path, L"Video", L"VfgWaitForFrame", settings.vfgWaitForFrame ? 1 : 0);
     WriteInt(path, L"Diagnostics", L"ShowConsole",
              settings.showDiagnosticConsole ? 1 : 0);
     return path.error;
@@ -706,6 +715,14 @@ bool SaveToIni(const std::wstring& path, const AppSettings& settings,
                unsigned long* error) {
     return UpdateIniAtomically(path, [&](const auto& temporary) {
         return WriteSettings(temporary, settings);
+    }, error);
+}
+
+bool SaveVfgPlayback(const std::wstring& path, bool enabled, unsigned long* error) {
+    return UpdateIniAtomically(path, [&](const auto& temporary) {
+        IniWriter writer{temporary};
+        WriteInt(writer, L"Video", L"VfgPlaybackEnabled", enabled ? 1 : 0);
+        return writer.error;
     }, error);
 }
 

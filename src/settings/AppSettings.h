@@ -146,6 +146,10 @@ struct AppSettings {
     bool saveLog = false;
     bool screenshotClipboard = false;
     bool vsrEnabled = false;
+    bool vfgEnabled = false;
+    bool vfgPlaybackEnabled = false;
+    bool vfgLowQuality = false;
+    bool vfgWaitForFrame = false;
     bool cmaaNisEnabled = false;
     UpscalingMethod preferredUpscaler = UpscalingMethod::CmaaNis;
     int nisSharpnessPercent = 15; // 0..100; default 0.15. Display processing only.

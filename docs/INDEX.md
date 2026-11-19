@@ -4,7 +4,7 @@
 
 [README](../README.en.md) · [한국어](INDEX.ko.md)
 
-The current user guides cover **LLCV 2.3.0**. Historical development records are listed separately below.
+The current user guides cover **LLCV 2.3.1**. Historical development records are listed separately below.
 Features, defaults, and test results in historical records apply to the version and environment tested.
 User guides and their images are included in binary packages. Development and validation records are linked on GitHub and require an internet connection.
 
@@ -27,6 +27,7 @@ Each guide links to its Korean and English versions.
 
 ## Release notes
 
+- [v2.3.1](release-notes-v2.3.1.md)
 - [v2.3.0](release-notes-v2.3.0.md)
 - [v2.2.1](release-notes-v2.2.1.md)
 - [v2.2.0](release-notes-v2.2.0.md)

@@ -24,6 +24,8 @@ bool SaveToIni(const std::wstring& path, const AppSettings& settings,
 // Version-specific startup review. Acknowledgement changes only its marker,
 // never the immediate-start preference or unaccepted dialog values.
 bool StartupReviewRequired(const std::wstring& path, const std::wstring& version);
+// Persist a playback toggle without rewriting other (possibly temporary) settings.
+bool SaveVfgPlayback(const std::wstring& path, bool enabled, unsigned long* error = nullptr);
 bool MarkStartupSettingsShown(const std::wstring& path, const std::wstring& version,
                              unsigned long* error = nullptr);
 

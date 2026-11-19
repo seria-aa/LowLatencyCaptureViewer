@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$PackageRoot,
-    [string]$Version = "2.3.0"
+    [string]$Version = "2.3.1"
 )
 $ErrorActionPreference = "Stop"
 $package = (Resolve-Path -LiteralPath $PackageRoot).Path
@@ -10,7 +10,7 @@ $required = @("LowLatencyCaptureViewer.exe", "avformat-62.dll", "avcodec-62.dll"
     "ffmpeg-licenses/COPYING.LGPLv2.1", "ffmpeg-licenses/LICENSE.md",
     "ffmpeg-licenses/recording-ffmpeg-NOTICE.txt", "ffmpeg-licenses/config.mak",
     "README.md", "README.ko.md", "README.en.md", "docs/RECORDING.md", "docs/RECORDING.ko.md")
-if ($Version -eq '2.3.0') { $required += 'VFG-RTX30-NOTICE.txt' }
+if ([version]$Version -ge [version]'2.3.0') { $required += 'VFG-RTX30-NOTICE.txt' }
 foreach ($relative in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $package $relative) -PathType Leaf)) {
         throw "Missing release file: $relative"
