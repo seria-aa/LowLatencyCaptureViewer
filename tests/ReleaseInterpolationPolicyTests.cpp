@@ -1,8 +1,11 @@
 #include "video/RifeHalfTest.h"
 #include "video/VfgPreferences.h"
+#include "video/PlaybackGpu.h"
 #include "ui/SettingsView.h"
 #include "ui/SettingsDialogControls.h"
 #include <cstdio>
+#include <cstring>
+#include <cwchar>
 #ifdef LLCV_RECORDING
 #include "recording/RecordingOptions.h"
 #include "settings/SettingsStore.h"
@@ -112,7 +115,49 @@ static bool CheckVfgPreferences() {
 }
 #endif
 
-int main(){
+static int CheckPlaybackGpuHardware() {
+    using namespace llcv::video_gpu;
+    const auto inventory = Enumerate();
+    for (const auto& candidate : inventory) {
+        DXGI_ADAPTER_DESC1 desc{};
+        candidate.device->GetDesc1(&desc);
+        std::wprintf(L"Inventory: %ls (%ls); LUID=%08lx:%08lx; outputs=%d; selectable=%d\n",
+            candidate.name.c_str(), candidate.id.c_str(), static_cast<unsigned long>(desc.AdapterLuid.HighPart),
+            desc.AdapterLuid.LowPart,
+            OwnsMonitor(candidate.device.Get(), MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY)),
+            Find(inventory, candidate.id) != nullptr);
+    }
+    const auto adapter = Automatic();
+    if (!adapter) return 77;
+    if (inventory.empty()) return 4; // A hardware auto choice must not leave only Auto in the UI.
+    for (const auto& entry : inventory)
+        if (!Find(inventory, entry.id)) return 5;
+    DXGI_ADAPTER_DESC1 selected{};
+    if (FAILED(adapter->GetDesc1(&selected)) || (selected.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) return 1;
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    const HRESULT hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+        nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr);
+    if (FAILED(hr)) return 77; // Hardware/remote session does not permit D3D11 video.
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> actual;
+    DXGI_ADAPTER_DESC used{};
+    if (FAILED(device.As(&dxgi)) || FAILED(dxgi->GetAdapter(&actual)) || FAILED(actual->GetDesc(&used)) ||
+        std::memcmp(&selected.AdapterLuid, &used.AdapterLuid, sizeof(LUID)) != 0) return 2;
+    const auto primary = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    const auto exclusive = Automatic(primary);
+    if (exclusive && !OwnsMonitor(exclusive.Get(), primary)) return 3;
+    std::wprintf(L"Automatic adapter: %ls; D3D11 opened that adapter.\n", selected.Description);
+    return 0;
+}
+
+int main(int argc, char** argv){
+    if (argc == 2 && std::strcmp(argv[1], "--playback-gpu") == 0) return CheckPlaybackGpuHardware();
+    std::vector<llcv::video_gpu::Adapter> adapters{{L"intel", L"Integrated", {}}, {L"rtx", L"Discrete", {}}};
+    if (llcv::video_gpu::Find(adapters, L"rtx") != &adapters[1] ||
+        llcv::video_gpu::Find(adapters, L"") || llcv::video_gpu::Find(adapters, L"removed")) return 13;
+    adapters.push_back(adapters[1]);
+    if (llcv::video_gpu::Find(adapters, L"rtx")) return 14;
     if (componentsEnabled.load() || requested.load()) return 1;
     Request(true);
     if (requested.load()) return 2;

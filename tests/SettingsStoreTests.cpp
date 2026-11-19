@@ -68,6 +68,7 @@ void TestDefaults(const std::wstring& path) {
     Check(loaded.settings.audioOnlyWidth == 380 && loaded.settings.audioOnlyHeight == 230,
           "audio-only default size preserves old profiles");
     Check(loaded.settings.preferredDisplayMonitor.empty(), "default display is automatic");
+    Check(loaded.settings.playbackGpuId.empty(), "old profiles keep automatic GPU selection");
     Check(loaded.settings.audioMode ==
               llcv::settings::AudioMode::WasapiShared,
           "default audio mode");
@@ -479,6 +480,7 @@ void TestRoundTrip(const std::wstring& path) {
     saved.vsrEnabled = true;
     saved.capturePreset = VideoPreset::R1280x720;
     saved.preferredDisplayMonitor = L"interface:monitor-test-id";
+    saved.playbackGpuId = L"000010DE:00002206:000010DE:000000A1";
     saved.uiLanguage = UiLanguage::English;
     saved.settingsLightTheme = true;
     saved.audioMode = AudioMode::Asio;
@@ -540,6 +542,7 @@ void TestRoundTrip(const std::wstring& path) {
           "audio-only size round trip independent from video scale");
     Check(loaded.hdrChromaLocation == saved.hdrChromaLocation, "HDR chroma round trip");
     Check(loaded.preferredDisplayMonitor == saved.preferredDisplayMonitor, "display monitor round trip");
+    Check(loaded.playbackGpuId == saved.playbackGpuId, "playback GPU preference round trip");
     Check(loaded.uiLanguage == saved.uiLanguage, "language round trip");
     Check(loaded.settingsLightTheme, "light settings theme round trip");
     Check(loaded.audioMode == saved.audioMode, "audio mode round trip");

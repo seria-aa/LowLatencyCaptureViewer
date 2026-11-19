@@ -473,7 +473,11 @@ void CheckActualTabOrder() {
                 if (format == VideoPixelFormat::Mjpeg)
                     expected.insert(expected.end(), {c.mjpegColorCombo, c.mjpegColorHelp});
                 expected.insert(expected.end(), {c.presentationCombo, c.presentationHelp,
-                    c.displayMonitorCombo, c.pixelCheck});
+                    c.displayMonitorCombo});
+#ifdef LLCV_INTERPOLATION_RELEASE
+                expected.push_back(c.playbackGpuCombo);
+#endif
+                expected.push_back(c.pixelCheck);
                 // Equal capture/display sizes; CMAA/NIS replaces the ordinary scaler.
                 if (!pixelPerfect && upscaler != 1) expected.push_back(c.scalingCombo);
                 expected.insert(expected.end(), {c.displayResolutionCombo, c.upscalerCombo});
@@ -1266,10 +1270,26 @@ void CheckReleaseVfgControls() {
             SettingsPixels(c.clientHeightDip,dpi), nullptr, nullptr, GetModuleHandleW(nullptr), &state);
         Check(hwnd!=nullptr,"create release interpolation fixture");
         CreateActualContents(state,hwnd,english,dpi);
+        wchar_t gpuText[128]{};
+        SendMessageW(c.playbackGpuCombo, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(gpuText));
+        c.activeTab = SettingsTab::VideoWindow;
+        RefreshPreview(state);
+        Check(std::wstring_view(gpuText).find(english ? L"high-performance" : L"외장 그래픽 우선") != std::wstring_view::npos &&
+              (compact || (GetWindowLongPtrW(c.playbackGpuCombo,GWL_STYLE)&WS_VISIBLE)),
+              "video settings offer automatic high-performance GPU selection");
+        if (!compact) {
+            RECT monitor{}, gpu{};
+            GetWindowRect(c.displayMonitorCombo, &monitor);
+            GetWindowRect(c.playbackGpuCombo, &gpu);
+            Check(gpu.top == monitor.top && gpu.left > monitor.right,
+                  "playback GPU aligns next to the display monitor");
+        }
         c.activeTab = SettingsTab::Interpolation;
         c.vfgGpuSupported = true;
         SendMessageW(c.tabControl, LB_SETCURSEL, SettingsNavigationIndex(c.activeTab), 0);
         RefreshPreview(state);
+        Check(!(GetWindowLongPtrW(c.playbackGpuCombo,GWL_STYLE)&WS_VISIBLE),
+              "playback GPU stays on the video page");
         for (bool enabled : {true,false,true}) {
             llcv::rife_test::EnableComponents(enabled);
             UpdateInterpolationAvailability(&c);
@@ -1285,6 +1305,38 @@ void CheckReleaseVfgControls() {
         RefreshPreview(state);
         Check(!(GetWindowLongPtrW(c.vfgDownloadButton,GWL_STYLE)&WS_VISIBLE) &&
               !IsWindowEnabled(c.rifeHalfCheck),"unsupported VFG hides download and prevents opt-in");
+        c.vsrGpuUnavailable = true; // Windows selected a non-NVIDIA playback adapter.
+        c.vfgOtherCompatibleGpu = true;
+        RefreshPreview(state);
+        wchar_t text[256]{};
+        GetWindowTextW(c.vfgDownloadButton, text, ARRAYSIZE(text));
+        Check(std::wstring_view(text) == (english ? L"Windows graphics settings" : L"Windows 그래픽 설정") &&
+              (GetWindowLongPtrW(c.vfgDownloadButton,GWL_STYLE)&WS_VISIBLE) &&
+              IsWindowEnabled(c.vfgDownloadButton) && !IsWindowEnabled(c.rifeHalfCheck),
+              "hybrid GPUs offer graphics settings without enabling VFG on the wrong adapter");
+        GetWindowTextW(c.rifeAutoUiHints[0], text, ARRAYSIZE(text));
+        Check(std::wstring_view(text).find(english ? L"Playback GPU" : L"재생 그래픽카드") != std::wstring_view::npos,
+              "hybrid GPU guidance says what to change");
+        c.activeTab = SettingsTab::Audio;
+        RefreshVfgDownloadControl(&c);
+        Check(!(GetWindowLongPtrW(c.vfgDownloadButton,GWL_STYLE)&WS_VISIBLE),
+              "GPU shortcut stays on the interpolation page");
+        c.activeTab = SettingsTab::Interpolation;
+        c.vsrGpuUnavailable = false;
+        c.vfgOtherCompatibleGpu = false;
+        c.vfgGpuCheckFailed = true;
+        RefreshPreview(state);
+        GetWindowTextW(c.rifeAutoUiHints[0], text, ARRAYSIZE(text));
+        Check(std::wstring_view(text).find(english ? L"graphics driver" : L"그래픽 드라이버") != std::wstring_view::npos &&
+              !(GetWindowLongPtrW(c.vfgDownloadButton,GWL_STYLE)&WS_VISIBLE),
+              "a driver query failure is not reported as unsupported hardware");
+        c.vfgGpuSupported = true;
+        c.vfgOtherCompatibleGpu = true;
+        c.vfgGpuCheckFailed = false;
+        RefreshPreview(state);
+        GetWindowTextW(c.vfgDownloadButton, text, ARRAYSIZE(text));
+        Check(std::wstring_view(text) == (english ? L"Download VFG components" : L"VFG 구성품 받기"),
+              "supported playback keeps the component download after switching GPUs");
         DestroyWindow(hwnd);
         for (HFONT font : c.uiFonts) DeleteObject(font);
     }

@@ -61,6 +61,11 @@ struct SettingsControls {
     bool vfgRtx30 = false;
 #ifdef LLCV_INTERPOLATION_RELEASE
     bool vfgGpuSupported = false;
+    bool vfgOtherCompatibleGpu = false;
+    bool vfgGpuCheckFailed = false;
+    HWND playbackGpuLabel = nullptr;
+    HWND playbackGpuCombo = nullptr;
+    bool ShowVfgGpuSwitch() const { return !InterpolationGpuAvailable() && vfgOtherCompatibleGpu; }
 #endif
     bool InterpolationGpuAvailable() const {
 #ifdef LLCV_INTERPOLATION_RELEASE

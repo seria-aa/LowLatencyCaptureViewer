@@ -83,6 +83,7 @@ inline constexpr int IDC_SETTINGS_CREATE_REPORT = 2084;
 inline constexpr int IDC_SETTINGS_CMAA_QUALITY = 2085;
 inline constexpr int IDC_SETTINGS_RELEASE_NOTES = 2086;
 inline constexpr int IDC_SETTINGS_VFG_DOWNLOAD = 2095;
+inline constexpr int IDC_SETTINGS_PLAYBACK_GPU = 2096;
 inline constexpr int IDC_SETTINGS_SHORTCUT_FIRST = 2100;
 } // namespace control_id
 

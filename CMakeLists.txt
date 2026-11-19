@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 2.3.1 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 2.3.2 LANGUAGES CXX)
 
 include(cmake/MsvcDependencies.cmake)
 
@@ -1450,7 +1450,7 @@ endif()
 
 if(LLCV_INTERPOLATION_RELEASE)
     if(NOT LLCV_VFG_AMPERE_COMPAT)
-        install(CODE "message(FATAL_ERROR \"The v2.3.1 interpolation package requires the SM86 release configuration\")")
+        install(CODE "message(FATAL_ERROR \"The v2.3.2 interpolation package requires the SM86 release configuration\")")
     else()
         install(CODE "
             set(exe \"$<TARGET_FILE:LowLatencyCaptureViewer>\")
@@ -1607,7 +1607,7 @@ if(LLCV_INTERPOLATION_RELEASE)
         add_test(NAME VfgRuntimeMissingComponentTests COMMAND VfgRuntimeInstallTests --missing-component)
         add_executable(ReleaseInterpolationPolicyTests tests/ReleaseInterpolationPolicyTests.cpp)
         target_include_directories(ReleaseInterpolationPolicyTests PRIVATE src)
-        target_link_libraries(ReleaseInterpolationPolicyTests PRIVATE llcv_release_interpolation)
+        target_link_libraries(ReleaseInterpolationPolicyTests PRIVATE llcv_release_interpolation dxgi d3d11 gdi32)
         target_compile_definitions(ReleaseInterpolationPolicyTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         if(LLCV_RECORDING)
             target_sources(ReleaseInterpolationPolicyTests PRIVATE
@@ -1618,6 +1618,8 @@ if(LLCV_INTERPOLATION_RELEASE)
         target_compile_options(ReleaseInterpolationPolicyTests PRIVATE /utf-8)
         set_target_properties(ReleaseInterpolationPolicyTests PROPERTIES WIN32_EXECUTABLE FALSE)
         add_test(NAME ReleaseInterpolationPolicyTests COMMAND ReleaseInterpolationPolicyTests)
+        add_test(NAME PlaybackGpuHardwareTests COMMAND ReleaseInterpolationPolicyTests --playback-gpu)
+        set_tests_properties(PlaybackGpuHardwareTests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 20)
         if(LLCV_RECORDING)
             set(vfg_theme_fixture RecordingThemeTests)
         else()

@@ -558,6 +558,16 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
         WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTOCHECKBOX,600,540,376,26,hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(llcv::rife_test::CheckCommand)),instance,nullptr);
     SendMessageW(state->rifeHalfCheck,BM_SETCHECK,llcv::rife_test::requested.load()?BST_CHECKED:BST_UNCHECKED,0);
 #ifdef LLCV_INTERPOLATION_RELEASE
+    state->playbackGpuLabel = makeLabel(initial.english ? L"Playback GPU" : L"재생 그래픽카드", 184, 120);
+    state->playbackGpuCombo = CreateWindowExW(0, L"COMBOBOX", L"", kSettingsDropdownStyle,
+        184, 148, 376, 160, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_PLAYBACK_GPU)),
+        instance, nullptr);
+    SendMessageW(state->playbackGpuCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(
+        initial.english ? L"Automatic (high-performance first)" : L"자동 (외장 그래픽 우선)"));
+    SendMessageW(state->playbackGpuCombo, CB_SETCURSEL, 0, 0);
+    AddSettingsTooltip(state, hwnd, state->playbackGpuCombo, initial.english
+        ? L"Applies to all video playback. Automatic prefers a high-performance GPU. Exclusive fullscreen requires a GPU connected to the display."
+        : L"모든 영상 재생에 적용됩니다. 자동은 외장 그래픽을 우선합니다. 독점 전체화면은 표시 모니터가 연결된 GPU를 사용합니다.");
     state->vfgDownloadButton=CreateWindowExW(0,L"BUTTON",
         initial.english?L"Download VFG components":L"VFG 구성품 받기",WS_CHILD|WS_TABSTOP|BS_PUSHBUTTON,
         0,0,240,32,hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_VFG_DOWNLOAD)),instance,nullptr);
@@ -1131,7 +1141,11 @@ for(auto scale:llcv::rife_test::Scales){const auto index=SendMessageW(state->rif
         state->unlistedFpsStatus,
         state->videoDisplaySection,
         state->presentationLabel, state->presentationCombo, state->presentationHelp,
-        state->displayMonitorLabel, state->displayMonitorCombo, state->pixelCheck,
+        state->displayMonitorLabel, state->displayMonitorCombo,
+#ifdef LLCV_INTERPOLATION_RELEASE
+        state->playbackGpuLabel, state->playbackGpuCombo,
+#endif
+        state->pixelCheck,
         state->scalingLabel, state->scalingCombo,
         state->displayResolutionLabel, state->displayResolutionCombo, state->upscalerLabel, state->upscalerCombo,
         state->cmaaQualityLabel, state->cmaaQualityCombo,

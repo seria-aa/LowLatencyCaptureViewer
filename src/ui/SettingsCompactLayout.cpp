@@ -204,6 +204,9 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
         pages.Group(text(L"화면 표시",L"Display"));
         pages.HeadingField(s->presentationLabel,s->presentationCombo,s->presentationHelp);
         pages.Field(s->displayMonitorLabel,s->displayMonitorCombo);
+#ifdef LLCV_INTERPOLATION_RELEASE
+        pages.Field(s->playbackGpuLabel, s->playbackGpuCombo);
+#endif
         pages.Field(s->scalingLabel,s->scalingCombo);
         pages.Group(text(L"표시 해상도 · 업스케일링",L"Resolution & upscaling"));
         pages.Field(s->displayResolutionLabel,s->displayResolutionCombo);
@@ -238,7 +241,7 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
         pages.Group(text(L"RIFE",L"RIFE"));
 #endif
 #ifdef LLCV_INTERPOLATION_RELEASE
-        if (s->InterpolationGpuAvailable()) pages.Button(s->vfgDownloadButton);
+        if (s->InterpolationGpuAvailable() || s->ShowVfgGpuSwitch()) pages.Button(s->vfgDownloadButton);
 #endif
         pages.Check(s->rifeHalfCheck);
 #if (defined(LLCV_FLYHIGH_TEST) || defined(LLCV_RIFE_OPTIONAL)) && !defined(LLCV_INTERPOLATION_RELEASE)

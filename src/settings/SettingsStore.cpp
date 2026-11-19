@@ -413,6 +413,7 @@ LoadResult LoadFromIni(const std::wstring& path) {
             : FullscreenCursorMode::AutoHide;
 
     settings.preferredDisplayMonitor = ReadString(path, L"Video", L"DisplayMonitor");
+    settings.playbackGpuId = ReadString(path, L"Video", L"PlaybackGpu");
     settings.fullscreenVideoPosition = FullscreenPositionFromIndex(
         ReadInt(path, L"Video", L"FullscreenVideoPosition"));
     settings.windowSnap = ReadBool(path, L"Window", L"Snap", true);
@@ -608,6 +609,7 @@ static DWORD WriteSettings(const std::wstring& file, const AppSettings& settings
                     ? L"AlwaysVisible" : L"AutoHide");
 
     WriteString(path, L"Video", L"DisplayMonitor", settings.preferredDisplayMonitor.c_str());
+    WriteString(path, L"Video", L"PlaybackGpu", settings.playbackGpuId.c_str());
     WriteInt(path, L"Video", L"FullscreenVideoPosition",
         static_cast<int>(FullscreenPositionFromIndex(static_cast<int>(settings.fullscreenVideoPosition))));
     WriteInt(path, L"Window", L"Snap", settings.windowSnap ? 1 : 0);
