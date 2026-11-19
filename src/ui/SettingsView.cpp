@@ -229,7 +229,11 @@ void RefreshSettingsPageHeader(SettingsControls* state) {
         title = state->english ? L"Frame interpolation" : L"프레임 보간";
         subtitle = state->english ? L"Private RIFE comparison · Session-only settings." : L"RIFE 비교판 · 설정은 이번 실행에만 적용됩니다.";
 #ifdef LLCV_RIFE_OPTIONAL
+#ifdef LLCV_INTERPOLATION_RELEASE
+        subtitle=state->english?L"Choose whether to use NVIDIA VFG during playback.":L"재생 중 NVIDIA VFG를 사용할지 선택합니다.";
+#else
         subtitle=state->english?L"Enable components for this session, then toggle interpolation with F7.":L"이번 실행에서 구성품을 사용하려면 체크하세요. 이후 F7로 보간을 전환합니다.";
+#endif
 #endif
 #ifdef LLCV_FLYHIGH_TEST
         subtitle=state->english?L"FlyHighFG / RIFE comparison · Session-only settings.":L"FlyHighFG / RIFE 비교판 · 설정은 이번 실행에만 적용됩니다.";

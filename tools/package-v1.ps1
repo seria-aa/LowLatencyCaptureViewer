@@ -1,7 +1,7 @@
 ﻿param(
-    [string]$Version = "2.3.0",
-    [string]$BuildDir = "..\build-v2300-release",
-    [string]$OutputDir = "outputs\v2.3.0"
+    [string]$Version = "2.3.1",
+    [string]$BuildDir = "..\build-v2310-release",
+    [string]$OutputDir = "outputs\v2.3.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,7 +26,7 @@ $exeVersion = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
 if ($exeVersion -ne $Version -and $exeVersion -ne "$Version.0") {
     throw "Version mismatch: requested $Version but executable reports $exeVersion"
 }
-if ($Version -eq '2.3.0') {
+if ([version]$Version -ge [version]'2.3.0') {
     $stamp = Join-Path $build 'llcv-release-vfg-sm86.sha256'
     if (-not (Test-Path -LiteralPath $stamp -PathType Leaf)) {
         throw 'Build the VFG + SM86 release executable before packaging.'

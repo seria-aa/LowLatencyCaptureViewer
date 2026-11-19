@@ -5,7 +5,7 @@
 HDMI 캡처보드로 들어오는 영상과 소리를 재생하는 Windows용 저지연 뷰어입니다.
 OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리만 들을 수 있습니다.
 
-**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.3.0.md) · [English](README.en.md)
+**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.3.1.md) · [English](README.en.md)
 
 <br>
 
@@ -16,6 +16,10 @@ OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리�
 <sub>2.1.6 UI 예시입니다. 장치 목록과 지원 형식은 환경에 따라 다릅니다. 이미지를 누르면 원본 크기로 볼 수 있습니다.</sub>
 
 <br>
+
+## 2.3.1 업데이트
+
+F2로 설정을 열거나 앱을 다시 실행해도 VFG 사용 여부와 품질 설정을 기억합니다. F7로 끄거나 켠 상태도 사용 체크와 별도로 유지됩니다.
 
 ## 2.3.0 업데이트
 

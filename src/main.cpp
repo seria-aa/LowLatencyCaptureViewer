@@ -153,6 +153,7 @@ static bool g_useScrgbPrototype = false;
 #include "video/RifeHalfTest.h"
 #ifdef LLCV_INTERPOLATION_RELEASE
 #include "video/VfgRuntimeInstall.h"
+#include "video/VfgPreferences.h"
 #include "video/VfgGpuProbe.h"
 #endif
 static std::atomic<llcv::presentation::VfgBlock> g_vfgPresentationBlock{llcv::presentation::VfgBlock::None};
@@ -185,11 +186,11 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
 #if defined(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
-constexpr wchar_t kAppVersionLabel[] = L"v2.3.0-audio-recovery-diagnostic";
+constexpr wchar_t kAppVersionLabel[] = L"v2.3.1-audio-recovery-diagnostic";
 #elif defined(LLCV_VSR_EXPERIMENT)
-constexpr wchar_t kAppVersionLabel[] = L"v2.3.0-vsr-test";
+constexpr wchar_t kAppVersionLabel[] = L"v2.3.1-vsr-test";
 #else
-constexpr wchar_t kAppVersionLabel[] = L"v2.3.0";
+constexpr wchar_t kAppVersionLabel[] = L"v2.3.1";
 #endif
 
 constexpr int kRecommendedCaptureBufferMs = 20;
@@ -6190,6 +6191,9 @@ struct ExclusiveScanWork {
     std::vector<ExclusiveEndpointProbeResult> pending;
 };
 struct SettingsDialogState : llcv::settings_ui::SettingsControls {
+#ifdef LLCV_INTERPOLATION_RELEASE
+    bool vfgCheckboxEdited = false;
+#endif
     std::unique_ptr<llcv::settings_ui::SettingsModeCache<llcv::diagnostics::ReportResult>> reportQuery;
     std::unique_ptr<llcv::settings_ui::SettingsModeCache<SettingsVideoModes>> videoModeCache;
 #ifdef LLCV_RECORDING
@@ -7733,6 +7737,9 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
         // The user has explicitly accepted a new settings profile, so do not
         // preserve a stale immediate-start fallback from the previous run.
         g_exclusiveStartupFallback = false;
+#ifdef LLCV_INTERPOLATION_RELEASE
+        llcv::vfg::AcceptPreferences(g_settings, state->InterpolationGpuAvailable(), state->vfgCheckboxEdited);
+#endif
         SaveSettings(true);
     }
 
@@ -8215,6 +8222,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         }
 #endif
         if(state&&LOWORD(wParam)==llcv::rife_test::CheckCommand&&HIWORD(wParam)==BN_CLICKED){
+#ifdef LLCV_INTERPOLATION_RELEASE
+            state->vfgCheckboxEdited = true;
+#endif
 #ifdef LLCV_RIFE_OPTIONAL
             llcv::rife_test::EnableComponents(state->InterpolationGpuAvailable()&&SendMessageW(state->rifeHalfCheck,BM_GETCHECK,0,0)==BST_CHECKED);
             llcv::settings_ui::UpdateInterpolationAvailability(state);
@@ -10520,7 +10530,17 @@ static bool HandleViewerShortcut(HWND hwnd, WPARAM key, LPARAM flags, unsigned m
 #else
     if(key==VK_F7&&!modifiers&&found==g_settings.shortcuts.end()){
 #endif
-        if(!(flags&(LPARAM{1}<<30))){llcv::rife_test::Request(!llcv::rife_test::requested.load());ShowTransientHud(llcv::rife_test::requested.load()?TransientHudContent::RifePending:TransientHudContent::RifeOff);}
+        if (!(flags & (LPARAM{1} << 30))) {
+            const bool enabled = !llcv::rife_test::requested.load();
+            llcv::rife_test::Request(enabled);
+            ShowTransientHud(enabled ? TransientHudContent::RifePending : TransientHudContent::RifeOff);
+#ifdef LLCV_INTERPOLATION_RELEASE
+            g_settings.vfgPlaybackEnabled = enabled;
+            unsigned long error = 0;
+            if (!g_suppressSettingsSave && !llcv::settings::SaveVfgPlayback(SettingsPath(), enabled, &error))
+                fwprintf(stderr, L"[settings] VFG playback preference not saved (Win32=%lu).\n", error);
+#endif
+        }
         return true;
     }
 #ifndef LLCV_RIFE_OPTIONAL
@@ -11762,7 +11782,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
 #ifdef LLCV_INTERPOLATION_RELEASE
     {
         using namespace llcv::rife_test;
-        SelectScale(Scale::VfgMedium);
+        if (!smokeTest && !exclusiveProbe) {
+            llcv::vfg::RestorePreferences(g_settings, g_settings.vfgEnabled &&
+                llcv::vfg::ProbeGpuSupport(vsrAdapter.vendor, vsrAdapter.luid) != llcv::vfg::GpuSupport::Unavailable);
+        }
         if (const auto method=CommandLineOptionValue(L"--smoke-test-frame-interpolation"); !method.empty()) {
             if (!smokeVideoOverride || method!=L"vfg") return 2;
             EnableComponents(true);

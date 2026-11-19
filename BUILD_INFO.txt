@@ -1,4 +1,9 @@
-LLCV v2.3.0 x64 (continued from the v0.14.2 rework)
+LLCV v2.3.1 x64 (continued from the v0.14.2 rework)
+
+v2.3.1 VFG settings persistence
+------------------------------
+- Restores the VFG opt-in, quality, wait mode, and the separate F7 playback toggle.
+- See tests/RELEASE_V2_3_1_AUDIT.md for verification.
 
 v2.3.0 optional frame interpolation and recording improvements
 -------------------------------------------------------------

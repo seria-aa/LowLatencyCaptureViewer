@@ -1,4 +1,4 @@
-LLCV v2.3.0 - dependencies
+LLCV v2.3.1 - dependencies
 =========================
 
 License: GNU General Public License v3.0 or later. See the root LICENSE file.

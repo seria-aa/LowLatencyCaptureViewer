@@ -1,4 +1,5 @@
 #include "video/RifeHalfTest.h"
+#include "video/VfgPreferences.h"
 #include "ui/SettingsView.h"
 #include "ui/SettingsDialogControls.h"
 #include <cstdio>
@@ -74,6 +75,41 @@ static bool CheckUpgradeProfile() {
            settings::MarkStartupSettingsShown(profile, L"v2.3.0") &&
            !settings::StartupReviewRequired(profile, L"v2.3.0") && matches();
 }
+
+static bool CheckVfgPreferences() {
+    using namespace llcv;
+    if (!test_profile::Enabled()) return false;
+    const auto file = test_profile::Directory() + L"\\vfg-preferences.ini";
+    auto saved = settings::LoadFromIni(file).settings;
+    if (saved.vfgEnabled || saved.vfgLowQuality || saved.vfgWaitForFrame) return false;
+    EnableComponents(true);
+    SelectScale(Scale::VfgLow);
+    SetQualityComparison(true);
+    vfg::AcceptPreferences(saved, true, true);
+    if (!settings::SaveToIni(file, saved)) return false;
+    if (!WritePrivateProfileStringW(L"Unrelated", L"Keep", L"7", file.c_str())) return false;
+    if (!settings::SaveVfgPlayback(file, false) ||
+        GetPrivateProfileIntW(L"Unrelated", L"Keep", 0, file.c_str()) != 7) return false;
+    saved = settings::LoadFromIni(file).settings;
+    vfg::RestorePreferences(saved, true);
+    if (!componentsEnabled.load() || requested.load()) return false;
+    vfg::AcceptPreferences(saved, true, false); // F2, then Start without editing the checkbox.
+    if (saved.vfgPlaybackEnabled || !settings::SaveToIni(file, saved)) return false;
+    if (!settings::SaveVfgPlayback(file, true)) return false;
+    saved = settings::LoadFromIni(file).settings;
+    vfg::RestorePreferences(saved, false);
+    if (componentsEnabled.load() || requested.load()) return false;
+    vfg::AcceptPreferences(saved, false, false); // Unavailable GPU must not erase opt-in.
+    vfg::RestorePreferences(saved, true);
+    if (!componentsEnabled.load() || !requested.load() ||
+        selectedScale.load() != Scale::VfgLow || !qualityComparison.load()) return false;
+    EnableComponents(false);
+    vfg::AcceptPreferences(saved, true, true);
+    if (!settings::SaveToIni(file, saved)) return false;
+    vfg::RestorePreferences(settings::LoadFromIni(file).settings, true);
+    return !componentsEnabled.load() && !requested.load() &&
+        selectedScale.load() == Scale::VfgLow && qualityComparison.load();
+}
 #endif
 
 int main(){
@@ -103,6 +139,7 @@ int main(){
         std::fputs("v2.2.1 profile failed v2.3.0 startup/shortcut/recording compatibility.\n", stderr);
         return 11;
     }
+    if (!CheckVfgPreferences()) return 12;
 #endif
     std::puts("VFG-only UI policy, GPU support, shortcuts and interpolation opt-in passed.");
 }
