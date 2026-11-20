@@ -26,6 +26,7 @@ inline bool ApplySmokeVideoOptions(const std::vector<std::wstring>& args, AppSet
 #ifdef LLCV_RIFE_OPTIONAL
             else if(value==L"yuy2")next.pixelFormat=VideoPixelFormat::Yuy2;
             else if(value==L"uyvy")next.pixelFormat=VideoPixelFormat::Uyvy;
+            else if(value==L"mjpeg")next.pixelFormat=VideoPixelFormat::Mjpeg;
 #endif
             else return false;
         } else if (arg==L"--smoke-test-resolution") {
@@ -40,7 +41,7 @@ inline bool ApplySmokeVideoOptions(const std::vector<std::wstring>& args, AppSet
             if (value.empty() || value.size()>3) return false;
             int fps=0; for (wchar_t ch : value) { if (ch<L'0' || ch>L'9') return false; fps=fps*10+int(ch-L'0'); }
             if (fps<1 || fps>240) return false;
-            next.videoFrameRate=fps; next.capture40Fps=false;
+            next.videoFrameRate=fps; next.capture40Fps=false; next.rifeCaptureFrameRate=-1;
         }
     }
     if (any && !smoke) return false;

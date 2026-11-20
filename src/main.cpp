@@ -151,9 +151,15 @@ static bool g_useScrgbPrototype = false;
 #include "video/CmaaNisUpscaler.h"
 #ifdef LLCV_RIFE_TEST
 #include "video/RifeHalfTest.h"
+#ifdef LLCV_RIFE_VULKAN
+#include "video/RifeVulkanFast.h"
+#endif
 #ifdef LLCV_INTERPOLATION_RELEASE
 #include "video/VfgRuntimeInstall.h"
 #include "video/VfgPreferences.h"
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+#include "video/InterpolationMethodPolicy.h"
+#endif
 #include "video/VfgGpuProbe.h"
 #include "video/PlaybackGpu.h"
 #endif
@@ -187,11 +193,11 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
 #if defined(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
-constexpr wchar_t kAppVersionLabel[] = L"v2.3.2-audio-recovery-diagnostic";
+constexpr wchar_t kAppVersionLabel[] = L"v2.4.0-audio-recovery-diagnostic";
 #elif defined(LLCV_VSR_EXPERIMENT)
-constexpr wchar_t kAppVersionLabel[] = L"v2.3.2-vsr-test";
+constexpr wchar_t kAppVersionLabel[] = L"v2.4.0-vsr-test";
 #else
-constexpr wchar_t kAppVersionLabel[] = L"v2.3.2";
+constexpr wchar_t kAppVersionLabel[] = L"v2.4.0";
 #endif
 
 constexpr int kRecommendedCaptureBufferMs = 20;
@@ -1004,8 +1010,10 @@ static int RunExclusiveCompatibilityProbeCli(bool allEndpoints) {
 }
 
 static bool g_resolutionPlanLatched = false;
-static bool g_splitResolutionPlan = false;
 static VideoPreset g_capturePreset = VideoPreset::R1920x1080;
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+static std::atomic<bool> g_rifeCaptureOverride{false};
+#endif
 
 static const VideoPresetInfo& VideoPresetDetails(VideoPreset preset) {
     for (const auto& info : kVideoPresets) {
@@ -1019,15 +1027,21 @@ static const VideoPresetInfo& CurrentVideoPreset() {
 }
 
 static const VideoPresetInfo& CurrentCapturePreset() {
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    if (g_rifeCaptureOverride.load(std::memory_order_acquire))
+        return VideoPresetDetails(VideoPreset::R1920x1080);
+#endif
     return VideoPresetDetails(g_resolutionPlanLatched ? g_capturePreset :
         g_settings.capturePreset);
+}
+
+static bool SplitResolutionPlan() {
+    return !g_settings.audioOnly && CurrentCapturePreset().preset != CurrentVideoPreset().preset;
 }
 
 static void LatchVideoResolutionPlan() {
     g_fullscreenSourceSize.store(false, std::memory_order_release);
     g_capturePreset = g_settings.capturePreset;
-    g_splitResolutionPlan = !g_settings.audioOnly &&
-        VideoPresetDetails(g_capturePreset).preset != CurrentVideoPreset().preset;
     g_resolutionPlanLatched = true;
 }
 
@@ -1037,18 +1051,25 @@ static bool SourcePixelPerfect() {
 }
 
 static int RequestedVideoFrameRate() {
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    if (g_rifeCaptureOverride.load(std::memory_order_acquire)) {
+        const int rate = llcv::interpolation::RifeCaptureRate(g_settings);
+        return rate > 0 ? rate : llcv::interpolation::kRifeMaxCaptureRate;
+    }
+#endif
     if (g_settings.capture40Fps) return 40;
     return g_settings.videoFrameRate > 0
                ? g_settings.videoFrameRate
                : CurrentCapturePreset().framerate;
 }
+static bool RequestsExactCaptureRate();
 static void BeginCaptureReport() {
     g_captureFailureStage.store(L"initialize capture COM / validate output path");
     std::lock_guard lock(g_captureReportMutex);
     const auto preset = CurrentCapturePreset();
     g_captureRequestedDetail = L"Requested: " + std::to_wstring(preset.width) + L"x" +
         std::to_wstring(preset.height) + L" @ " +
-        (g_settings.capture40Fps || g_settings.videoFrameRate > 0
+        (RequestsExactCaptureRate()
             ? std::to_wstring(RequestedVideoFrameRate()) + L" fps" : L"Auto fps") + L", " + PixelFormatName(g_settings.pixelFormat) +
         (g_settings.audioOnly ? L", audio-only" : L", video+audio");
     g_captureConnectedDetail = g_settings.audioOnly ? L"Video layout: not applicable (audio-only)" : L"Connected layout: not confirmed";
@@ -1067,9 +1088,20 @@ static std::wstring CaptureReportDetails(bool english) {
 }
 
 static bool RequestsExactCaptureRate() {
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    if (g_rifeCaptureOverride.load(std::memory_order_acquire))
+        return llcv::interpolation::RifeCaptureRate(g_settings) > 0;
+#endif
     return g_settings.capture40Fps || g_settings.videoFrameRate > 0;
 }
 static bool AllowsUnlistedCaptureRate() {
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    if (g_rifeCaptureOverride.load(std::memory_order_acquire)) {
+        const int rate = llcv::interpolation::RifeCaptureRate(g_settings);
+        return (rate == 40 && g_settings.capture40Fps) ||
+            (rate == 30 && g_settings.allowUnlistedFps);
+    }
+#endif
     return g_settings.capture40Fps ||
         (g_settings.allowUnlistedFps && g_settings.videoFrameRate == 30);
 }
@@ -2332,12 +2364,17 @@ static HRESULT ConfigureVideoPin(
     int& configuredFps, VideoPixelFormat& configuredFormat,
     DirectShowColorMetadata& acceptedCandidateColor, GUID* acceptedCandidateSubtype = nullptr) {
     acceptedCandidateColor = {};
+    llcv::video::CaptureRateRange range;
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    if (g_rifeCaptureOverride.load(std::memory_order_acquire))
+        range = {llcv::interpolation::kRifeMinCaptureRate, llcv::interpolation::kRifeMaxCaptureRate};
+#endif
     return llcv::video::ConfigureVideoPin(
         videoPin, wantedWidth, wantedHeight, wantedFps, wantedFormat,
         imageBytes, stride, configuredFps, configuredFormat,
         LogModuleMessage, RequestsExactCaptureRate(),
         RequestsExactCaptureRate() ? &acceptedCandidateColor : nullptr,
-        AllowsUnlistedCaptureRate(), acceptedCandidateSubtype);
+        AllowsUnlistedCaptureRate(), acceptedCandidateSubtype, range);
 }
 
 static HRESULT GetActiveVideoPinFormat(
@@ -4656,13 +4693,16 @@ struct DirectD3D11Renderer {
                 rifeHalf.Invalidate();status=Status::Off;
             }
             else if(hdrOutput||
+#ifdef LLCV_RIFE_VULKAN
+                (VulkanSelected()&&!SupportsVulkanSdrTexture(inputFormat))||
+#endif
 #ifdef LLCV_RIFE_OPTIONAL
                 (inputFormat!=DXGI_FORMAT_NV12&&inputFormat!=DXGI_FORMAT_YUY2&&inputFormat!=DXGI_FORMAT_B8G8R8X8_UNORM&&inputFormat!=DXGI_FORMAT_R8G8B8A8_UNORM&&inputFormat!=DXGI_FORMAT_P010)||
 #else
                 inputFormat!=DXGI_FORMAT_NV12||
 #endif
                 !SupportsInput(scale,captureWidth,captureHeight)||
-                captureFps<24||captureFps>60||adapterVendor!=0x10de||
+                captureFps<24||captureFps>60||(adapterVendor!=0x10de&&!VulkanSelected())||
                 modeBlock!=llcv::presentation::VfgBlock::None||
                 (!IsVfg(scale)&&llcv::presentation::UsesVSync(mode))) {
                 rifeHalf.Invalidate();status=Status::Unsupported;
@@ -4733,8 +4773,18 @@ struct DirectD3D11Renderer {
         {
 #ifdef LLCV_RIFE_TEST
             D3D11_VIDEO_PROCESSOR_COLOR_SPACE savedColor{};
-            DXGI_COLOR_SPACE_TYPE savedRgb{};if(generatedInput&&rgbInput&&videoContext1)videoContext1->VideoProcessorGetStreamColorSpace1(processor,0,&savedRgb);
-            if(generatedInput){
+            DXGI_COLOR_SPACE_TYPE savedRgb{};
+            const bool restoreRgb=generatedInput&&rgbInput&&videoContext1;
+            const bool vulkanRgb=restoreRgb&&llcv::rife_test::VulkanSelected();
+            BOOL mirror=FALSE,flipX=FALSE,flipY=FALSE;
+            if(restoreRgb)videoContext1->VideoProcessorGetStreamColorSpace1(processor,0,&savedRgb);
+            if(vulkanRgb){
+                // Vulkan already converted to full-range RGB and consumed the
+                // original input's orientation. Do not flip its result twice.
+                videoContext1->VideoProcessorGetStreamMirror(processor,0,&mirror,&flipX,&flipY);
+                if(mirror)videoContext1->VideoProcessorSetStreamMirror(processor,0,FALSE,FALSE,FALSE);
+                videoContext1->VideoProcessorSetStreamColorSpace1(processor,0,DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+            }else if(generatedInput){
                 // NV12 SDR does not initialize the optional videoContext1.
                 // Its RGB midpoint uses the same legacy full-range contract as
                 // this processor's SDR output; restore source YUV state below.
@@ -4746,7 +4796,10 @@ struct DirectD3D11Renderer {
 #endif
             hr = processVideo(stream);
 #ifdef LLCV_RIFE_TEST
-            if(generatedInput&&rgbInput&&videoContext1)videoContext1->VideoProcessorSetStreamColorSpace1(processor,0,savedRgb);
+            if(restoreRgb){
+                videoContext1->VideoProcessorSetStreamColorSpace1(processor,0,savedRgb);
+                if(vulkanRgb&&mirror)videoContext1->VideoProcessorSetStreamMirror(processor,0,mirror,flipX,flipY);
+            }
             else if(generatedInput)videoContext->VideoProcessorSetStreamColorSpace(processor,0,&savedColor);
 #endif
         }
@@ -5190,7 +5243,7 @@ static HRESULT ValidateCaptureLayout(const wchar_t* stage, const AM_MEDIA_TYPE* 
 }
 
 static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false) {
-    const auto& preset = CurrentCapturePreset();
+    auto preset = CurrentCapturePreset();
     g_hdrFailureDetail.store(nullptr, std::memory_order_release);
     BeginCaptureReport();
     CaptureInitializationLease captureLease;
@@ -5296,26 +5349,48 @@ static bool UnifiedCaptureRenderLoop(HWND host, bool smokeVideoOverride = false)
         VideoPixelFormat configuredFormat = VideoPixelFormat::Nv12;
         DirectShowColorMetadata acceptedCandidateColor{};
         GUID acceptedCandidateSubtype{};
-        initializationStage = L"negotiate video resolution/FPS/pixel format";
-        hr = ConfigureVideoPin(videoPin, preset.width, preset.height,
-                               RequestedVideoFrameRate(),
-                               g_settings.pixelFormat,
-                               imageBytes, stride, configuredFps,
-                               configuredFormat, acceptedCandidateColor, &acceptedCandidateSubtype);
-        if (FAILED(hr)) {
-            LogHr(L"ConfigureVideoPin(exact format)", hr);
-            break;
+        const auto negotiateCapture=[&]() -> HRESULT {
+            initializationStage=L"negotiate video resolution/FPS/pixel format";
+            if(!llcv::presentation::SupportsCapture(g_settings.presentationMode,g_settings.pixelFormat))
+                return DXGI_ERROR_UNSUPPORTED;
+            HRESULT result=ConfigureVideoPin(videoPin,preset.width,preset.height,RequestedVideoFrameRate(),
+                g_settings.pixelFormat,imageBytes,stride,configuredFps,configuredFormat,
+                acceptedCandidateColor,&acceptedCandidateSubtype);
+            if(FAILED(result)){
+                LogHr(L"ConfigureVideoPin(exact format)",result);
+                return result;
+            }
+            initializationStage=L"read active video capture format";
+            result=GetActiveVideoPinFormat(videoPin,&activeVideoType);
+            if(FAILED(result))return result;
+            if(!activeVideoType)return E_UNEXPECTED;
+            initializationStage=L"validate active video layout";
+            result=ValidateCaptureLayout(L"active",activeVideoType,preset.width,preset.height,
+                configuredFormat,imageBytes,stride,configuredFps);
+            if(SUCCEEDED(result))ConfirmCaptureReport(configuredFormat,preset.width,preset.height,configuredFps,stride);
+            if(SUCCEEDED(result)&&RequestsExactCaptureRate()&&
+                !llcv::video::IsRequestedFrameRate(activeVideoType,RequestedVideoFrameRate()))
+                return llcv::video::kRequestedFrameRateMismatch;
+            return result;
+        };
+        hr=negotiateCapture();
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        if (g_rifeCaptureOverride.load(std::memory_order_acquire) &&
+            (FAILED(hr) || !llcv::interpolation::RifeCaptureRateSupported(configuredFps))) {
+            fwprintf(stderr,L"[rife-vulkan] FHD input unavailable (0x%08X, %d fps); retrying saved capture settings.\n",
+                     static_cast<unsigned>(hr),configuredFps);
+            g_rifeCaptureOverride.store(false,std::memory_order_release);
+            preset=CurrentCapturePreset();
+            BeginCaptureReport();
+            if(activeVideoType){
+                FreeMediaType(*activeVideoType);
+                CoTaskMemFree(activeVideoType);
+                activeVideoType=nullptr;
+            }
+            imageBytes=0;stride=0;configuredFps=0;acceptedCandidateColor={};acceptedCandidateSubtype={};
+            hr=negotiateCapture();
         }
-        initializationStage = L"read active video capture format";
-        hr = GetActiveVideoPinFormat(videoPin, &activeVideoType);
-        if (FAILED(hr) || !activeVideoType) break;
-        initializationStage = L"validate active video layout";
-        hr = ValidateCaptureLayout(L"active", activeVideoType, preset.width, preset.height,
-            configuredFormat, imageBytes, stride, configuredFps);
-        if (SUCCEEDED(hr)) ConfirmCaptureReport(configuredFormat, preset.width, preset.height, configuredFps, stride);
-        if (SUCCEEDED(hr) && RequestsExactCaptureRate() &&
-            !llcv::video::IsRequestedFrameRate(activeVideoType, RequestedVideoFrameRate()))
-            hr = llcv::video::kRequestedFrameRateMismatch;
+#endif
         if (FAILED(hr)) break;
         const bool compressedVideo = IsCompressedVideoFormat(configuredFormat);
         const VideoPixelFormat rendererInputFormat = compressedVideo
@@ -6238,6 +6313,8 @@ struct ExclusiveScanWork {
 struct SettingsDialogState : llcv::settings_ui::SettingsControls {
 #ifdef LLCV_INTERPOLATION_RELEASE
     bool vfgCheckboxEdited = false;
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+#endif
     std::vector<llcv::video_gpu::Adapter> playbackGpus;
 #endif
     std::unique_ptr<llcv::settings_ui::SettingsModeCache<llcv::diagnostics::ReportResult>> reportQuery;
@@ -6814,6 +6891,11 @@ static int SelectedCaptureFrameRate(const SettingsDialogState* state) {
 
 static bool SettingsVideoSelectionAvailable(const SettingsDialogState* state) {
     if (!state || state->videoModesPending) return false;
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    // Let the capture pin verify the temporary FHD input and fall back to the
+    // original capture settings if the driver rejects it.
+    if(llcv::settings_ui::SettingsRifeCaptureOverride(*state))return !state->captureDevices.empty();
+#endif
     const auto format = SelectedPixelFormat(state);
     const int fps = SelectedCaptureFrameRate(state);
     const bool directRequest =
@@ -7251,6 +7333,27 @@ static void UpdateVideoCapabilityStatus(SettingsDialogState* state) {
     llcv::settings_ui::SetSettingsText(state->videoCapabilityStatus, message.c_str());
 }
 
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+static void PopulateRifeCaptureFrameRates(SettingsDialogState* state) {
+    if (!llcv::settings_ui::SettingsRifeCaptureOverride(*state)) return;
+    const auto format = SelectedPixelFormat(state);
+    std::vector<int> rates;
+    for (const auto& mode : state->pixelFormats) {
+        if (format == VideoPixelFormat::Auto
+            ? IsAutoSelectableVideoFormat(mode.format) : mode.format == format)
+            rates.push_back(mode.selectedFps);
+    }
+    const bool capture40 = SendMessageW(state->capture40Check, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (!rates.empty()) {
+        if (capture40) rates.push_back(40);
+        if (SendMessageW(state->unlistedFpsCheck, BM_GETCHECK, 0, 0) == BST_CHECKED) rates.push_back(30);
+    }
+    const int rate = llcv::interpolation::RifeCaptureRate(state->rifeCaptureFrameRate,
+        SelectedCaptureFrameRate(state), capture40);
+    llcv::settings_ui::PopulateRifeCaptureRatePicker(state->rifeCaptureFps, state->english, rate, rates);
+}
+#endif
+
 static void PopulateFrameRateCombo(SettingsDialogState* state) {
     if (!state || !state->frameRateCombo) return;
     int desiredFrameRate = g_settings.videoFrameRate;
@@ -7272,6 +7375,9 @@ static void PopulateFrameRateCombo(SettingsDialogState* state) {
                      static_cast<WPARAM>(noModeIndex), desiredFrameRate);
         SendMessageW(state->frameRateCombo, CB_SETCURSEL,
                      static_cast<WPARAM>(noModeIndex), 0);
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        PopulateRifeCaptureFrameRates(state);
+#endif
         return;
     }
     const LRESULT autoIndex = SendMessageW(
@@ -7319,6 +7425,9 @@ static void PopulateFrameRateCombo(SettingsDialogState* state) {
     }
     SendMessageW(state->frameRateCombo, CB_SETCURSEL,
                  static_cast<WPARAM>(selectedIndex), 0);
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    PopulateRifeCaptureFrameRates(state);
+#endif
 }
 
 static void PopulatePixelFormatCombo(SettingsDialogState* state) {
@@ -7330,11 +7439,24 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
                             static_cast<LRESULT>(ARRAYSIZE(kVideoPresets))) {
         return;
     }
-    const auto& preset = kVideoPresets[videoIndex];
+    VideoPixelFormat desiredFormat=g_settings.pixelFormat;
+    if(SendMessageW(state->pixelFormatCombo,CB_GETCOUNT,0,0)>0)
+        desiredFormat=SelectedPixelFormat(state);
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    const auto& preset=llcv::settings_ui::SettingsRifeCaptureOverride(*state,desiredFormat)
+        ? VideoPresetDetails(VideoPreset::R1920x1080) : kVideoPresets[videoIndex];
+#else
+    const auto& preset=kVideoPresets[videoIndex];
+#endif
     const llcv::settings_ui::ModeQueryKey key{SelectedCaptureDeviceId(state), preset.width, preset.height};
     // Display-only changes, repeated notifications and completed stale queries
     // must not reset the lists or re-open a capture device.
-    if (state->appliedVideoModeKey == key && !state->videoModesPending) return;
+    if (state->appliedVideoModeKey == key && !state->videoModesPending) {
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        PopulateRifeCaptureFrameRates(state);
+#endif
+        return;
+    }
     if (!state->videoModeCache) {
         const HWND owner = GetParent(state->videoCombo);
         state->videoModeCache = std::make_unique<llcv::settings_ui::SettingsModeCache<SettingsVideoModes>>(
@@ -7355,10 +7477,6 @@ static void PopulatePixelFormatCombo(SettingsDialogState* state) {
     state->videoModesPending = false;
     if (!modes->messages.empty()) fwprintf(stderr,L"%s",modes->messages.c_str());
     state->appliedVideoModeKey = key;
-    VideoPixelFormat desiredFormat = g_settings.pixelFormat;
-    if (SendMessageW(state->pixelFormatCombo, CB_GETCOUNT, 0, 0) > 0) {
-        desiredFormat = SelectedPixelFormat(state);
-    }
     state->pixelFormats = modes->formats;
     state->videoCapabilityQueryStatus = modes->status;
     state->videoCapabilityDiagnostics = modes->diagnostics;
@@ -7792,7 +7910,17 @@ static void FinishSettingsDialog(HWND hwnd, SettingsDialogState* state, bool acc
         // preserve a stale immediate-start fallback from the previous run.
         g_exclusiveStartupFallback = false;
 #ifdef LLCV_INTERPOLATION_RELEASE
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        g_settings.interpolationMethod=state->interpolationMethod;
+        g_settings.rifeHudMode=state->rifeHudMode;
+        g_settings.rifeCaptureFrameRate=state->rifeCaptureFrameRate;
+        g_settings.vfgEnabled=state->interpolationEnabled;
+        if(state->vfgCheckboxEdited)g_settings.vfgPlaybackEnabled=state->interpolationEnabled;
+        g_settings.vfgLowQuality=state->interpolationVfgLow;
+        g_settings.vfgWaitForFrame=state->interpolationVfgWait;
+#else
         llcv::vfg::AcceptPreferences(g_settings, state->InterpolationGpuAvailable(), state->vfgCheckboxEdited);
+#endif
 #endif
         SaveSettings(true);
     }
@@ -7925,12 +8053,14 @@ static void RefreshPlaybackGpuChoice(SettingsDialogState* state) {
     }
     const auto probe = ProbePlaybackChoice(selected, monitor);
     SetSettingsPlaybackGpuStatus(state, probe.vendor, probe.luid);
+#ifndef LLCV_RIFE_VULKAN_BUNDLED
     using namespace llcv::rife_test;
     if (state->InterpolationGpuAvailable() && !state->vfgCheckboxEdited &&
         g_settings.vfgEnabled && !componentsEnabled.load()) {
         EnableComponents(true);
         Request(g_settings.vfgPlaybackEnabled);
     }
+#endif
 }
 #endif
 
@@ -8269,8 +8399,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
     case WM_TIMER:
 #ifdef LLCV_INTERPOLATION_RELEASE
         if (state && wParam == llcv::settings_ui::control_id::IDC_SETTINGS_VFG_DOWNLOAD) {
-            if (state->activeTab == SettingsTab::Interpolation)
+            if (state->activeTab == SettingsTab::Interpolation) {
                 llcv::settings_ui::RefreshVfgDownloadControl(state);
+            }
             return 0;
         }
 #endif
@@ -8310,11 +8441,17 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
              LOWORD(wParam) == llcv::settings_ui::control_id::IDC_SETTINGS_PRESENTATION)) {
             llcv::settings_ui::SettingsVisualUpdate visualUpdate(hwnd);
             RefreshPlaybackGpuChoice(state);
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+            PopulatePixelFormatCombo(state);
+#endif
             UpdateAdvancedControlVisibility(state);
             if (LOWORD(wParam) == llcv::settings_ui::control_id::IDC_SETTINGS_PLAYBACK_GPU) return 0;
         }
         if (state && LOWORD(wParam) == llcv::settings_ui::control_id::IDC_SETTINGS_VFG_DOWNLOAD && HIWORD(wParam) == BN_CLICKED) {
             if (state->activeTab != SettingsTab::Interpolation) return 0;
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+            if(state->interpolationMethod==llcv::settings::InterpolationMethod::RifeVulkan)return 0;
+#endif
             if (state->ShowVfgGpuSwitch()) {
                 if (reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd, L"open",
                         L"ms-settings:display-advancedgraphics", nullptr, nullptr, SW_SHOWNORMAL)) <= 32) {
@@ -8351,6 +8488,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
 #ifdef LLCV_RIFE_AUTO_UI_TEST
         if(state&&LOWORD(wParam)==llcv::rife_test::AutoUiCommand&&HIWORD(wParam)==CBN_SELCHANGE){
             const auto index=SendMessageW(state->rifeAutoUiCombo,CB_GETCURSEL,0,0);
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+            if(index>=0&&index<=2)state->rifeHudMode=static_cast<int>(index);
+#else
 #ifdef LLCV_FLYHIGH_TEST
             if(llcv::rife_test::IsFlyHigh()){
                 if(index>=0&&index<=1){llcv::rife_test::flyHighHud=index==1;ShowTransientHud(TransientHudContent::RifeAutoUi);}
@@ -8358,11 +8498,23 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             }
 #endif
             if(index>=0&&index<=2){llcv::rife_test::SetSelectedHudWidth(index==1?16:index==2?32:0);ShowTransientHud(TransientHudContent::RifeAutoUi);}
+#endif
             return 0;
         }
 #endif
 #ifdef LLCV_RIFE_TEST
-#if defined(LLCV_RIFE_OPTIONAL) && !defined(LLCV_INTERPOLATION_RELEASE)
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        if(state&&LOWORD(wParam)==llcv::rife_test::ProviderCommand&&HIWORD(wParam)==CBN_SELCHANGE){
+            using Method=llcv::settings::InterpolationMethod;
+            const auto index=SendMessageW(state->interpolationProviderCombo,CB_GETCURSEL,0,0);
+            if(index!=0 && index!=1) return 0;
+            state->interpolationMethod=index==0?Method::RifeVulkan:Method::NvidiaVfg;
+            llcv::settings_ui::SettingsVisualUpdate visualUpdate(hwnd);
+            PopulatePixelFormatCombo(state);
+            UpdateAdvancedControlVisibility(state);
+            return 0;
+        }
+#elif defined(LLCV_RIFE_OPTIONAL) && !defined(LLCV_INTERPOLATION_RELEASE)
         if(state&&LOWORD(wParam)==llcv::rife_test::ProviderCommand&&HIWORD(wParam)==CBN_SELCHANGE){
             if(IsWindowEnabled(state->interpolationProviderCombo))llcv::rife_test::SelectScale((SendMessageW(state->interpolationProviderCombo,CB_GETCURSEL,0,0)==1?llcv::rife_test::lastVfg:llcv::rife_test::lastRife).load());
             UpdateAdvancedControlVisibility(state);return 0;
@@ -8372,6 +8524,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
 #ifdef LLCV_INTERPOLATION_RELEASE
             state->vfgCheckboxEdited = true;
 #endif
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+            state->interpolationEnabled=SendMessageW(state->rifeHalfCheck,BM_GETCHECK,0,0)==BST_CHECKED;
+            PopulatePixelFormatCombo(state);
+            UpdateAdvancedControlVisibility(state);
+            return 0;
+#else
 #ifdef LLCV_RIFE_OPTIONAL
             llcv::rife_test::EnableComponents(state->InterpolationGpuAvailable()&&SendMessageW(state->rifeHalfCheck,BM_GETCHECK,0,0)==BST_CHECKED);
             llcv::settings_ui::UpdateInterpolationAvailability(state);
@@ -8380,11 +8538,16 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
 #endif
             ShowTransientHud(llcv::rife_test::requested.load()?TransientHudContent::RifePending:TransientHudContent::RifeOff);
             return 0;
+#endif
         }
         if(state&&LOWORD(wParam)==llcv::rife_test::ScaleCommand&&HIWORD(wParam)==CBN_SELCHANGE){
             const auto index=SendMessageW(state->rifeScaleCombo,CB_GETCURSEL,0,0);
             if(index==CB_ERR) return 0;
             const auto scale=static_cast<llcv::rife_test::Scale>(SendMessageW(state->rifeScaleCombo,CB_GETITEMDATA,index,0));
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+            if(llcv::rife_test::IsVfg(scale))state->interpolationVfgLow=scale==llcv::rife_test::Scale::VfgLow;
+            return 0;
+#else
 #ifdef LLCV_INTERPOLATION_RELEASE
             if(!llcv::rife_test::IsVfg(scale)) return 0;
 #endif
@@ -8395,10 +8558,15 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
                 ShowTransientHud(llcv::rife_test::requested.load()?TransientHudContent::RifePending:TransientHudContent::RifeOff);
             }
             return 0;
+#endif
         }
         if(state&&LOWORD(wParam)==llcv::rife_test::QualityCommand&&HIWORD(wParam)==BN_CLICKED){
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+            state->interpolationVfgWait=SendMessageW(state->rifeQualityCheck,BM_GETCHECK,0,0)==BST_CHECKED;
+#else
             llcv::rife_test::SetQualityComparison(SendMessageW(state->rifeQualityCheck,BM_GETCHECK,0,0)==BST_CHECKED);
             ShowTransientHud(llcv::rife_test::requested.load()?TransientHudContent::RifePending:TransientHudContent::RifeOff);
+#endif
             return 0;
         }
 #endif
@@ -8711,6 +8879,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         }
         if (LOWORD(wParam) == IDC_SETTINGS_AUDIO_ONLY &&
             HIWORD(wParam) == BN_CLICKED) {
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+            PopulatePixelFormatCombo(state);
+#endif
             UpdateVideoCapabilityStatus(state);
             UpdateAdvancedControlVisibility(state);
             return 0;
@@ -8730,6 +8901,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
         }
         if (LOWORD(wParam) == IDC_SETTINGS_PIXEL_FORMAT &&
             HIWORD(wParam) == CBN_SELCHANGE) {
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+            PopulatePixelFormatCombo(state);
+#endif
             PopulateFrameRateCombo(state);
             UpdateVideoCapabilityStatus(state);
             UpdateAdvancedControlVisibility(state);
@@ -8760,6 +8934,19 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg,
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        if (state && LOWORD(wParam) == IDC_SETTINGS_RIFE_CAPTURE_FPS && HIWORD(wParam) == CBN_SELCHANGE) {
+            if (llcv::settings_ui::SettingsRifeCaptureOverride(*state)) {
+                const auto row = SendMessageW(state->rifeCaptureFps, CB_GETCURSEL, 0, 0);
+                if (row >= 0) {
+                    const auto rate = SendMessageW(state->rifeCaptureFps, CB_GETITEMDATA, row, 0);
+                    if (rate == 0 || llcv::interpolation::RifeCaptureRateSupported(static_cast<int>(rate)))
+                        state->rifeCaptureFrameRate = static_cast<int>(rate);
+                }
+            }
+            return 0;
+        }
+#endif
         if (LOWORD(wParam) == IDC_SETTINGS_CAPTURE_40 && HIWORD(wParam) == BN_CLICKED) {
             UpdateVideoCapabilityStatus(state);
             UpdateAdvancedControlVisibility(state);
@@ -8873,6 +9060,13 @@ static bool ShowSettingsDialog(HINSTANCE hInst,
     }
 
     SettingsDialogState state{};
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    state.interpolationMethod=g_settings.interpolationMethod;
+    state.interpolationEnabled=g_settings.vfgEnabled;
+    state.interpolationVfgLow=g_settings.vfgLowQuality;
+    state.interpolationVfgWait=g_settings.vfgWaitForFrame;
+    state.rifeHudMode=g_settings.rifeHudMode;
+#endif
     state.activeTab = g_settings.audioOnly ? SettingsTab::Audio : SettingsTab::VideoWindow;
 #ifdef LLCV_RECORDING
     state.recordingLive=liveViewer!=nullptr;
@@ -9140,7 +9334,7 @@ static SIZE DesiredClientPixelsForMonitor(HMONITOR monitor) {
 static SIZE InitialClientPixelsForMonitor(HMONITOR monitor) {
     const auto& video = CurrentVideoPreset();
     // Explicit display selection wins at startup; F6 never changes this plan.
-    if (g_splitResolutionPlan) return SIZE{video.width, video.height};
+    if (SplitResolutionPlan()) return SIZE{video.width, video.height};
     // Monitor-relative sizing is independent from Pixel-perfect. When it is
     // enabled, restore the same monitor-relative scale that was used before
     // shutdown, including when the saved monitor is a smaller display.
@@ -10145,7 +10339,7 @@ static std::wstring BuildRuntimeOsdText(int outputWidth, int outputHeight) {
                    static_cast<unsigned long long>(clipEvents));
     }
 
-    const wchar_t* scaleText = g_splitResolutionPlan
+    const wchar_t* scaleText = SplitResolutionPlan()
         ? (IsEnglishUi() ? L"Display size" : L"표시 크기") :
         g_settings.pixelPerfect && g_settings.relativeWindowSize
             ? UI_TEXT(L"Pixel-perfect 시작 · Monitor-relative 이동")
@@ -10673,7 +10867,8 @@ static bool HandleViewerShortcut(HWND hwnd, WPARAM key, LPARAM flags, unsigned m
 #ifdef LLCV_RIFE_TEST
 #ifdef LLCV_RIFE_OPTIONAL
     if(keys::Match(g_settings.shortcuts,keys::Action::FrameInterpolation,UINT(key),modifiers)){
-        if(!llcv::rife_test::componentsEnabled.load()||!llcv::vsr::NvidiaAdapter(g_vsrGpuVendor.load()))return false;
+        if(!llcv::rife_test::componentsEnabled.load()||
+           (!llcv::rife_test::VulkanSelected()&&!llcv::vsr::NvidiaAdapter(g_vsrGpuVendor.load())))return false;
 #else
     if(key==VK_F7&&!modifiers&&found==g_settings.shortcuts.end()){
 #endif
@@ -11653,11 +11848,27 @@ static bool SuppressSettingsWritesForRun(const wchar_t* commandLine) {
 #else
     return commandLine &&
         (wcsstr(commandLine, L"--smoke-test") != nullptr ||
+#ifdef LLCV_RIFE_VULKAN
+         // Decided before settings are read, so no migration or save runs.
+         wcsstr(commandLine, L"--rife-vulkan-fast") != nullptr ||
+#endif
          wcsstr(commandLine, L"--exclusive-probe") != nullptr);
 #endif
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
+#ifdef LLCV_RIFE_VULKAN
+    if(const auto report=CommandLineOptionValue(L"--rife-vulkan-hud-compare");!report.empty()){
+        const auto models=CommandLineOptionValue(L"--rife-vulkan-fast");
+        if(models.empty())return 2;
+        const auto candidate=CommandLineOptionValue(L"--rife-vulkan-hud-trial");
+        using llcv::rife_vulkan::HudTrial;
+        if(!candidate.empty()&&candidate!=L"tiled"&&candidate!=L"empty"&&candidate!=L"weak"&&candidate!=L"flip")return 2;
+        return llcv::rife_vulkan::FastBackend::CompareHud(models,report,
+            candidate==L"empty"?HudTrial::EmptyMask:candidate==L"weak"?HudTrial::WeakChroma:
+            candidate==L"flip"?HudTrial::InputFlip:HudTrial::Tiled);
+    }
+#endif
 #ifdef LLCV_RECORDING
     const int probeExit = llcv::recording::RunEncoderProbeChild(commandLine,
         [] { return llcv::recording::ProbeEncoders(); });
@@ -11940,13 +12151,62 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
     {
         using namespace llcv::rife_test;
         if (!smokeTest && !exclusiveProbe) {
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+            vulkanModelDirectory = AppDirectory() + L"\\rife-vulkan";
+            useBundledInterpolation = true;
+#endif
             llcv::vfg::RestorePreferences(g_settings, g_settings.vfgEnabled &&
                 llcv::vfg::ProbeGpuSupport(vsrAdapter.vendor, vsrAdapter.luid) != llcv::vfg::GpuSupport::Unavailable);
         }
         if (const auto method=CommandLineOptionValue(L"--smoke-test-frame-interpolation"); !method.empty()) {
-            if (!smokeVideoOverride || method!=L"vfg") return 2;
+            if (!smokeVideoOverride) return 2;
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+            if (method==L"rife") {
+                vulkanModelDirectory=AppDirectory()+L"\\rife-vulkan";
+                useBundledInterpolation=true;
+                g_settings.interpolationMethod=llcv::settings::InterpolationMethod::RifeVulkan;
+                g_settings.vfgEnabled=g_settings.vfgPlaybackEnabled=true;
+            } else
+#endif
+            if (method!=L"vfg") return 2;
             EnableComponents(true);
         }
+#ifdef LLCV_RIFE_VULKAN
+        vulkanTryRgbCopy=smokeTest &&
+            std::find(smokeArgs.begin(),smokeArgs.end(),L"--rife-vulkan-rgb-copy")!=smokeArgs.end();
+        // Hidden measurement session: RIFE Fast on Vulkan, nothing persisted.
+        if (const auto models=CommandLineOptionValue(L"--rife-vulkan-fast"); !models.empty()) {
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+            useBundledInterpolation = false;
+#endif
+            const auto preset=CommandLineOptionValue(L"--rife-vulkan-preset");
+            if (!preset.empty() && preset!=L"fast" && preset!=L"half") return 2;
+            vulkanScale=preset==L"half"?Scale::Half:Scale::Fast;
+            vulkanModelDirectory = models;
+            vulkanTraceFile = CommandLineOptionValue(L"--rife-vulkan-trace");
+            const auto hudOption = CommandLineOptionValue(L"--rife-vulkan-hud");
+            if (!hudOption.empty() && hudOption != L"on" && hudOption != L"off" && hudOption != L"chroma") return 2;
+            vulkanHudChroma = hudOption == L"chroma";
+            vulkanHud = hudOption == L"on" || vulkanHudChroma;
+            g_suppressSettingsSave = true;
+            SelectScale(vulkanScale);
+            SetQualityComparison(false);
+            EnableComponents(true);
+            // Optional in-memory output for the measurement: QHD with CMAA2 -> NIS.
+            const auto upscale = CommandLineOptionValue(L"--rife-vulkan-upscale");
+            if (!upscale.empty()) {
+                if (upscale != L"cmaa-qhd") return 2;
+                g_settings.displayMatchesCapture = false;
+                g_settings.videoPreset = VideoPreset::R2560x1440;
+                g_settings.pixelPerfect = false;
+                g_settings.cmaaNisEnabled = true;
+                g_settings.vsrEnabled = false;
+                g_settings.preferredUpscaler = llcv::settings::UpscalingMethod::CmaaNis;
+            }
+            fwprintf(stderr, L"[rife-vulkan] measurement session; settings are not saved; output=%s.\n",
+                     upscale.empty() ? L"saved" : L"QHD CMAA2->NIS");
+        }
+#endif
     }
 #endif
     if (!llcv::vsr::NvidiaAdapter(vsrAdapter.vendor)) g_settings.vsrEnabled = false;
@@ -11971,8 +12231,37 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         g_audioOsdVisible.store(true, std::memory_order_release);
     }
 
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    if (llcv::rife_test::useBundledInterpolation) {
+        using namespace llcv::rife_test;
+        using llcv::settings::InterpolationMethod;
+        // The adapter policy is shared with the renderer. Latch the method before
+        // connecting the capture pin; a later runtime download must not restart it.
+        bool vfgGpu=false;
+        if(g_settings.vfgEnabled && !g_settings.audioOnly &&
+           g_settings.interpolationMethod!=InterpolationMethod::RifeVulkan){
+            const auto adapters=g_settings.playbackGpuId.empty()?std::vector<llcv::video_gpu::Adapter>{}:
+                llcv::video_gpu::Enumerate();
+            const auto* preferred=llcv::video_gpu::Find(adapters,g_settings.playbackGpuId);
+            HMONITOR monitor=ExclusiveOutputSelected()?SavedViewerMonitor():nullptr;
+            if(ExclusiveOutputSelected()&&!monitor)monitor=MonitorFromPoint(POINT{0,0},MONITOR_DEFAULTTOPRIMARY);
+            const auto adapter=ProbePlaybackChoice(preferred?preferred->device.Get():nullptr,monitor);
+            vfgGpu=llcv::vfg::ProbeGpuSupport(adapter.vendor,adapter.luid)!=llcv::vfg::GpuSupport::Unavailable;
+        }
+        const auto provider=llcv::interpolation::ChooseProvider(g_settings.interpolationMethod,vfgGpu,true);
+        const bool rife=provider==llcv::interpolation::Provider::RifeVulkan;
+        SelectScale(rife?Scale::Fast:g_settings.vfgLowQuality?Scale::VfgLow:Scale::VfgMedium);
+        SetQualityComparison(!rife&&g_settings.vfgWaitForFrame);
+        vulkanHud=g_settings.rifeHudMode!=0;
+        vulkanHudChroma=g_settings.rifeHudMode==2;
+        EnableComponents(g_settings.vfgEnabled);
+        Request(g_settings.vfgEnabled&&g_settings.vfgPlaybackEnabled);
+        g_rifeCaptureOverride.store(llcv::interpolation::UseRifeCaptureOverride(provider,g_settings.vfgEnabled,
+            g_settings.audioOnly,g_settings.pixelFormat)&&!llcv::presentation::UsesVSync(g_settings.presentationMode),std::memory_order_release);
+    }
+#endif
     LatchVideoResolutionPlan();
-    if (g_splitResolutionPlan) {
+    if (SplitResolutionPlan()) {
         const auto& capture = CurrentCapturePreset();
         const auto& display = CurrentVideoPreset();
         fwprintf(stderr, L"[video] resolution plan: capture %d x %d -> display %d x %d; VSR toggles preserve both.\n",
@@ -12163,7 +12452,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         fwprintf(stderr, L"[video] window client area: %ld x %ld%s\n",
                  clientRect.right - clientRect.left,
                  clientRect.bottom - clientRect.top,
-                 g_splitResolutionPlan ? L" (display size)" : g_settings.pixelPerfect
+                 SplitResolutionPlan() ? L" (display size)" : g_settings.pixelPerfect
                      ? L" (pixel-perfect)"
                      : g_settings.relativeWindowSize
                            ? L" (monitor-relative)" : L"");

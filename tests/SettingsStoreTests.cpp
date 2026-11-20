@@ -63,6 +63,7 @@ void TestDefaults(const std::wstring& path) {
     Check(!loaded.settings.screenshotClipboard, "screenshot clipboard is opt-in");
     Check(!loaded.settings.capture40Fps, "40fps is opt-in for fresh and legacy profiles");
     Check(!loaded.settings.allowUnlistedFps, "unlisted FPS is opt-in for fresh and legacy profiles");
+    Check(loaded.settings.rifeCaptureFrameRate == -1, "older profiles inherit their compatible capture rate");
     Check(!loaded.settings.vsrEnabled, "VSR defaults OFF for fresh/legacy settings");
     Check(!loaded.settings.consoleSurround51, "5.1 is opt-in for old and fresh profiles");
     Check(loaded.settings.audioOnlyWidth == 380 && loaded.settings.audioOnlyHeight == 230,
@@ -506,6 +507,7 @@ void TestRoundTrip(const std::wstring& path) {
     saved.videoPreset = VideoPreset::R3840x2160;
     saved.pixelFormat = VideoPixelFormat::P010;
     saved.videoFrameRate = 60;
+    saved.rifeCaptureFrameRate = 30;
     saved.captureDeviceId = L"capture-id";
     saved.captureAudioDeviceId = L"capture-audio-id";
     saved.presentationMode = PresentationMode::VSync;
@@ -587,6 +589,8 @@ void TestRoundTrip(const std::wstring& path) {
           "diagnostics round trip");
     Check(loaded.screenshotClipboard, "screenshot clipboard round trip");
     Check(loaded.capture40Fps, "40fps opt-in round trip");
+    Check(loaded.rifeCaptureFrameRate == 30 && loaded.videoFrameRate == 60,
+          "RIFE and ordinary capture rates round trip independently");
     Check(loaded.allowUnlistedFps, "unlisted FPS opt-in round trip");
     Check(loaded.skipStartupSettings && !loaded.checkForUpdates &&
               loaded.audioOnly && !loaded.preventSleep,

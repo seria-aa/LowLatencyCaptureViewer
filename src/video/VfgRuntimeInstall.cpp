@@ -183,7 +183,7 @@ void Activate(const fs::path& wheel, const fs::path& work, const fs::path& store
     }
 }
 void Download(const fs::path& wheel, Service& service, bool interruptOnceForTest) {
-    const Internet session{WinHttpOpen(L"LLCV/2.3.2 VFG Installer", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    const Internet session{WinHttpOpen(L"LLCV/2.4.0 VFG Installer", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0)};
     Check(session.h && WinHttpSetTimeouts(session.h, 10000, 15000, 15000, 15000), "NVIDIA connection");
     DWORD tls = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;

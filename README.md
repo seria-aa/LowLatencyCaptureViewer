@@ -5,7 +5,7 @@
 HDMI 캡처보드로 들어오는 영상과 소리를 재생하는 Windows용 저지연 뷰어입니다.
 OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리만 들을 수 있습니다.
 
-**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.3.2.md) · [English](README.en.md)
+**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.4.0.md) · [English](README.en.md)
 
 <br>
 
@@ -16,6 +16,12 @@ OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리�
 <sub>2.1.6 UI 예시입니다. 장치 목록과 지원 형식은 환경에 따라 다릅니다. 이미지를 누르면 원본 크기로 볼 수 있습니다.</sub>
 
 <br>
+
+## 2.4.0 업데이트
+
+**RIFE Vulkan 프레임 보간**을 추가했습니다. 저지연 출력에서 FHD SDR 입력에 사용할 수 있으며 별도 다운로드가 필요 없습니다. 프레임 보간 탭에서 RIFE Vulkan 또는 NVIDIA VFG를 선택할 수 있습니다. 보간은 기본적으로 꺼져 있고, 기존 VFG 설정은 유지됩니다.
+
+[프레임 보간 안내](docs/FRAME_INTERPOLATION.ko.md)
 
 ## 2.3.2 업데이트
 
@@ -36,7 +42,7 @@ F2로 설정을 열거나 앱을 다시 실행해도 VFG 사용 여부와 품질
 
 ## OBS 대비 화면 표시 지연
 
-LLCV 2.3.0 기반 계측 빌드에서 **프레임 보간을 켠 상태**로 측정한 예입니다. 2.3.2에서 새로 측정한 값은 아닙니다.
+LLCV 2.3.0 기반 계측 빌드에서 **NVIDIA VFG**를 켠 상태로 측정한 예입니다. RIFE Vulkan의 지연을 측정한 값은 아닙니다.
 
 | 표시 방식 (프레임) | 원본 표시 평균 | OBS 전체화면 대비 |
 | --- | ---: | ---: |

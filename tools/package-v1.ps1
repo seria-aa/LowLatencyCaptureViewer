@@ -1,7 +1,7 @@
 ﻿param(
-    [string]$Version = "2.3.2",
-    [string]$BuildDir = "..\build-v2320-release",
-    [string]$OutputDir = "outputs\v2.3.2"
+    [string]$Version = "2.4.0",
+    [string]$BuildDir = "..\build-v2400-release",
+    [string]$OutputDir = "outputs\v2.4.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +36,24 @@ if ([version]$Version -ge [version]'2.3.0') {
     }
 }
 
+$rifeBundle = Join-Path $build 'rife-vulkan'
+$rifeAssets = @('fast-fold-cache.ncnn.param','fast-fold-cache.ncnn.bin',
+    'fast-encoder.ncnn.param','fast-encoder.ncnn.bin','RIFE-MODEL-LICENSE.txt','NCNN-LICENSE.txt','GLSLANG-LICENSE.txt')
+$includeRife = [version]$Version -ge [version]'2.4.0' -or
+    (Test-Path -LiteralPath (Join-Path $rifeBundle 'fast-fold-cache.ncnn.bin') -PathType Leaf)
+if ($includeRife) {
+    $rifeStamp = Join-Path $build 'llcv-release-rife-vulkan.sha256'
+    if (!(Test-Path -LiteralPath $rifeStamp -PathType Leaf) -or
+        (Get-Content -LiteralPath $rifeStamp -TotalCount 1).Trim() -ne (Get-FileHash -LiteralPath $exe).Hash) {
+        throw 'Build the bundled RIFE Vulkan executable before packaging.'
+    }
+    foreach ($asset in $rifeAssets) {
+        if (!(Test-Path -LiteralPath (Join-Path $rifeBundle $asset) -PathType Leaf)) {
+            throw "Missing bundled RIFE file: $asset"
+        }
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 foreach ($required in @("avformat-62.dll", "avcodec-62.dll", "avutil-60.dll",
         "ffmpeg-licenses/COPYING.LGPLv2.1", "ffmpeg-licenses/LICENSE.md",
@@ -57,6 +75,13 @@ if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 New-Item -ItemType Directory -Force -Path $portable | Out-Null
 
 Copy-Item -LiteralPath $exe -Destination $portable
+if ($includeRife) {
+    $rifeTarget = Join-Path $portable 'rife-vulkan'
+    New-Item -ItemType Directory -Path $rifeTarget | Out-Null
+    foreach ($asset in $rifeAssets) {
+        Copy-Item -LiteralPath (Join-Path $rifeBundle $asset) -Destination $rifeTarget
+    }
+}
 # Only the pinned mux runtime is shipped, never the development SDK or FFmpeg tools.
 foreach ($dll in @("avformat-62.dll", "avcodec-62.dll", "avutil-60.dll")) {
     Copy-Item -LiteralPath (Join-Path $build $dll) -Destination $portable

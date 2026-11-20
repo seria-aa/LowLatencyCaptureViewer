@@ -84,6 +84,7 @@ inline constexpr int IDC_SETTINGS_CMAA_QUALITY = 2085;
 inline constexpr int IDC_SETTINGS_RELEASE_NOTES = 2086;
 inline constexpr int IDC_SETTINGS_VFG_DOWNLOAD = 2095;
 inline constexpr int IDC_SETTINGS_PLAYBACK_GPU = 2096;
+inline constexpr int IDC_SETTINGS_RIFE_CAPTURE_FPS = 2097;
 inline constexpr int IDC_SETTINGS_SHORTCUT_FIRST = 2100;
 } // namespace control_id
 
@@ -120,6 +121,9 @@ void PopulateCaptureDevicePicker(HWND picker, std::span<const capture::DeviceInf
                                  const std::wstring& selected, bool audio, bool english);
 void PopulateNisSharpnessPicker(HWND picker, int selectedPercent);
 int SelectedNisSharpness(HWND picker);
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+void PopulateRifeCaptureRatePicker(HWND picker, bool english, int rate, std::span<const int> detectedRates);
+#endif
 void ApplyResolutionSelections(const SettingsControls& state,
                               std::span<const settings::VideoPresetInfo> presets,
                               settings::AppSettings& settings);

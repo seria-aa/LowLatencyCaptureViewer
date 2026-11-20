@@ -92,7 +92,6 @@ static void TestPolicy() {
         }
     }
     g_resolutionPlanLatched = false;
-    g_splitResolutionPlan = false;
     g_vsrMode.store(Mode::Disabled);
     g_settings = savedSettings;
     g_vsrGpuVendor = savedVendor;
@@ -1579,7 +1578,6 @@ static void TestSplitResolutionRenderer(HWND window) {
     g_settings = saved;
     g_fullscreen = fullscreen;
     g_resolutionPlanLatched = false;
-    g_splitResolutionPlan = false;
     g_vsrMode = llcv::vsr::Mode::Disabled;
 }
 

@@ -1,5 +1,6 @@
 #include "settings/SettingsStore.h"
 #include "settings/TestProfile.h"
+#include "video/InterpolationMethodPolicy.h"
 
 #include <windows.h>
 
@@ -380,6 +381,9 @@ LoadResult LoadFromIni(const std::wstring& path) {
     }
     settings.videoFrameRate =
         std::max(0, ReadInt(path, L"Video", L"FrameRate"));
+    const int rifeCaptureFrameRate = ReadInt(path, L"Video", L"RifeCaptureFrameRate", -1);
+    if (rifeCaptureFrameRate == 0 || interpolation::RifeCaptureRateSupported(rifeCaptureFrameRate))
+        settings.rifeCaptureFrameRate = rifeCaptureFrameRate;
     settings.capture40Fps = ReadBool(path, L"Video", L"Capture40Fps");
     settings.allowUnlistedFps = ReadBool(path, L"Video", L"AllowUnlistedFps");
     const auto presentation = ReadString(path, L"Video", L"Presentation",
@@ -438,6 +442,13 @@ LoadResult LoadFromIni(const std::wstring& path) {
         ReadInt(path, L"Video", L"VfgPlaybackEnabled", 1) == 1;
     settings.vfgLowQuality = ReadInt(path, L"Video", L"VfgLowQuality", 0) == 1;
     settings.vfgWaitForFrame = ReadInt(path, L"Video", L"VfgWaitForFrame", 0) == 1;
+    const int interpolationMethod = ReadInt(path, L"Video", L"InterpolationMethod", -1);
+    // Released profiles before the method picker stored only the VFG opt-in.
+    // The development build's Automatic (0) maps to RIFE.
+    settings.interpolationMethod = interpolationMethod == 1 || (interpolationMethod == -1 && settings.vfgEnabled)
+        ? InterpolationMethod::NvidiaVfg : InterpolationMethod::RifeVulkan;
+    const int rifeHudMode = ReadInt(path, L"Video", L"RifeHudMode", kDefaultRifeHudMode);
+    settings.rifeHudMode = rifeHudMode >= 0 && rifeHudMode <= 2 ? rifeHudMode : kDefaultRifeHudMode;
     if (settings.cmaaNisEnabled) settings.vsrEnabled = false;
     settings.preferredUpscaler = ReadInt(path, L"Video", L"PreferredUpscaler", 1) == 0
         ? UpscalingMethod::NvidiaVsr : UpscalingMethod::CmaaNis;
@@ -581,6 +592,9 @@ static DWORD WriteSettings(const std::wstring& file, const AppSettings& settings
     WriteString(path, L"Video", L"PixelFormat",
                 PixelFormatSettingName(settings.pixelFormat));
     WriteInt(path, L"Video", L"FrameRate", settings.videoFrameRate);
+    WriteInt(path, L"Video", L"RifeCaptureFrameRate",
+        interpolation::RifeCaptureRateSupported(settings.rifeCaptureFrameRate)
+            ? settings.rifeCaptureFrameRate : settings.rifeCaptureFrameRate == 0 ? 0 : -1);
     WriteInt(path, L"Video", L"Capture40Fps", settings.capture40Fps ? 1 : 0);
     WriteInt(path, L"Video", L"AllowUnlistedFps", settings.allowUnlistedFps ? 1 : 0);
     WriteString(path, L"Video", L"Presentation",
@@ -625,6 +639,8 @@ static DWORD WriteSettings(const std::wstring& file, const AppSettings& settings
     WriteInt(path, L"Video", L"VfgPlaybackEnabled", settings.vfgEnabled && settings.vfgPlaybackEnabled ? 1 : 0);
     WriteInt(path, L"Video", L"VfgLowQuality", settings.vfgLowQuality ? 1 : 0);
     WriteInt(path, L"Video", L"VfgWaitForFrame", settings.vfgWaitForFrame ? 1 : 0);
+    WriteInt(path, L"Video", L"InterpolationMethod", static_cast<int>(settings.interpolationMethod));
+    WriteInt(path, L"Video", L"RifeHudMode", std::clamp(settings.rifeHudMode, 0, 2));
     WriteInt(path, L"Diagnostics", L"ShowConsole",
              settings.showDiagnosticConsole ? 1 : 0);
     return path.error;

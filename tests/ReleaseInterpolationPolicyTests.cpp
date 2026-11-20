@@ -1,5 +1,6 @@
 #include "video/RifeHalfTest.h"
 #include "video/VfgPreferences.h"
+#include "video/InterpolationMethodPolicy.h"
 #include "video/PlaybackGpu.h"
 #include "ui/SettingsView.h"
 #include "ui/SettingsDialogControls.h"
@@ -13,6 +14,33 @@
 #endif
 
 using namespace llcv::rife_test;
+using Method = llcv::settings::InterpolationMethod;
+using Provider = llcv::interpolation::Provider;
+static_assert(llcv::interpolation::ChooseProvider(Method::NvidiaVfg,true,true)==Provider::NvidiaVfg);
+static_assert(llcv::interpolation::ChooseProvider(Method::NvidiaVfg,false,true)==Provider::Unavailable);
+static_assert(llcv::interpolation::ChooseProvider(Method::RifeVulkan,true,true)==Provider::RifeVulkan);
+static_assert(llcv::interpolation::ChooseProvider(Method::RifeVulkan,false,true)==Provider::RifeVulkan);
+static_assert(llcv::interpolation::ChooseProvider(Method::RifeVulkan,true,false)==Provider::Unavailable);
+using Pixel = llcv::settings::VideoPixelFormat;
+static_assert(llcv::interpolation::UseRifeCaptureOverride(Provider::RifeVulkan,true,false,Pixel::Rgb24));
+static_assert(!llcv::interpolation::UseRifeCaptureOverride(Provider::RifeVulkan,true,false,Pixel::P010));
+static_assert(!llcv::interpolation::UseRifeCaptureOverride(Provider::RifeVulkan,false,false,Pixel::Nv12));
+static_assert(!llcv::interpolation::UseRifeCaptureOverride(Provider::RifeVulkan,true,true,Pixel::Nv12));
+static_assert(!llcv::interpolation::UseRifeCaptureOverride(Provider::NvidiaVfg,true,false,Pixel::Nv12));
+static_assert(!llcv::interpolation::UseRifeCaptureOverride(Provider::Unavailable,true,false,Pixel::Nv12));
+static_assert(llcv::interpolation::RifeCaptureRate(-1, 120, false) == 0);
+static_assert(llcv::interpolation::RifeCaptureRate(-1, 30, false) == 30);
+static_assert(llcv::interpolation::RifeCaptureRate(-1, 60, true) == 40);
+static_assert(llcv::interpolation::RifeCaptureRate(0, 30, true) == 0);
+static_assert(llcv::interpolation::RifeCaptureRate(24, 120, false) == 24);
+static_assert(llcv::interpolation::RifeCaptureRate(60, 30, true) == 60);
+static_assert(!llcv::interpolation::RifeCaptureRateSupported(23) &&
+              !llcv::interpolation::RifeCaptureRateSupported(61));
+#ifdef LLCV_RIFE_VULKAN
+static_assert(SupportsVulkanSdrTexture(DXGI_FORMAT_NV12) && SupportsVulkanSdrTexture(DXGI_FORMAT_YUY2) &&
+    SupportsVulkanSdrTexture(DXGI_FORMAT_B8G8R8X8_UNORM) && SupportsVulkanSdrTexture(DXGI_FORMAT_R8G8B8A8_UNORM) &&
+    !SupportsVulkanSdrTexture(DXGI_FORMAT_P010));
+#endif
 static_assert(llcv::settings_ui::control_id::IDC_SETTINGS_VFG_DOWNLOAD != CheckCommand &&
               llcv::settings_ui::control_id::IDC_SETTINGS_VFG_DOWNLOAD != ScaleCommand &&
               llcv::settings_ui::control_id::IDC_SETTINGS_VFG_DOWNLOAD != QualityCommand &&
@@ -84,7 +112,29 @@ static bool CheckVfgPreferences() {
     if (!test_profile::Enabled()) return false;
     const auto file = test_profile::Directory() + L"\\vfg-preferences.ini";
     auto saved = settings::LoadFromIni(file).settings;
-    if (saved.vfgEnabled || saved.vfgLowQuality || saved.vfgWaitForFrame) return false;
+    if (saved.vfgEnabled || saved.vfgLowQuality || saved.vfgWaitForFrame ||
+        saved.interpolationMethod!=Method::RifeVulkan || saved.rifeHudMode!=2) return false;
+    const auto legacy=test_profile::Directory()+L"\\legacy-vfg.ini";
+    if(!WritePrivateProfileStringW(L"Video",L"VfgEnabled",L"1",legacy.c_str())||
+       !WritePrivateProfileStringW(L"Video",L"VfgPlaybackEnabled",L"0",legacy.c_str()))return false;
+    auto legacySettings=settings::LoadFromIni(legacy).settings;
+    if(legacySettings.interpolationMethod!=Method::NvidiaVfg||legacySettings.vfgPlaybackEnabled||
+       legacySettings.rifeHudMode!=2)return false;
+    if(!WritePrivateProfileStringW(L"Video",L"InterpolationMethod",L"0",legacy.c_str()))return false;
+    const auto previousAuto=settings::LoadFromIni(legacy).settings;
+    if(previousAuto.interpolationMethod!=Method::RifeVulkan||!previousAuto.vfgEnabled||
+       previousAuto.vfgPlaybackEnabled)return false;
+    legacySettings.interpolationMethod=Method::RifeVulkan;
+    legacySettings.rifeHudMode=2;
+    if(!settings::SaveToIni(legacy,legacySettings))return false;
+    legacySettings=settings::LoadFromIni(legacy).settings;
+    if(legacySettings.interpolationMethod!=Method::RifeVulkan||legacySettings.rifeHudMode!=2||
+       legacySettings.vfgPlaybackEnabled)return false;
+    for(const int mode:{0,1}) {
+        legacySettings.rifeHudMode=mode;
+        if(!settings::SaveToIni(legacy,legacySettings)||settings::LoadFromIni(legacy).settings.rifeHudMode!=mode)
+            return false;
+    }
     EnableComponents(true);
     SelectScale(Scale::VfgLow);
     SetQualityComparison(true);

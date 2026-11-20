@@ -1,4 +1,7 @@
 #pragma once
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+#include "settings/AppSettings.h"
+#endif
 
 #include <windows.h>
 #include <string>
@@ -63,6 +66,17 @@ struct SettingsControls {
     bool vfgGpuSupported = false;
     bool vfgOtherCompatibleGpu = false;
     bool vfgGpuCheckFailed = false;
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    llcv::settings::InterpolationMethod interpolationMethod = llcv::settings::InterpolationMethod::RifeVulkan;
+    int rifeHudMode = llcv::settings::kDefaultRifeHudMode;
+    bool interpolationEnabled = false;
+    bool interpolationVfgLow = false;
+    bool interpolationVfgWait = false;
+    HWND rifeCaptureResolution = nullptr;
+    HWND rifeCaptureFps = nullptr;
+    int rifeCaptureFrameRate = -1;
+    HWND rifeCaptureHint = nullptr;
+#endif
     HWND playbackGpuLabel = nullptr;
     HWND playbackGpuCombo = nullptr;
     bool ShowVfgGpuSwitch() const { return !InterpolationGpuAvailable() && vfgOtherCompatibleGpu; }
@@ -343,6 +357,10 @@ void CancelShortcutEdit(SettingsControls* state);
 bool ProcessShortcutEdit(SettingsControls* state, const MSG& message,
                          unsigned modifiers=shortcuts::Modifiers());
 void SetSettingsControlVisible(HWND control, bool visible, bool enabled = true);
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+bool SettingsRifeCaptureOverride(const SettingsControls& state);
+bool SettingsRifeCaptureOverride(const SettingsControls& state, settings::VideoPixelFormat format);
+#endif
 void SetSettingsText(HWND control, const wchar_t* text);
 #ifdef LLCV_INTERPOLATION_RELEASE
 void RefreshVfgDownloadControl(SettingsControls* state);

@@ -5,7 +5,7 @@
 A low-latency Windows viewer for video and audio from HDMI capture devices.
 Use it to play console games without OBS, or listen in audio-only mode.
 
-**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.3.2.md) · [한국어](README.md)
+**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.4.0.md) · [한국어](README.md)
 
 <br>
 
@@ -16,6 +16,12 @@ Use it to play console games without OBS, or listen in audio-only mode.
 <sub>2.1.6 UI examples. Device lists and supported formats vary by system. Click an image to view it at full resolution.</sub>
 
 <br>
+
+## What's new in 2.4.0
+
+**RIFE Vulkan** adds frame interpolation for FHD SDR input in low-latency output, without a separate download. Choose RIFE Vulkan or NVIDIA VFG in Frame interpolation settings. Interpolation is off by default, and existing VFG preferences are preserved.
+
+[Frame interpolation guide](docs/FRAME_INTERPOLATION.md)
 
 ## What's new in 2.3.2
 
@@ -36,7 +42,7 @@ Start video-only if capture audio cannot connect. Press F1 to see all assigned s
 
 ## Display latency compared with OBS
 
-Example measurements with **frame interpolation enabled** on an instrumented build based on LLCV 2.3.0. These are not new measurements of v2.3.2.
+These measurements were taken with NVIDIA VFG on an instrumented LLCV 2.3.0 build. They do not measure RIFE Vulkan.
 
 | Presentation (fps) | Mean source-frame display latency | Compared with OBS fullscreen |
 | --- | ---: | ---: |

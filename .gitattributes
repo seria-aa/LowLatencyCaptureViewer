@@ -6,3 +6,6 @@
 
 # Preserve whitespace in the unmodified upstream font license notice.
 third_party/pretendard/LICENSE.txt -whitespace
+
+# A unified diff uses a leading space on empty context lines.
+third_party/frame-generation/ncnn-20261020-replay.patch whitespace=-blank-at-eol

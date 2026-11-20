@@ -1286,6 +1286,14 @@ void CheckReleaseVfgControls() {
         }
         c.activeTab = SettingsTab::Interpolation;
         c.vfgGpuSupported = true;
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        RefreshPreview(state);
+        Check(SendMessageW(c.interpolationProviderCombo,CB_GETCOUNT,0,0)==2 &&
+              SendMessageW(c.interpolationProviderCombo,CB_GETCURSEL,0,0)==0 &&
+              c.interpolationMethod==llcv::settings::InterpolationMethod::RifeVulkan &&
+              !c.interpolationEnabled,"RIFE is the default of two methods; interpolation defaults to off");
+        c.interpolationMethod=llcv::settings::InterpolationMethod::NvidiaVfg;
+#endif
         SendMessageW(c.tabControl, LB_SETCURSEL, SettingsNavigationIndex(c.activeTab), 0);
         RefreshPreview(state);
         Check(!(GetWindowLongPtrW(c.playbackGpuCombo,GWL_STYLE)&WS_VISIBLE),
@@ -1304,7 +1312,12 @@ void CheckReleaseVfgControls() {
         c.vfgGpuSupported=false;
         RefreshPreview(state);
         Check(!(GetWindowLongPtrW(c.vfgDownloadButton,GWL_STYLE)&WS_VISIBLE) &&
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+              IsWindowEnabled(c.rifeHalfCheck) && !(GetWindowLongPtrW(c.rifeAutoUiCombo,GWL_STYLE)&WS_VISIBLE),
+              "unsupported VFG hides the download but does not silently select RIFE");
+#else
               !IsWindowEnabled(c.rifeHalfCheck),"unsupported VFG hides download and prevents opt-in");
+#endif
         c.vsrGpuUnavailable = true; // Windows selected a non-NVIDIA playback adapter.
         c.vfgOtherCompatibleGpu = true;
         RefreshPreview(state);
@@ -1312,11 +1325,21 @@ void CheckReleaseVfgControls() {
         GetWindowTextW(c.vfgDownloadButton, text, ARRAYSIZE(text));
         Check(std::wstring_view(text) == (english ? L"Windows graphics settings" : L"Windows 그래픽 설정") &&
               (GetWindowLongPtrW(c.vfgDownloadButton,GWL_STYLE)&WS_VISIBLE) &&
-              IsWindowEnabled(c.vfgDownloadButton) && !IsWindowEnabled(c.rifeHalfCheck),
+              IsWindowEnabled(c.vfgDownloadButton) &&
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+              IsWindowEnabled(c.rifeHalfCheck),
+#else
+              !IsWindowEnabled(c.rifeHalfCheck),
+#endif
               "hybrid GPUs offer graphics settings without enabling VFG on the wrong adapter");
         GetWindowTextW(c.rifeAutoUiHints[0], text, ARRAYSIZE(text));
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        Check(std::wstring_view(text).find(english ? L"VFG is not available" : L"VFG를 사용할 수 없습니다") != std::wstring_view::npos,
+              "VFG remains selected and explains the unsupported playback GPU");
+#else
         Check(std::wstring_view(text).find(english ? L"Playback GPU" : L"재생 그래픽카드") != std::wstring_view::npos,
               "hybrid GPU guidance says what to change");
+#endif
         c.activeTab = SettingsTab::Audio;
         RefreshVfgDownloadControl(&c);
         Check(!(GetWindowLongPtrW(c.vfgDownloadButton,GWL_STYLE)&WS_VISIBLE),
@@ -1327,9 +1350,15 @@ void CheckReleaseVfgControls() {
         c.vfgGpuCheckFailed = true;
         RefreshPreview(state);
         GetWindowTextW(c.rifeAutoUiHints[0], text, ARRAYSIZE(text));
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        Check(std::wstring_view(text).find(english ? L"VFG is not available" : L"VFG를 사용할 수 없습니다") != std::wstring_view::npos &&
+              !(GetWindowLongPtrW(c.vfgDownloadButton,GWL_STYLE)&WS_VISIBLE),
+              "VFG does not switch methods when its capability cannot be checked");
+#else
         Check(std::wstring_view(text).find(english ? L"graphics driver" : L"그래픽 드라이버") != std::wstring_view::npos &&
               !(GetWindowLongPtrW(c.vfgDownloadButton,GWL_STYLE)&WS_VISIBLE),
               "a driver query failure is not reported as unsupported hardware");
+#endif
         c.vfgGpuSupported = true;
         c.vfgOtherCompatibleGpu = true;
         c.vfgGpuCheckFailed = false;
@@ -1337,6 +1366,72 @@ void CheckReleaseVfgControls() {
         GetWindowTextW(c.vfgDownloadButton, text, ARRAYSIZE(text));
         Check(std::wstring_view(text) == (english ? L"Download VFG components" : L"VFG 구성품 받기"),
               "supported playback keeps the component download after switching GPUs");
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        c.interpolationMethod=llcv::settings::InterpolationMethod::RifeVulkan;
+        RefreshPreview(state);
+        Check(!(GetWindowLongPtrW(c.vfgDownloadButton,GWL_STYLE)&WS_VISIBLE),"explicit RIFE never shows VFG download");
+        c.activeTab=SettingsTab::VideoWindow;
+        c.interpolationEnabled=true;
+        SendMessageW(c.presentationCombo,CB_SETCURSEL,0,0);
+        const LRESULT savedResolution=SendMessageW(c.videoCombo,CB_FINDSTRINGEXACT,static_cast<WPARAM>(-1),
+            reinterpret_cast<LPARAM>(L"2560 x 1440"));
+        Check(savedResolution!=CB_ERR,"QHD saved-input fixture exists");
+        SendMessageW(c.videoCombo,CB_SETCURSEL,savedResolution,0);
+        const auto originalRes=SendMessageW(c.videoCombo,CB_GETCURSEL,0,0);
+        const auto originalFormat=SendMessageW(c.pixelFormatCombo,CB_GETCURSEL,0,0);
+        const auto originalFps=SendMessageW(c.frameRateCombo,CB_GETCURSEL,0,0);
+        constexpr int fixtureRates[]{120, 60, 40, 30, 30, 24, 23};
+        PopulateRifeCaptureRatePicker(c.rifeCaptureFps,english,30,fixtureRates);
+        RefreshPreview(state);
+        Check(SettingsRifeCaptureOverride(c) && !IsWindowEnabled(c.rifeCaptureResolution),
+            "RIFE resolution preview is read-only");
+        SendMessageW(c.rifeCaptureResolution,CB_GETLBTEXT,0,reinterpret_cast<LPARAM>(text));
+        Check(std::wstring_view(text)==L"1920 × 1080","RIFE previews FHD");
+        Check(IsWindowEnabled(c.rifeCaptureFps) &&
+            (GetWindowLongPtrW(c.rifeCaptureFps,GWL_STYLE)&WS_VISIBLE) &&
+            (GetWindowLongPtrW(c.rifeCaptureFps,GWL_STYLE)&WS_TABSTOP),
+            "RIFE capture rate picker is visible and keyboard accessible");
+        constexpr int expectedRates[]{0, 60, 40, 30, 24};
+        Check(SendMessageW(c.rifeCaptureFps,CB_GETCOUNT,0,0)==ARRAYSIZE(expectedRates),
+            "RIFE rate list excludes unsupported rates and duplicates");
+        for (size_t i=0;i<ARRAYSIZE(expectedRates);++i)
+            Check(SendMessageW(c.rifeCaptureFps,CB_GETITEMDATA,i,0)==expectedRates[i],
+                "RIFE rates are Auto followed by detected rates from 60 to 24");
+        const auto selectedRifeRate=SendMessageW(c.rifeCaptureFps,CB_GETCURSEL,0,0);
+        Check(selectedRifeRate==3,"RIFE selects its own capture rate");
+        if(compact) {
+            RECT resolution{}, rate{};
+            GetWindowRect(c.rifeCaptureResolution,&resolution);
+            GetWindowRect(c.rifeCaptureFps,&rate);
+            Check(rate.top==resolution.top&&rate.left>resolution.right,
+                "compact capture settings keep FHD and FPS in the same row when they fit");
+            FitSettingsClientArea(&c,SIZE{744,635},dpi);
+            RefreshPreview(state);
+            const int tab=SettingsNavigationIndex(c.activeTab);
+            bool reachable=false;
+            for(int page=0;page<static_cast<int>(c.compactPageNames.size());++page) {
+                c.compactPages[tab]=page;
+                RefreshPreview(state);
+                reachable|=IsWindowEnabled(c.rifeCaptureFps) &&
+                    (GetWindowLongPtrW(c.rifeCaptureFps,GWL_STYLE)&WS_VISIBLE);
+            }
+            Check(reachable,"the RIFE FPS picker remains reachable in a narrow settings window");
+            c.compactPages[tab]=0;
+            FitSettingsClientArea(&c,SIZE{960,650},dpi);
+            RefreshPreview(state);
+        }
+        if(!compact)Check((GetWindowLongPtrW(c.rifeCaptureResolution,GWL_STYLE)&WS_VISIBLE)!=0&&
+            IsWindowEnabled(c.pixelFormatCombo),"RIFE keeps the pixel format picker editable");
+        c.interpolationMethod=llcv::settings::InterpolationMethod::NvidiaVfg;
+        RefreshPreview(state);
+        Check(!SettingsRifeCaptureOverride(c) &&
+            !(GetWindowLongPtrW(c.rifeCaptureResolution,GWL_STYLE)&WS_VISIBLE) &&
+            SendMessageW(c.videoCombo,CB_GETCURSEL,0,0)==originalRes &&
+            SendMessageW(c.pixelFormatCombo,CB_GETCURSEL,0,0)==originalFormat &&
+            SendMessageW(c.frameRateCombo,CB_GETCURSEL,0,0)==originalFps &&
+            !(GetWindowLongPtrW(c.rifeCaptureFps,GWL_STYLE)&WS_VISIBLE),
+            "leaving RIFE restores the untouched capture pickers");
+#endif
         DestroyWindow(hwnd);
         for (HFONT font : c.uiFonts) DeleteObject(font);
     }

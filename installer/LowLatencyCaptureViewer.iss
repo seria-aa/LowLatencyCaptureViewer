@@ -1,13 +1,13 @@
-; LLCV v2.3.2
+; LLCV v2.4.0
 ; Build this script with Inno Setup 7 from the installer directory.
 
 #define MyAppName "LLCV"
-#define MyAppVersion "2.3.2"
+#define MyAppVersion "2.4.0"
 #define MyAppPublisher "seria-aa"
 #define MyAppURL "https://github.com/seria-aa/LowLatencyCaptureViewer"
 #define MyAppExeName "LowLatencyCaptureViewer.exe"
 #ifndef BuildDir
-#define BuildDir "..\build-v2320-release"
+#define BuildDir "..\build-v2400-release"
 #endif
 #if FileExists(BuildDir + "\llcv-audio-recovery-diagnostic.txt")
   #error Audio-input recovery diagnostic builds cannot be packaged as a regular release.
@@ -21,6 +21,16 @@
 #expr FileClose(ReleaseVfgStampHandle)
 #if LowerCase(ReleaseVfgExeHash) != LowerCase(GetSHA256OfFile(BuildDir + "\" + MyAppExeName))
   #error VFG release stamp does not match the executable; rebuild before packaging.
+#endif
+#define ReleaseRifeStamp BuildDir + "\llcv-release-rife-vulkan.sha256"
+#if !FileExists(ReleaseRifeStamp)
+  #error Build the bundled RIFE Vulkan executable before packaging.
+#endif
+#define ReleaseRifeStampHandle FileOpen(ReleaseRifeStamp)
+#define ReleaseRifeExeHash FileRead(ReleaseRifeStampHandle)
+#expr FileClose(ReleaseRifeStampHandle)
+#if LowerCase(ReleaseRifeExeHash) != LowerCase(ReleaseVfgExeHash)
+  #error RIFE Vulkan release stamp does not match the executable; rebuild before packaging.
 #endif
 #if FileExists(BuildDir + "\ffmpeg-licenses\dolby-ffmpeg-NOTICE.txt") || FileExists(BuildDir + "\swresample-6.dll")
   #error Dolby preview FFmpeg cannot be packaged as a regular release.
@@ -41,9 +51,9 @@ DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
-OutputDir=..\outputs\v2.3.2
-OutputBaseFilename=LowLatencyCaptureViewer_v2.3.2_Setup
-OutputManifestFile=LowLatencyCaptureViewer_v2.3.2_Setup-manifest.txt
+OutputDir=..\outputs\v2.4.0
+OutputBaseFilename=LowLatencyCaptureViewer_v2.4.0_Setup
+OutputManifestFile=LowLatencyCaptureViewer_v2.4.0_Setup-manifest.txt
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -51,7 +61,7 @@ CloseApplications=yes
 SetupIconFile=..\assets\LowLatencyCaptureViewer.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Uninstallable=yes
-VersionInfoVersion=2.3.2.0
+VersionInfoVersion=2.4.0.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName}
 VersionInfoCopyright=Copyright (C) 2026 seria-aa
@@ -79,6 +89,13 @@ Type: files; Name: "{group}\Low Latency Capture Viewer.lnk"
 
 [Files]
 Source: "{#BuildDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}\rife-vulkan\fast-fold-cache.ncnn.param"; DestDir: "{app}\rife-vulkan"; Flags: ignoreversion
+Source: "{#BuildDir}\rife-vulkan\fast-fold-cache.ncnn.bin"; DestDir: "{app}\rife-vulkan"; Flags: ignoreversion
+Source: "{#BuildDir}\rife-vulkan\fast-encoder.ncnn.param"; DestDir: "{app}\rife-vulkan"; Flags: ignoreversion
+Source: "{#BuildDir}\rife-vulkan\fast-encoder.ncnn.bin"; DestDir: "{app}\rife-vulkan"; Flags: ignoreversion
+Source: "{#BuildDir}\rife-vulkan\RIFE-MODEL-LICENSE.txt"; DestDir: "{app}\rife-vulkan"; Flags: ignoreversion
+Source: "{#BuildDir}\rife-vulkan\NCNN-LICENSE.txt"; DestDir: "{app}\rife-vulkan"; Flags: ignoreversion
+Source: "{#BuildDir}\rife-vulkan\GLSLANG-LICENSE.txt"; DestDir: "{app}\rife-vulkan"; Flags: ignoreversion
 Source: "{#BuildDir}\avformat-62.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\avcodec-62.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\avutil-60.dll"; DestDir: "{app}"; Flags: ignoreversion

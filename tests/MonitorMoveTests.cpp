@@ -291,7 +291,6 @@ static void TestF5SplitResolutionBaseline() {
     const auto savedSettings = g_settings;
     const bool savedSuppress = g_suppressSettingsSave;
     const bool savedLatched = g_resolutionPlanLatched;
-    const bool savedVsrPlan = g_splitResolutionPlan;
     const auto savedCapture = g_capturePreset;
     const VirtualMonitor savedMonitors[]{fixtureMonitors[0], fixtureMonitors[1]};
     g_suppressSettingsSave = true;
@@ -357,7 +356,6 @@ static void TestF5SplitResolutionBaseline() {
     Reset();
     g_settings = savedSettings;
     g_resolutionPlanLatched = savedLatched;
-    g_splitResolutionPlan = savedVsrPlan;
     g_capturePreset = savedCapture;
     g_suppressSettingsSave = savedSuppress;
     std::printf("PASS %u F5 capture/display/DPI cases with four monitor crossings each.\n", cases);
@@ -367,7 +365,6 @@ static void TestCaptureMatchedDisplayGeometry() {
     const auto savedSettings = g_settings;
     const bool savedSuppress = g_suppressSettingsSave;
     const bool savedLatched = g_resolutionPlanLatched;
-    const bool savedSplit = g_splitResolutionPlan;
     const auto savedCapture = g_capturePreset;
     const bool savedSourceSize = g_fullscreenSourceSize.load();
     const VirtualMonitor savedMonitors[]{fixtureMonitors[0], fixtureMonitors[1]};
@@ -389,7 +386,7 @@ static void TestCaptureMatchedDisplayGeometry() {
         g_settings.displayMatchesCapture = true;
         LatchVideoResolutionPlan();
         const auto source = CurrentCapturePreset();
-        Require(CurrentVideoPreset().preset == capture && !g_splitResolutionPlan && SourcePixelPerfect(),
+        Require(CurrentVideoPreset().preset == capture && !SplitResolutionPlan() && SourcePixelPerfect(),
                 "capture-matched display is native-size with VSR either enabled or disabled");
         for (const int monitor : {0, 1}) {
             const auto initial = InitialClientPixelsForMonitor(MonitorHandle(monitor));
@@ -459,7 +456,7 @@ static void TestCaptureMatchedDisplayGeometry() {
             RelativeScaleForMonitor(MonitorHandle(0)) == kRelativeScaleUnit / 2,
             "new capture-matched settings rebase from the new size despite the previous capture latch");
     LatchVideoResolutionPlan();
-    Require(SourcePixelPerfect() && !g_splitResolutionPlan,
+    Require(SourcePixelPerfect() && !SplitResolutionPlan(),
             "new capture plan catches up without turning matched display into a split plan");
     g_settings.displayMatchesCapture = false;
     Require(CurrentVideoPreset().preset == VideoPreset::R3840x2160,
@@ -482,7 +479,6 @@ static void TestCaptureMatchedDisplayGeometry() {
     Reset();
     g_settings = savedSettings;
     g_resolutionPlanLatched = savedLatched;
-    g_splitResolutionPlan = savedSplit;
     g_capturePreset = savedCapture;
     g_fullscreenSourceSize = savedSourceSize;
     g_suppressSettingsSave = savedSuppress;

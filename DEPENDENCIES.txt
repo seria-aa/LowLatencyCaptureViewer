@@ -48,15 +48,17 @@ configuration are pinned in that script. Preserve the SDK's licenses directory
 when distributing the application. FFmpeg source: https://ffmpeg.org/
 The recording-OFF application does not link or load these libraries.
 
-Optional frame interpolation (v2.3.0)
+Optional frame interpolation (v2.4.0)
 ------------------------------------
-The base installer and portable ZIP do not ship CUDA, TensorRT, VFG runtime
-DLLs or RIFE engines. They use delayed loading only after users opt in.
-RIFE requires a qualified GPU-specific engine and matching TensorRT/CUDA
-runtime. VFG uses the native NVIDIA path on Ada or Blackwell GPUs. This build
-also includes GPL-3.0-only experimental compatibility for SM 8.6 with an
-exact NVIDIA runtime; see VFG-RTX30-NOTICE.txt. No NVIDIA DLLs or models are
-bundled, and RIFE is not exposed in the release.
+The base installer and portable ZIP include the Practical-RIFE 4.25 Fast
+model converted for ncnn Vulkan. RIFE does not need CUDA or TensorRT. It
+uses the Vulkan runtime and driver already installed on the playback PC.
+The model and ncnn/glslang notices are in the rife-vulkan directory.
+The ncnn 20261020 command replay patch is under third_party/frame-generation.
+VFG uses the native NVIDIA path on Ada or Blackwell GPUs. This build also
+includes GPL-3.0-only experimental compatibility for SM 8.6 with an exact
+NVIDIA runtime; see VFG-RTX30-NOTICE.txt. CUDA, TensorRT, VFG DLLs and NVIDIA
+models are not bundled. VFG components are downloaded separately.
 
 Settings typography
 -------------------

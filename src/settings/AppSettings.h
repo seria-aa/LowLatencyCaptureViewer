@@ -99,6 +99,9 @@ struct ExclusiveEndpointCacheEntry {
     bool inconclusive = false; // A completed attempt awaiting explicit retry.
 };
 
+enum class InterpolationMethod { NvidiaVfg = 1, RifeVulkan = 2 };
+inline constexpr int kDefaultRifeHudMode = 2; // luma and chroma
+
 struct AppSettings {
     shortcuts::Bindings shortcuts = shortcuts::Defaults;
     UiLanguage uiLanguage = UiLanguage::Auto;
@@ -129,6 +132,7 @@ struct AppSettings {
     FullscreenVideoPosition fullscreenVideoPosition = FullscreenVideoPosition::Center;
     VideoPixelFormat pixelFormat = VideoPixelFormat::Auto;
     int videoFrameRate = 0;
+    int rifeCaptureFrameRate = -1; // -1: inherit the original capture rate, 0: Auto
     // Explicit driver request; leave the normal frame-rate preference intact.
     bool capture40Fps = false;
     bool allowUnlistedFps = false;
@@ -150,6 +154,8 @@ struct AppSettings {
     bool vfgPlaybackEnabled = false;
     bool vfgLowQuality = false;
     bool vfgWaitForFrame = false;
+    InterpolationMethod interpolationMethod = InterpolationMethod::RifeVulkan;
+    int rifeHudMode = kDefaultRifeHudMode; // 0: off, 1: luma, 2: luma and chroma
     bool cmaaNisEnabled = false;
     UpscalingMethod preferredUpscaler = UpscalingMethod::CmaaNis;
     int nisSharpnessPercent = 15; // 0..100; default 0.15. Display processing only.

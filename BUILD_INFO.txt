@@ -1,4 +1,12 @@
-LLCV v2.3.2 x64 (continued from the v0.14.2 rework)
+LLCV v2.4.0 x64 (continued from the v0.14.2 rework)
+
+v2.4.0 Vulkan frame interpolation
+---------------------------------
+- Bundles RIFE Vulkan Fast for FHD SDR in low-latency output.
+- Choose RIFE Vulkan or NVIDIA VFG; VFG components remain a separate download.
+- New profiles default to RIFE with interpolation off. Existing VFG settings are retained.
+- Offers luma and color HUD protection for RIFE.
+- See tests/RIFE_VULKAN_RELEASE_GATE.md for release validation.
 
 v2.3.2 playback GPU selection
 ----------------------------
