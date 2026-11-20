@@ -72,6 +72,11 @@ bool FindMatchingDirectShowColorMetadata(
 // changes between UYVY and HDYC, which have different color defaults.
 // Explicit frame selections require strict verification. Requesting a timing
 // absent from the advertised modes/ranges is a separate, explicit opt-in.
+struct CaptureRateRange {
+    int minimum = 1;
+    int maximum = 10'000'000;
+    constexpr bool Contains(int fps) const noexcept { return fps >= minimum && fps <= maximum; }
+};
 HRESULT ConfigureVideoPin(
     IPin* videoPin, int wantedWidth, int wantedHeight, int wantedFps,
     VideoPixelFormat wantedFormat, DWORD& imageBytes, UINT32& stride,
@@ -79,7 +84,8 @@ HRESULT ConfigureVideoPin(
     LogCallback logCallback, bool requestExactFps = false,
     CaptureColorMetadata* acceptedCandidateColor = nullptr,
     bool allowUnlistedFps = false,
-    GUID* acceptedCandidateSubtype = nullptr);
+    GUID* acceptedCandidateSubtype = nullptr,
+    CaptureRateRange range = {});
 // Strict timing check used at negotiation and after graph connection.
 bool IsRequestedFrameRate(const AM_MEDIA_TYPE* mediaType, int fps);
 inline constexpr HRESULT kRequestedFrameRateMismatch =

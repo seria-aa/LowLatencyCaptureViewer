@@ -12,6 +12,11 @@
 #ifdef LLCV_INTERPOLATION_RELEASE
 #include "video/VfgRuntimeInstall.h"
 #endif
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+#include "video/InterpolationMethodPolicy.h"
+#include "video/PresentationPolicy.h"
+#include "ui/PresentationModeUi.h"
+#endif
 
 #include <commctrl.h>
 #include <algorithm>
@@ -29,6 +34,12 @@ void SetSettingsText(HWND control, const wchar_t* text) {
 #ifdef LLCV_INTERPOLATION_RELEASE
 void RefreshVfgDownloadControl(SettingsControls* state) {
     if (!state || !state->vfgDownloadButton) return;
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    if (state->interpolationMethod == settings::InterpolationMethod::RifeVulkan) {
+        SetSettingsControlVisible(state->vfgDownloadButton,false);
+        return;
+    }
+#endif
     if (state->ShowVfgGpuSwitch()) {
         SetSettingsText(state->vfgDownloadButton, state->english
             ? L"Windows graphics settings" : L"Windows 그래픽 설정");
@@ -392,6 +403,9 @@ void ApplySettingsFont(SettingsControls* state, HWND hwnd,
     // Smaller explanatory copy recedes without making interactive options
     // harder to read. Labels, fields, navigation and buttons remain 10 pt.
     for (HWND control : {state->pageSubtitle, state->versionWatermark,
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+                         state->rifeCaptureHint,
+#endif
                          state->audioStatus,
 #ifndef LLCV_DOLBY_CAPTURE
                          state->surround51Hint,
@@ -587,6 +601,12 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     // Restore the original 64-DIP row rhythm and unchanged field sizes.
     place(state->pixelFormatLabel, 184, 328, 376, 20);
     place(state->pixelFormatCombo, 184, 356, 376, 160);
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    place(state->rifeCaptureResolution,184,292,180,120);
+    place(state->rifeCaptureFps,380,292,180,200);
+    SendMessageW(state->rifeCaptureFps, CB_SETDROPPEDWIDTH, SettingsPixels(250, dpi), 0);
+    place(state->rifeCaptureHint,184,state->footerTopDip-68,376,44);
+#endif
     LayoutVideoStatus(state,dpi);
     place(state->forceHdr10Check, 184, 392, 344, 40);
     place(state->forceHdr10Help, 536, 400, 24, 24);
@@ -645,7 +665,7 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     place(state->rifeScaleLabel,184,176,376,20);
 #endif
     place(state->rifeScaleCombo,184,204,376,160);
-#if defined(LLCV_INTERPOLATION_RELEASE)
+#if defined(LLCV_INTERPOLATION_RELEASE) && !defined(LLCV_RIFE_VULKAN_BUNDLED)
     place(state->interpolationQualityHelp,536,174,24,24);
 #elif defined(LLCV_FLYHIGH_TEST) || defined(LLCV_RIFE_OPTIONAL)
     place(state->interpolationProviderLabel,184,176,376,20);
@@ -660,9 +680,18 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
 #endif
 #ifdef LLCV_INTERPOLATION_RELEASE
     place(state->vfgDownloadButton,600,120,280,32);
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    place(state->rifeAutoUiLabel,600,176,376,20);
+    place(state->rifeAutoUiCombo,600,204,376,160);
+#endif
     place(state->rifeQualityCheck,184,256,640,32);
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    place(state->rifeAutoUiHints[0],184,304,792,48);
+    place(state->rifeAutoUiHints[2],184,370,792,90);
+#else
     place(state->rifeAutoUiHints[0],184,304,792,28);
     place(state->rifeAutoUiHints[2],184,352,792,90);
+#endif
 #else
     place(state->rifeQualityCheck,184,256,640,32);
     place(state->rifeAutoUiLabel,184,320,376,20);
@@ -759,6 +788,9 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
                         state->driftCombo, state->pcmQueueCombo,
                         state->captureDeviceCombo, state->captureAudioDeviceCombo,
                         state->videoCombo, state->displayResolutionCombo, state->frameRateCombo,
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+                        state->rifeCaptureResolution,state->rifeCaptureFps,
+#endif
                         state->upscalerCombo, state->cmaaQualityCombo, state->nisSharpnessCombo,
 #ifdef LLCV_RIFE_AUTO_UI_TEST
 #ifdef LLCV_INTERPOLATION_RELEASE
@@ -793,16 +825,81 @@ bool DisplayResolutionMatchesCapture(HWND combo) {
     return row >= 0 && SendMessageW(combo, CB_GETITEMDATA, row, 0) == kDisplayMatchCaptureItem;
 }
 
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+bool SettingsRifeCaptureOverride(const SettingsControls& state, settings::VideoPixelFormat format) {
+    const auto mode=presentation_ui::ModeFromSelection(
+        static_cast<int>(SendMessageW(state.presentationCombo,CB_GETCURSEL,0,0)));
+    const bool audioOnly=SendMessageW(state.audioOnlyCheck,BM_GETCHECK,0,0)==BST_CHECKED;
+    const auto provider=interpolation::ChooseProvider(state.interpolationMethod,state.InterpolationGpuAvailable(),true);
+    return !presentation::UsesVSync(mode) &&
+        interpolation::UseRifeCaptureOverride(provider,state.interpolationEnabled,audioOnly,format);
+}
+
+bool SettingsRifeCaptureOverride(const SettingsControls& state) {
+    const auto row=SendMessageW(state.pixelFormatCombo,CB_GETCURSEL,0,0);
+    const auto format=row==CB_ERR?CB_ERR:SendMessageW(state.pixelFormatCombo,CB_GETITEMDATA,row,0);
+    return SettingsRifeCaptureOverride(state,format==CB_ERR?settings::VideoPixelFormat::Auto:
+        static_cast<settings::VideoPixelFormat>(format));
+}
+#endif
+
 static bool HasSplitResolution(const SettingsControls& state) {
-    if (DisplayResolutionMatchesCapture(state.displayResolutionCombo)) return false;
+    const bool matchesCapture=DisplayResolutionMatchesCapture(state.displayResolutionCombo);
     const LRESULT capture = SendMessageW(state.videoCombo, CB_GETCURSEL, 0, 0);
     const LRESULT display = SendMessageW(state.displayResolutionCombo, CB_GETCURSEL, 0, 0);
-    return capture >= 0 && display >= 0 && capture != display;
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    if(SettingsRifeCaptureOverride(state)){
+        const LRESULT fhd=SendMessageW(state.videoCombo,CB_FINDSTRINGEXACT,static_cast<WPARAM>(-1),
+            reinterpret_cast<LPARAM>(L"1920 x 1080"));
+        const LRESULT effectiveDisplay=matchesCapture?capture:display;
+        if(fhd!=CB_ERR&&effectiveDisplay>=0)return fhd!=effectiveDisplay;
+    }
+#endif
+    return !matchesCapture && capture >= 0 && display >= 0 && capture != display;
 }
 
 #ifdef LLCV_RIFE_OPTIONAL
 void UpdateInterpolationAvailability(SettingsControls* state) {
     const bool page=state->activeTab==SettingsTab::Interpolation;
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    const auto resolved=interpolation::ChooseProvider(state->interpolationMethod,state->InterpolationGpuAvailable(),true);
+    const bool showVfg=resolved==interpolation::Provider::NvidiaVfg;
+    const bool showRife=resolved==interpolation::Provider::RifeVulkan;
+    const auto tr=[state](const wchar_t* ko,const wchar_t* en){return state->english?en:ko;};
+    SetSettingsText(state->rifeHalfCheck,tr(L"프레임 보간 사용",L"Enable frame interpolation"));
+    SetSettingsText(state->interpolationProviderLabel,tr(L"보간 방식",L"Interpolation method"));
+    SetSettingsText(state->rifeAutoUiLabel,tr(L"HUD 보호",L"HUD protection"));
+    SendMessageW(state->interpolationProviderCombo,CB_SETCURSEL,
+        state->interpolationMethod==settings::InterpolationMethod::NvidiaVfg?1:0,0);
+    SendMessageW(state->rifeHalfCheck,BM_SETCHECK,state->interpolationEnabled?BST_CHECKED:BST_UNCHECKED,0);
+    SendMessageW(state->rifeAutoUiCombo,CB_SETCURSEL,state->rifeHudMode,0);
+    for(HWND child:{state->rifeHalfCheck,state->interpolationProviderLabel,state->interpolationProviderCombo})
+        SetSettingsControlVisible(child,page);
+    for(HWND child:{state->rifeScaleLabel,state->rifeScaleCombo,state->rifeQualityCheck,state->interpolationQualityHelp})
+        SetSettingsControlVisible(child,page&&showVfg);
+    for(HWND child:{state->rifeAutoUiLabel,state->rifeAutoUiCombo})SetSettingsControlVisible(child,page&&showRife);
+    SetSettingsText(state->rifeScaleLabel,tr(L"품질",L"Quality"));
+    SetSettingsText(state->rifeQualityCheck,tr(L"생성 프레임 완료 대기 (지연 증가)",L"Wait for generated frames (increases latency)"));
+    if(SendMessageW(state->rifeScaleCombo,CB_GETCOUNT,0,0)!=2){
+        SendMessageW(state->rifeScaleCombo,CB_RESETCONTENT,0,0);
+        for(auto scale:{rife_test::Scale::VfgLow,rife_test::Scale::VfgMedium}){
+            const auto label=rife_test::PresetLabel(scale,state->english);
+            const auto idx=SendMessageW(state->rifeScaleCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(wcschr(label,L'·')+2));
+            SendMessageW(state->rifeScaleCombo,CB_SETITEMDATA,idx,static_cast<LPARAM>(scale));
+        }
+    }
+    SendMessageW(state->rifeScaleCombo,CB_SETCURSEL,state->interpolationVfgLow?0:1,0);
+    SendMessageW(state->rifeQualityCheck,BM_SETCHECK,state->interpolationVfgWait?BST_CHECKED:BST_UNCHECKED,0);
+    const wchar_t* hint=showRife
+        ? tr(L"RIFE Vulkan은 저지연 출력에서 FHD SDR로 보간합니다. 픽셀 포맷은 유지하고, P010 HDR은 보간하지 않습니다.\r\n"
+             L"다른 방식으로 바꾸거나 보간 사용을 끄면 다음 시작 때 저장한 입력으로 돌아갑니다.",
+             L"RIFE Vulkan uses FHD SDR in low-latency output. The selected pixel format is kept. P010 HDR is not interpolated.\r\n"
+             L"Switch methods or disable interpolation to restore your saved input on the next start.")
+        : showVfg ? tr(L"NVIDIA VFG · FHD / QHD / 4K UHD SDR",L"NVIDIA VFG · FHD / QHD / 4K UHD SDR")
+        : tr(L"현재 재생 GPU에서는 VFG를 사용할 수 없습니다.",L"VFG is not available on the current playback GPU.");
+    SetSettingsText(state->rifeAutoUiHints[0],hint);
+    RefreshVfgDownloadControl(state);
+#else
     const bool enabled=state->InterpolationGpuAvailable()&&llcv::rife_test::componentsEnabled.load();
 #ifdef LLCV_INTERPOLATION_RELEASE
     const bool hud=false;
@@ -817,6 +914,7 @@ void UpdateInterpolationAvailability(SettingsControls* state) {
         SetSettingsControlVisible(child,page&&hud,hud);
 #else
         SetSettingsControlVisible(child,page,hud);
+#endif
 #endif
 }
 #endif
@@ -869,9 +967,14 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     if (!state) return;
     const bool audio = state->activeTab == SettingsTab::Audio;
     const bool video = state->activeTab == SettingsTab::VideoWindow;
-    if (!video || SettingsCompactLayout(state)) state->frameOptionsOpen = false;
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    const bool rifeInput=SettingsRifeCaptureOverride(*state);
+#else
+    constexpr bool rifeInput=false;
+#endif
+    if (!video || SettingsCompactLayout(state) || rifeInput) state->frameOptionsOpen = false;
     const bool flyout = video && state->frameOptionsOpen;
-    const bool frameOptions = video && (flyout || SettingsCompactLayout(state));
+    const bool frameOptions = video && !rifeInput && (flyout || SettingsCompactLayout(state));
     const bool guide = state->activeTab == SettingsTab::GuideDiagnostics;
     const bool updates = state->activeTab == SettingsTab::Updates;
 #if defined(LLCV_RIFE_OPTIONAL) && !defined(LLCV_INTERPOLATION_RELEASE)
@@ -936,24 +1039,30 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
                          state->presentationCombo, state->displayMonitorLabel,
                          state->displayMonitorCombo, state->captureDeviceLabel,
                          state->captureAudioDeviceLabel, state->videoLabel,
-                         state->videoCombo, state->pixelFormatLabel,
-                         state->frameRateLabel, state->videoCapabilityStatus,
+                         state->pixelFormatLabel, state->frameRateLabel,
                          state->pixelCheck}) {
         const bool obscured = control == state->pixelFormatLabel || control == state->videoCapabilityStatus;
         SetSettingsControlVisible(control, video && !(flyout && obscured));
     }
+    SetSettingsControlVisible(state->videoCombo,video&&!rifeInput);
+    SetSettingsControlVisible(state->videoCapabilityStatus,video&&!flyout&&!rifeInput);
     SetSettingsControlVisible(state->captureDeviceCombo, video, availability.captureDevice);
     SetSettingsControlVisible(state->pixelFormatCombo, video && !flyout, availability.formats);
     const bool capture40 = SendMessageW(state->capture40Check, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    SetSettingsControlVisible(state->frameRateCombo, video, availability.formats && !capture40);
-    SetSettingsControlVisible(state->frameOptionsButton, video && !SettingsCompactLayout(state));
+    SetSettingsControlVisible(state->frameRateCombo, video&&!rifeInput, availability.formats && !capture40);
+    SetSettingsControlVisible(state->frameOptionsButton, video && !rifeInput && !SettingsCompactLayout(state));
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    SetSettingsControlVisible(state->rifeCaptureResolution,video&&rifeInput,false);
+    SetSettingsControlVisible(state->rifeCaptureFps,video&&rifeInput,availability.formats);
+    SetSettingsControlVisible(state->rifeCaptureHint,video&&rifeInput);
+#endif
     SetSettingsText(state->frameOptionsButton, state->english
         ? (flyout ? L"More ▴" : L"More ▾") : (flyout ? L"추가 설정 ▴" : L"추가 설정 ▾"));
     for (HWND control : {state->frameOptionsTitle, state->frameOptionsClose, state->frameOptionsHint})
         SetSettingsControlVisible(control, flyout);
     SetSettingsControlVisible(state->capture40Check, frameOptions, availability.formats);
     SetSettingsControlVisible(state->unlistedFpsCheck, frameOptions, availability.formats && !capture40);
-    SetSettingsControlVisible(state->unlistedFpsStatus, video && !flyout &&
+    SetSettingsControlVisible(state->unlistedFpsStatus, video && !flyout && !rifeInput &&
         GetWindowTextLengthW(state->unlistedFpsStatus) > 0);
     SetSettingsControlVisible(state->capture40Help, frameOptions);
     SetSettingsControlVisible(state->guideLsButton, guide);
@@ -1069,6 +1178,10 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     SendMessageW(state->rifeQualityCheck,BM_SETCHECK,llcv::rife_test::qualityComparison.load()?BST_CHECKED:BST_UNCHECKED,0);
     SetSettingsText(state->rifeQualityCheck,state->english?L"Quality compare (wait; more latency; F10)":L"화질 비교 (완료 대기·지연 증가·F10)");
 #ifdef LLCV_RIFE_OPTIONAL
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    SetSettingsControlVisible(state->rifeAutoUiHints[1],false);
+    UpdateInterpolationAvailability(state);
+#else
     const bool allow=state->InterpolationGpuAvailable()&&llcv::rife_test::componentsEnabled.load();
 #ifdef LLCV_INTERPOLATION_RELEASE
     constexpr bool vfg=true;
@@ -1124,6 +1237,7 @@ void UpdateAdvancedControlVisibility(SettingsControls* state, bool exclusive,
     SetSettingsText(state->rifeAutoUiHints[0],shortcuts::Expand(inputHint,state->shortcutBindings).c_str());
     SendMessageW(state->rifeHalfCheck,BM_SETCHECK,allow?BST_CHECKED:BST_UNCHECKED,0);
     UpdateInterpolationAvailability(state);
+#endif
 #endif
 #ifdef LLCV_FLYHIGH_TEST
     const bool fly=llcv::rife_test::IsFlyHigh();

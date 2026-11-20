@@ -1,0 +1,264 @@
+diff --git a/src/command.h b/src/command.h
+index a673823..26f82ec 100644
+--- a/src/command.h
++++ b/src/command.h
+@@ -23,6 +23,7 @@ class NCNN_EXPORT VkCompute
+ {
+ public:
+     explicit VkCompute(const VulkanDevice* vkdev);
++    VkCompute(const VulkanDevice* vkdev, bool timestamps, bool reusable);
+     virtual ~VkCompute();
+ 
+ public:
+@@ -65,6 +66,8 @@ public:
+ #endif // NCNN_PLATFORM_API
+ 
+     int submit_and_wait();
++    int resubmit_and_wait();
++    int elapsed_gpu_ms(double& ms) const;
+ 
+     int reset();
+ 
+diff --git a/src/command.cpp b/src/command.cpp
+index dc6e916..7202807 100644
+--- a/src/command.cpp
++++ b/src/command.cpp
+@@ -13,12 +13,13 @@ namespace ncnn {
+ class VkComputePrivate
+ {
+ public:
+-    VkComputePrivate(const VulkanDevice* _vkdev);
++    VkComputePrivate(const VulkanDevice* _vkdev, bool timestamps, bool reusable);
+     ~VkComputePrivate();
+ 
+     int init();
+     int begin_command_buffer();
+     int end_command_buffer();
++    int submit_command();
+ 
+     const VulkanDevice* vkdev;
+ 
+@@ -27,6 +28,10 @@ public:
+     VkCommandBuffer compute_command_buffer;
+ 
+     VkFence compute_command_fence;
++    VkQueryPool timing_pool;
++    uint32_t timestamp_bits;
++    bool reusable;
++    bool submitted;
+ 
+     std::vector<VkMat> upload_staging_buffers;
+     std::vector<VkMat> download_post_buffers;
+@@ -191,8 +196,8 @@ public:
+ #endif // NCNN_BENCHMARK
+ };
+ 
+-VkComputePrivate::VkComputePrivate(const VulkanDevice* _vkdev)
+-    : vkdev(_vkdev)
++VkComputePrivate::VkComputePrivate(const VulkanDevice* _vkdev, bool timestamps, bool reuse)
++    : vkdev(_vkdev), timing_pool(0), timestamp_bits(0), reusable(reuse), submitted(false)
+ {
+     compute_command_pool = 0;
+     compute_command_buffer = 0;
+@@ -205,6 +210,25 @@ VkComputePrivate::VkComputePrivate(const VulkanDevice* _vkdev)
+     query_pool = 0;
+ #endif // NCNN_BENCHMARK
+ 
++    if (timestamps)
++    {
++        uint32_t count = 0;
++        vkGetPhysicalDeviceQueueFamilyProperties(vkdev->info.physical_device(), &count, 0);
++        std::vector<VkQueueFamilyProperties> properties(count);
++        vkGetPhysicalDeviceQueueFamilyProperties(vkdev->info.physical_device(), &count, properties.data());
++        const uint32_t family = vkdev->info.compute_queue_family_index();
++        if (family < count)
++            timestamp_bits = properties[family].timestampValidBits;
++        if (timestamp_bits)
++        {
++            VkQueryPoolCreateInfo query = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
++            query.queryType = VK_QUERY_TYPE_TIMESTAMP;
++            query.queryCount = 2;
++            if (vkCreateQueryPool(vkdev->vkdevice(), &query, 0, &timing_pool) != VK_SUCCESS)
++                timing_pool = 0;
++        }
++    }
++
+     init();
+ }
+ 
+@@ -252,6 +276,8 @@ VkComputePrivate::~VkComputePrivate()
+     vkDestroyFence(vkdev->vkdevice(), compute_command_fence, 0);
+ 
+     vkFreeCommandBuffers(vkdev->vkdevice(), compute_command_pool, 1, &compute_command_buffer);
++    if (timing_pool)
++        vkDestroyQueryPool(vkdev->vkdevice(), timing_pool, 0);
+     vkDestroyCommandPool(vkdev->vkdevice(), compute_command_pool, 0);
+ }
+ 
+@@ -323,7 +349,7 @@ int VkComputePrivate::begin_command_buffer()
+     VkCommandBufferBeginInfo commandBufferBeginInfo;
+     commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+     commandBufferBeginInfo.pNext = 0;
+-    commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++    commandBufferBeginInfo.flags = reusable ? 0 : VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+     commandBufferBeginInfo.pInheritanceInfo = 0;
+ 
+     VkResult ret = vkBeginCommandBuffer(compute_command_buffer, &commandBufferBeginInfo);
+@@ -333,6 +359,21 @@ int VkComputePrivate::begin_command_buffer()
+         return -1;
+     }
+ 
++    if (timing_pool)
++    {
++        vkCmdResetQueryPool(compute_command_buffer, timing_pool, 0, 2);
++        vkCmdWriteTimestamp(compute_command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timing_pool, 0);
++    }
++    if (reusable)
++    {
++        // Inter-submission visibility for fixed input, scratch, and output buffers.
++        VkMemoryBarrier memory = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
++        memory.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
++        memory.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
++        vkCmdPipelineBarrier(compute_command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &memory, 0, 0, 0, 0);
++    }
++
+     return 0;
+ }
+ 
+@@ -341,6 +382,8 @@ int VkComputePrivate::end_command_buffer()
+ #if NCNN_COVERAGE
+     vkdev->record_shader_coverage_barrier(compute_command_buffer);
+ #endif
++    if (timing_pool)
++        vkCmdWriteTimestamp(compute_command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timing_pool, 1);
+     VkResult ret = vkEndCommandBuffer(compute_command_buffer);
+     if (ret != VK_SUCCESS)
+     {
+@@ -352,7 +395,12 @@ int VkComputePrivate::end_command_buffer()
+ }
+ 
+ VkCompute::VkCompute(const VulkanDevice* _vkdev)
+-    : vkdev(_vkdev), d(new VkComputePrivate(_vkdev))
++    : VkCompute(_vkdev, false, false)
++{
++}
++
++VkCompute::VkCompute(const VulkanDevice* _vkdev, bool timestamps, bool reusable)
++    : vkdev(_vkdev), d(new VkComputePrivate(_vkdev, timestamps, reusable))
+ {
+ }
+ 
+@@ -1976,52 +2024,9 @@ int VkCompute::submit_and_wait()
+         }
+     }
+ 
+-    // end command buffer
+-    {
+-        d->end_command_buffer();
+-    }
+-
+-    // acquire queue and reclaim on return
+-    VkQueue compute_queue = vkdev->acquire_queue(vkdev->info.compute_queue_family_index());
+-    if (compute_queue == 0)
+-    {
+-        NCNN_LOGE("out of compute queue");
++    if (d->end_command_buffer() != 0 || d->submit_command() != 0)
+         return -1;
+-    }
+-
+-    // submit compute
+-    {
+-        VkSubmitInfo submitInfo;
+-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+-        submitInfo.pNext = 0;
+-        submitInfo.waitSemaphoreCount = 0;
+-        submitInfo.pWaitSemaphores = 0;
+-        submitInfo.pWaitDstStageMask = 0;
+-        submitInfo.commandBufferCount = 1;
+-        submitInfo.pCommandBuffers = &d->compute_command_buffer;
+-        submitInfo.signalSemaphoreCount = 0;
+-        submitInfo.pSignalSemaphores = 0;
+-
+-        VkResult ret = vkQueueSubmit(compute_queue, 1, &submitInfo, d->compute_command_fence);
+-        if (ret != VK_SUCCESS)
+-        {
+-            NCNN_LOGE("vkQueueSubmit failed %d", ret);
+-            vkdev->reclaim_queue(vkdev->info.compute_queue_family_index(), compute_queue);
+-            return -1;
+-        }
+-    }
+-
+-    vkdev->reclaim_queue(vkdev->info.compute_queue_family_index(), compute_queue);
+-
+-    // wait
+-    {
+-        VkResult ret = vkWaitForFences(vkdev->vkdevice(), 1, &d->compute_command_fence, VK_TRUE, (uint64_t)-1);
+-        if (ret != VK_SUCCESS)
+-        {
+-            NCNN_LOGE("vkWaitForFences failed %d", ret);
+-            return -1;
+-        }
+-    }
++    d->submitted = true;
+ 
+     // handle delayed post records
+     for (size_t i = 0; i < d->delayed_records.size(); i++)
+@@ -2084,8 +2089,57 @@ int VkCompute::submit_and_wait()
+     return 0;
+ }
+ 
++int VkComputePrivate::submit_command()
++{
++    const uint32_t family = vkdev->info.compute_queue_family_index();
++    VkQueue queue = vkdev->acquire_queue(family);
++    if (!queue)
++        return -1;
++    VkSubmitInfo info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
++    info.commandBufferCount = 1;
++    info.pCommandBuffers = &compute_command_buffer;
++    VkResult result = vkQueueSubmit(queue, 1, &info, compute_command_fence);
++    vkdev->reclaim_queue(family, queue);
++    if (result != VK_SUCCESS)
++    {
++        NCNN_LOGE("vkQueueSubmit failed %d", result);
++        return -1;
++    }
++    result = vkWaitForFences(vkdev->vkdevice(), 1, &compute_command_fence, VK_TRUE, (uint64_t)-1);
++    if (result != VK_SUCCESS)
++    {
++        NCNN_LOGE("vkWaitForFences failed %d", result);
++        return -1;
++    }
++    return 0;
++}
++
++int VkCompute::elapsed_gpu_ms(double& ms) const
++{
++    if (!d->submitted || !d->timing_pool)
++        return -1;
++    uint64_t ticks[2];
++    if (vkGetQueryPoolResults(vkdev->vkdevice(), d->timing_pool, 0, 2, sizeof(ticks), ticks,
++                              sizeof(ticks[0]), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
++        return -1;
++    const uint64_t mask = d->timestamp_bits == 64 ? (uint64_t)-1 : ((uint64_t)1 << d->timestamp_bits) - 1;
++    ms = double((ticks[1] - ticks[0]) & mask) * vkdev->info.timestamp_period() / 1000000.0;
++    return 0;
++}
++
++int VkCompute::resubmit_and_wait()
++{
++    if (!d->reusable || !d->submitted || !d->upload_staging_buffers.empty() ||
++        !d->download_post_buffers.empty() || !d->image_blocks_to_destroy.empty())
++        return -1;
++    if (vkResetFences(vkdev->vkdevice(), 1, &d->compute_command_fence) != VK_SUCCESS)
++        return -1;
++    return d->submit_command();
++}
++
+ int VkCompute::reset()
+ {
++    d->submitted = false;
+     d->upload_staging_buffers.clear();
+     d->download_post_buffers.clear();
+     d->download_post_mats_fp16.clear();

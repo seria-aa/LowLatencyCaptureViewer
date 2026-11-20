@@ -421,6 +421,33 @@ static void TestExplicitCaptureRateSelection() {
     query(4);
     Require(SelectedPixelFormat(&state) == VideoPixelFormat::Nv12 && SelectedCaptureFrameRate(&state) == 60 && SettingsCanStart(&state),
         "later refresh retains the user's new format and FPS");
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    state.presentationCombo = child(L"COMBOBOX", CBS_DROPDOWNLIST, IDC_SETTINGS_PRESENTATION);
+    SendMessageW(state.presentationCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Low latency"));
+    SendMessageW(state.presentationCombo, CB_SETCURSEL, 0, 0);
+    state.rifeCaptureFps = child(L"COMBOBOX", CBS_DROPDOWNLIST, IDC_SETTINGS_RIFE_CAPTURE_FPS);
+    state.interpolationMethod = llcv::settings::InterpolationMethod::RifeVulkan;
+    state.interpolationEnabled = true;
+    state.pixelFormats = {{VideoPixelFormat::Nv12, 120}, {VideoPixelFormat::Nv12, 60},
+                          {VideoPixelFormat::Nv12, 30}, {VideoPixelFormat::Yuy2, 40}};
+    PopulateFrameRateCombo(&state);
+    Require(SendMessageW(state.rifeCaptureFps, CB_GETCOUNT, 0, 0) == 3 &&
+            SendMessageW(state.rifeCaptureFps, CB_GETITEMDATA, 2, 0) == 30,
+        "RIFE FPS list omits high rates and rates from unselected formats");
+    SendMessageW(state.rifeCaptureFps, CB_SETCURSEL, 2, 0);
+    SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDC_SETTINGS_RIFE_CAPTURE_FPS, CBN_SELCHANGE), 0);
+    Require(state.rifeCaptureFrameRate == 30 && SelectedCaptureFrameRate(&state) == 60 &&
+            g_settings.rifeCaptureFrameRate == -1,
+        "editing RIFE FPS leaves the ordinary picker and the saved profile untouched");
+    g_settings.rifeCaptureFrameRate = state.rifeCaptureFrameRate;
+    const bool savedRifeOverride = g_rifeCaptureOverride.exchange(true);
+    Require(RequestedVideoFrameRate() == 30 && RequestsExactCaptureRate(),
+        "playback requests the selected RIFE FPS exactly");
+    g_rifeCaptureOverride.store(false);
+    Require(RequestedVideoFrameRate() == 60 && RequestsExactCaptureRate(),
+        "leaving RIFE restores the original exact rate");
+    g_rifeCaptureOverride.store(savedRifeOverride);
+#endif
     state.videoModeCache.reset();
     DestroyWindow(hwnd); UnregisterClassW(wc.lpszClassName, wc.hInstance);
     g_settings = saved; g_suppressSettingsSave = savedSuppress;

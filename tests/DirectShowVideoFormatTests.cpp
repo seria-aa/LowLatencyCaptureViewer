@@ -323,6 +323,11 @@ void TestStrictListedFrameRates() {
         "advertised exact-rate format wins over an unlisted NV12 timing probe");
     Check(SUCCEEDED(configure(false)) && fps == 120 && format == VideoPixelFormat::Nv12,
         "automatic rate retains its original preferred-format fallback policy");
+    pin.attemptedRates.clear();
+    Check(SUCCEEDED(ConfigureVideoPin(&pin, 1920, 1080, 60, VideoPixelFormat::Auto,
+        bytes, stride, fps, format, SelectionLog, false, nullptr, false, nullptr, {24, 60})) &&
+        fps == 60 && format == VideoPixelFormat::Yuy2 && pin.attemptedRates == std::vector<int>{60},
+        "bounded automatic FPS skips formats that only offer an out-of-range rate");
     pin.rejectedRate = 60;
     Check(FAILED(configure()) && pin.attemptedRates == std::vector<int>{60},
         "explicit 60 driver refusal never tries the available 120 fallback");

@@ -6,6 +6,7 @@
 #include "video/RifeHalfTest.h"
 #endif
 #include "capture/DirectShowDevices.h"
+#include "video/InterpolationMethodPolicy.h"
 
 #include <commctrl.h>
 #include <algorithm>
@@ -20,6 +21,29 @@ using settings::AudioMode;
 using settings::DriftCorrectionMode;
 using settings::FullscreenCursorMode;
 using settings::ScalingMode;
+
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+void PopulateRifeCaptureRatePicker(HWND picker, bool english, int rate, std::span<const int> detectedRates) {
+    const auto add = [&](const wchar_t* text, int fps) {
+        const auto row = SendMessageW(picker, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text));
+        if (row >= 0) SendMessageW(picker, CB_SETITEMDATA, row, fps);
+        return row;
+    };
+    SendMessageW(picker, CB_RESETCONTENT, 0, 0);
+    auto selected = add(english ? L"Auto (up to 60 fps)" : L"자동 (최대 60 fps)", 0);
+    for (int fps = interpolation::kRifeMaxCaptureRate; fps >= interpolation::kRifeMinCaptureRate; --fps) {
+        if (std::find(detectedRates.begin(), detectedRates.end(), fps) == detectedRates.end()) continue;
+        const auto row = add((std::to_wstring(fps) + L" fps").c_str(), fps);
+        if (fps == rate) selected = row;
+    }
+    if (interpolation::RifeCaptureRateSupported(rate) &&
+        std::find(detectedRates.begin(), detectedRates.end(), rate) == detectedRates.end()) {
+        selected = add((std::to_wstring(rate) +
+            (english ? L" fps (unavailable)" : L" fps (지원 안 됨)")).c_str(), rate);
+    }
+    SendMessageW(picker, CB_SETCURSEL, selected, 0);
+}
+#endif
 
 void ApplyResolutionSelections(const SettingsControls& state,
                               std::span<const settings::VideoPresetInfo> presets,
@@ -572,11 +596,14 @@ void CreateSettingsDialogControls(SettingsControls* state, HWND hwnd,
         initial.english?L"Download VFG components":L"VFG 구성품 받기",WS_CHILD|WS_TABSTOP|BS_PUSHBUTTON,
         0,0,240,32,hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_VFG_DOWNLOAD)),instance,nullptr);
 #endif
-#if (defined(LLCV_FLYHIGH_TEST) || defined(LLCV_RIFE_OPTIONAL)) && !defined(LLCV_INTERPOLATION_RELEASE)
+#if defined(LLCV_RIFE_VULKAN_BUNDLED) || ((defined(LLCV_FLYHIGH_TEST) || defined(LLCV_RIFE_OPTIONAL)) && !defined(LLCV_INTERPOLATION_RELEASE))
     state->interpolationProviderLabel=makeLabel(initial.english?L"Method (F8)":L"보간 방식 (F8)",184,176);
     state->interpolationProviderCombo=CreateWindowExW(0,L"COMBOBOX",L"",kSettingsDropdownStyle,
         184,204,376,160,hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(llcv::rife_test::ProviderCommand)),instance,nullptr);
-#ifdef LLCV_RIFE_OPTIONAL
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    SendMessageW(state->interpolationProviderCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"RIFE Vulkan"));
+    SendMessageW(state->interpolationProviderCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"NVIDIA VFG"));
+#elif defined(LLCV_RIFE_OPTIONAL)
     const auto vfgLabel=state->vfgRtx30?(initial.english?L"NVIDIA VFG (experimental compatibility)":L"NVIDIA VFG (실험적 호환)"):L"NVIDIA VFG";
     for(const wchar_t* choice:{L"RIFE",vfgLabel})SendMessageW(state->interpolationProviderCombo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(choice));
 #else
@@ -607,7 +634,9 @@ for(auto scale:llcv::rife_test::Scales){const auto index=SendMessageW(state->rif
     state->rifeAutoUiLabel=makeLabel(initial.english?L"Automatic HUD protection (F4)":L"자동 HUD 보호 (F4)",184,320);
     state->rifeAutoUiCombo=CreateWindowExW(0,L"COMBOBOX",L"",kSettingsDropdownStyle,
         184,348,376,160,hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(llcv::rife_test::AutoUiCommand)),instance,nullptr);
-#ifdef LLCV_RIFE_TRAJECTORY
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    for(const wchar_t* choice:{initial.english?L"Off":L"끄기",initial.english?L"Luma edges":L"밝기 윤곽",initial.english?L"Luma and color edges":L"밝기와 색 윤곽"})
+#elif defined(LLCV_RIFE_TRAJECTORY)
     for(const wchar_t* choice:{initial.english?L"Off":L"끄기",initial.english?L"Trajectory":L"이동 추적"})
 #else
     for(const wchar_t* choice:{initial.english?L"Off":L"끄기",L"16 px",L"32 px"})
@@ -617,7 +646,10 @@ for(auto scale:llcv::rife_test::Scales){const auto index=SendMessageW(state->rif
         184,396,740,28,hwnd,nullptr,instance,nullptr);
 #ifdef LLCV_RIFE_OPTIONAL
     SetWindowTextW(state->rifeAutoUiHints[2], initial.english
-#ifdef LLCV_INTERPOLATION_RELEASE
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        ? L"To use Smooth Motion, turn off frame interpolation in LLCV.\r\nNVIDIA App → Graphics → Program Settings → LLCV → Driver Settings → Smooth Motion: On"
+        : L"Smooth Motion을 사용하려면 LLCV의 프레임 보간을 끕니다.\r\nNVIDIA App → 그래픽 → 프로그램 설정 → LLCV → 드라이버 설정 → Smooth Motion: 켜기");
+#elif defined(LLCV_INTERPOLATION_RELEASE)
         ? L"To use Smooth Motion instead of VFG, leave VFG off in LLCV.\r\nNVIDIA App → Graphics → Program Settings → LLCV → Driver Settings → Smooth Motion: On"
         : L"Smooth Motion을 사용하려면 LLCV의 ‘NVIDIA VFG 사용’을 꺼 둡니다.\r\nNVIDIA App → 그래픽 → 프로그램 설정 → LLCV → 드라이버 설정 → Smooth Motion: 켜기");
 #else
@@ -833,6 +865,28 @@ for(auto scale:llcv::rife_test::Scales){const auto index=SendMessageW(state->rif
     state->unlistedFpsStatus = CreateWindowExW(0, L"STATIC", L"",
         WS_CHILD | SS_LEFT | SS_NOPREFIX, 0, 0, 376, 16, hwnd,
         nullptr, instance, nullptr);
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+    // The normal pickers keep the user's saved choices while RIFE uses FHD.
+    auto makeCapturePreview=[&](const wchar_t* label){
+        const HWND combo=CreateWindowExW(0,L"COMBOBOX",nullptr,
+            (kSettingsDropdownStyle & ~(WS_TABSTOP | WS_VISIBLE)) | WS_DISABLED,
+            0,0,180,100,hwnd,nullptr,instance,nullptr);
+        SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+        SendMessageW(combo,CB_SETCURSEL,0,0);
+        return combo;
+    };
+    state->rifeCaptureResolution=makeCapturePreview(L"1920 × 1080");
+    state->rifeCaptureFrameRate=initial.settings.rifeCaptureFrameRate;
+    state->rifeCaptureFps=CreateWindowExW(0,L"COMBOBOX",nullptr,
+        kSettingsDropdownStyle & ~WS_VISIBLE,0,0,180,200,hwnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_RIFE_CAPTURE_FPS)),instance,nullptr);
+    PopulateRifeCaptureRatePicker(state->rifeCaptureFps,initial.english,
+        interpolation::RifeCaptureRate(initial.settings),{});
+    state->rifeCaptureHint=CreateWindowExW(0,L"STATIC",initial.english
+        ? L"RIFE uses FHD capture at up to 60 fps. Starting without RIFE restores your usual capture settings."
+        : L"RIFE는 FHD로 최대 60 fps까지 캡처합니다. RIFE 없이 시작하면 기존 캡처 설정을 사용합니다.",
+        WS_CHILD|SS_LEFT|SS_NOPREFIX,0,0,376,44,hwnd,nullptr,instance,nullptr);
+#endif
     population.pixelFormat(population.context);
 
     state->scalingLabel = makeLabel(text(L"화면 확대 방식"), 430, 274);
@@ -1130,6 +1184,9 @@ for(auto scale:llcv::rife_test::Scales){const auto index=SendMessageW(state->rif
         state->captureDeviceLabel, state->captureDeviceCombo,
         state->captureAudioDeviceLabel, state->captureAudioDeviceCombo, state->captureAudioStatus,
         state->videoLabel, state->videoCombo, state->frameRateLabel, state->frameRateCombo,
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        state->rifeCaptureResolution, state->rifeCaptureFps,
+#endif
         state->frameOptionsButton, state->frameOptionsTitle,
         state->unlistedFpsCheck, state->capture40Check, state->capture40Help,
         state->frameOptionsHint, state->frameOptionsClose,

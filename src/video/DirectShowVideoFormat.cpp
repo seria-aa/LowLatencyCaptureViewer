@@ -643,11 +643,11 @@ HRESULT ConfigureVideoPin(
     int& configuredFps, VideoPixelFormat& configuredFormat,
     LogCallback logCallback, bool requestExactFps,
     CaptureColorMetadata* acceptedCandidateColor, bool allowUnlistedFps,
-    GUID* acceptedCandidateSubtype) {
+    GUID* acceptedCandidateSubtype, CaptureRateRange range) {
     if (acceptedCandidateColor) *acceptedCandidateColor = {};
     if (acceptedCandidateSubtype) *acceptedCandidateSubtype = GUID_NULL;
     if (!videoPin) return E_POINTER;
-    if (requestExactFps && (wantedFps <= 0 || wantedFps > 10'000'000)) return E_INVALIDARG;
+    if (requestExactFps && !range.Contains(wantedFps)) return E_INVALIDARG;
     if (allowUnlistedFps && !requestExactFps) return E_INVALIDARG;
     IAMStreamConfig* config = nullptr;
     HRESULT hr = videoPin->QueryInterface(IID_PPV_ARGS(&config));
@@ -698,7 +698,7 @@ HRESULT ConfigureVideoPin(
             height == wantedHeight && duration >= 0) {
             LogMode(logCallback, i, format, width, height, duration, streamCaps);
             const bool rateAllowed = FrameRateAllowedByCaps(streamCaps, wantedFps);
-            if (wantedFps > 0 && fps != wantedFps &&
+            if (range.Contains(wantedFps) && fps != wantedFps &&
                 (rateAllowed || (requestExactFps && allowUnlistedFps))) {
                 auto* adjusted = CloneMediaType(candidate);
                 if (adjusted && SetVideoFrameDuration(adjusted, FrameDurationForRate(wantedFps)))
@@ -707,7 +707,7 @@ HRESULT ConfigureVideoPin(
             }
             // A zero default duration is not an executable fallback. The
             // interval-derived requested candidate above has explicit timing.
-            if (fps > 0) {
+            if (range.Contains(fps)) {
                 candidates.push_back({candidate, fps, bytes, format});
                 continue;
             }

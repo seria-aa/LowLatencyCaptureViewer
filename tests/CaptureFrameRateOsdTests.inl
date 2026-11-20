@@ -5,7 +5,6 @@ static void TestCaptureFrameRateOsd() {
     const auto savedCaptureName = g_activeCaptureDeviceName;
     const auto savedOutputName = ActiveAudioOutputName();
     const bool savedLatched = g_resolutionPlanLatched;
-    const bool savedSplit = g_splitResolutionPlan;
     const bool savedWarning = g_captureFrameRateOverdelivery.load();
     const int savedConfigured = g_videoConfiguredFps.load();
     const double savedInputFps = g_osdInputFps.load();
@@ -20,7 +19,6 @@ static void TestCaptureFrameRateOsd() {
     g_settings.relativeWindowSize = false;
     g_settings.pixelPerfect = true;
     g_resolutionPlanLatched = false;
-    g_splitResolutionPlan = false;
     g_activeCaptureDeviceName = L"GC573";
     SetActiveAudioOutputName(L"Speakers");
 
@@ -162,7 +160,6 @@ static void TestCaptureFrameRateOsd() {
     g_activeCaptureDeviceName = savedCaptureName;
     SetActiveAudioOutputName(savedOutputName);
     g_resolutionPlanLatched = savedLatched;
-    g_splitResolutionPlan = savedSplit;
     g_captureFrameRateOverdelivery = savedWarning;
     g_videoConfiguredFps = savedConfigured;
     g_osdInputFps = savedInputFps;

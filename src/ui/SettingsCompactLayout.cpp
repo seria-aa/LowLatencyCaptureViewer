@@ -1,5 +1,8 @@
 #include "SettingsView.h"
 #include "settings/AppSettings.h"
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+#include "video/InterpolationMethodPolicy.h"
+#endif
 
 #include <algorithm>
 #include <initializer_list>
@@ -173,21 +176,48 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
             {s->recPause,0,120,std::min(width,240),32}});
         break;
 #endif
-    case SettingsTab::VideoWindow:
+    case SettingsTab::VideoWindow: {
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        const bool rifeInput=SettingsRifeCaptureOverride(*s);
+#else
+        constexpr bool rifeInput=false;
+#endif
         pages.Group(text(L"캡처 장치",L"Capture devices"));
         pages.Button(s->videoRefreshButton);
         pages.Field(s->captureDeviceLabel,s->captureDeviceCombo);
         pages.Block(54, {{s->captureAudioDeviceLabel,0,0,width,20},
             {s->captureAudioDeviceCombo,0,24,width,30},{s->captureAudioStatus,0,24,width,30}});
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        if (rifeInput && width >= 360) {
+            const int half = (width - 16) / 2;
+            pages.Block(54, {{s->videoLabel,0,0,half,20}, {s->rifeCaptureResolution,0,24,half,30},
+                {s->frameRateLabel,half+16,0,width-half-16,20},
+                {s->rifeCaptureFps,half+16,24,width-half-16,30}});
+        } else {
+            pages.Field(s->videoLabel,rifeInput?s->rifeCaptureResolution:s->videoCombo);
+            pages.Field(s->frameRateLabel,rifeInput?s->rifeCaptureFps:s->frameRateCombo);
+        }
+#else
         pages.Field(s->videoLabel,s->videoCombo);
         pages.Field(s->frameRateLabel,s->frameRateCombo);
-        pages.Check(s->unlistedFpsCheck);
-        pages.Check(s->capture40Check,s->capture40Help);
+#endif
+        if(!rifeInput){
+            pages.Check(s->unlistedFpsCheck);
+            pages.Check(s->capture40Check,s->capture40Help);
+        }
         pages.Group(text(L"영상 형식",L"Video format"));
-        pages.Field(s->pixelFormatLabel,s->pixelFormatCombo);
-        pages.Text(s->videoCapabilityStatus,CapabilityTextHeight(s->videoCapabilityStatus,width,dpi));
-        if (GetWindowTextLengthW(s->unlistedFpsStatus) > 0)
-            pages.Text(s->unlistedFpsStatus,20);
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        if(rifeInput){
+            pages.Field(s->pixelFormatLabel,s->pixelFormatCombo);
+            pages.Text(s->rifeCaptureHint,CapabilityTextHeight(s->rifeCaptureHint,width,dpi));
+        }else
+#endif
+        {
+            pages.Field(s->pixelFormatLabel,s->pixelFormatCombo);
+            pages.Text(s->videoCapabilityStatus,CapabilityTextHeight(s->videoCapabilityStatus,width,dpi));
+            if (GetWindowTextLengthW(s->unlistedFpsStatus) > 0)
+                pages.Text(s->unlistedFpsStatus,20);
+        }
         // Do not create blank continuation pages for formats without overrides.
         {
         const LRESULT selection=SendMessageW(s->pixelFormatCombo,CB_GETCURSEL,0,0);
@@ -233,20 +263,34 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
 #endif
         }
         break;
+    }
 #ifdef LLCV_RIFE_AUTO_UI_TEST
-    case SettingsTab::Interpolation:
+    case SettingsTab::Interpolation: {
 #if defined(LLCV_FLYHIGH_TEST) || defined(LLCV_RIFE_OPTIONAL)
         pages.Group(text(L"프레임 보간",L"Frame interpolation"));
 #else
         pages.Group(text(L"RIFE",L"RIFE"));
 #endif
 #ifdef LLCV_INTERPOLATION_RELEASE
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        const auto provider=interpolation::ChooseProvider(s->interpolationMethod,s->InterpolationGpuAvailable(),true);
+        if (s->interpolationMethod!=settings::InterpolationMethod::RifeVulkan &&
+            (s->InterpolationGpuAvailable() || s->ShowVfgGpuSwitch())) pages.Button(s->vfgDownloadButton);
+#else
         if (s->InterpolationGpuAvailable() || s->ShowVfgGpuSwitch()) pages.Button(s->vfgDownloadButton);
 #endif
+#endif
         pages.Check(s->rifeHalfCheck);
-#if (defined(LLCV_FLYHIGH_TEST) || defined(LLCV_RIFE_OPTIONAL)) && !defined(LLCV_INTERPOLATION_RELEASE)
+#if defined(LLCV_RIFE_VULKAN_BUNDLED) || ((defined(LLCV_FLYHIGH_TEST) || defined(LLCV_RIFE_OPTIONAL)) && !defined(LLCV_INTERPOLATION_RELEASE))
         pages.Field(s->interpolationProviderLabel,s->interpolationProviderCombo);
 #endif
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        if(provider==interpolation::Provider::NvidiaVfg){
+            pages.HeadingField(s->rifeScaleLabel,s->rifeScaleCombo,s->interpolationQualityHelp);
+            pages.Check(s->rifeQualityCheck);
+        }else if(provider==interpolation::Provider::RifeVulkan)
+            pages.Field(s->rifeAutoUiLabel,s->rifeAutoUiCombo);
+#else
 #ifdef LLCV_RIFE_OPTIONAL
         pages.HeadingField(s->rifeScaleLabel,s->rifeScaleCombo,s->interpolationQualityHelp);
 #else
@@ -256,6 +300,7 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
 #ifndef LLCV_INTERPOLATION_RELEASE
         pages.Group(text(L"자동 HUD 보호",L"Automatic HUD protection"));
         pages.Field(s->rifeAutoUiLabel,s->rifeAutoUiCombo);
+#endif
 #endif
 #ifdef LLCV_RIFE_OPTIONAL
         pages.Text(s->rifeAutoUiHints[0],CapabilityTextHeight(s->rifeAutoUiHints[0],width,dpi));
@@ -267,6 +312,7 @@ void LayoutCompactSettingsControls(SettingsControls* s, UINT dpi) {
         for(auto hint:s->rifeAutoUiHints)pages.Text(hint,CapabilityTextHeight(hint,width,dpi));
 #endif
         break;
+    }
 #endif
     case SettingsTab::Audio:
         pages.Group(text(L"출력",L"Output"));

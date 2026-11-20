@@ -134,6 +134,7 @@ constexpr const wchar_t* FallbackLabel(const wchar_t* detail, bool english) {
     if (reason==L"GPU mismatch") return L"재생 GPU 불일치";
     if (reason==L"GPU / engine mismatch") return L"GPU와 보간 모델 불일치";
     if (reason==L"runtime error") return L"구성품 실행 오류";
+    if (reason==L"Vulkan runtime error") return L"Vulkan 초기화 또는 실행 실패";
     return detail; // File names and identifiers do not need translation.
 }
 constexpr bool AllowAutomaticChanges(bool smoke,bool explicitAutomation){return smoke&&explicitAutomation;}
@@ -228,9 +229,34 @@ inline bool SelectScale(Scale scale){
 }
 inline void NextScale(){SelectScale(Scales[(ScaleIndex(selectedScale.load())+1)%Scales.size()]);}
 inline void SetQualityComparison(bool enabled){qualityComparison.store(enabled,std::memory_order_release);status.store(requested.load()?Status::Pending:Status::Off);}
+#ifdef LLCV_RIFE_VULKAN
+constexpr bool SupportsVulkanSdrTexture(DXGI_FORMAT format) {
+    return format==DXGI_FORMAT_NV12 || format==DXGI_FORMAT_YUY2 ||
+        format==DXGI_FORMAT_R8G8B8A8_UNORM || format==DXGI_FORMAT_B8G8R8X8_UNORM;
+}
+// Measurement-only Vulkan backend. Set once at startup
+// by --rife-vulkan-fast <model folder>; empty keeps the normal providers.
+inline std::wstring vulkanModelDirectory;
+inline std::wstring vulkanTraceFile;
+inline Scale vulkanScale=Scale::Fast;
+inline bool vulkanHud=false; // --rife-vulkan-hud on: edge-history HUD protection
+inline bool vulkanHudChroma=false; // --rife-vulkan-hud chroma: add color edges
+inline bool vulkanTryRgbCopy=false; // isolated RGB24 performance comparison
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+inline bool useBundledInterpolation=false;
+#endif
+inline bool VulkanSelected(){return !vulkanModelDirectory.empty()&&selectedScale.load(std::memory_order_acquire)==vulkanScale;}
+#else
+constexpr bool VulkanSelected(){return false;}
+#endif
 class Half {
     struct Impl;
     std::unique_ptr<Impl> impl_;
+#ifdef LLCV_RIFE_VULKAN
+    struct VulkanFast;
+    std::unique_ptr<VulkanFast> vulkanFast_;
+    bool vulkanFailed_=false;
+#endif
 #ifdef LLCV_FLYHIGH_TEST
     struct FlyHigh;
     std::unique_ptr<FlyHigh> flyHigh_;

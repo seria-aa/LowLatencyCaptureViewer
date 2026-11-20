@@ -7,11 +7,11 @@
 [1. 버전 표기](#1-버전-표기) · [2. 빌드와 검사](#2-빌드와-검사) · [3. 패키지](#3-패키지) · [4. GitHub 공개](#4-github-공개)
 
 버전 표기, 빌드, 패키지와 GitHub 릴리스를 일관되게 유지하기 위한 체크리스트입니다.
-이번 준비에는 로컬 `release/v2.3.2` 브랜치를 사용합니다. 빌드·게시 전에 현재 브랜치를
+최종 검증과 게시에는 `release/v2.4.0` 브랜치를 사용합니다. 빌드·게시 전에 현재 브랜치를
 확인하세요. 다른 복제본에서는 같은 이름의 브랜치를 먼저 만들거나 체크아웃합니다.
 새 명명 규칙에 맞추려고 과거 감사 문서나 병합 기록의 브랜치 이름을 바꾸지 않습니다.
-아래 실행 명령은 모두 **v2.3.2** 기준이며 빌드 폴더는 현재 관례인
-`build-v2320-release`를 사용합니다. 다른 버전은 버전·빌드 폴더·출력 경로를
+아래 실행 명령은 모두 **v2.4.0** 기준이며 빌드 폴더는 현재 관례인
+`build-v2400-release`를 사용합니다. 다른 버전은 버전·빌드 폴더·출력 경로를
 함께 변경합니다. 빌드 폴더에 점이 있는 버전을 넣고 패키지 기본 경로는 그대로
 두지 않습니다.
 
@@ -19,7 +19,7 @@
 
 ## 1. 버전 표기
 
-Git 태그와 앱 버전 표시에는 `v2.3.2`를 사용합니다. 실행 파일 리소스와 설치
+Git 태그와 앱 버전 표시에는 `v2.4.0`를 사용합니다. 실행 파일 리소스와 설치
 프로그램의 버전 필드는 `v` 없는 숫자를 사용합니다. 다음 위치의 버전을 맞춥니다.
 
 - `CMakeLists.txt`의 `project(... VERSION ...)`
@@ -29,7 +29,7 @@ Git 태그와 앱 버전 표시에는 `v2.3.2`를 사용합니다. 실행 파일
   `VersionInfoVersion`
 - `tools/package-v1.ps1`의 기본 빌드·출력 경로
 - `BUILD_INFO.txt`, `DEPENDENCIES.txt`, `실행안내.txt`의 현재 버전 머리말
-- `docs/release-notes-v2.3.2.md`
+- `docs/release-notes-v2.4.0.md`
 - 한영 README·가이드의 현재 버전과 변경 내용, 설정 예시 이미지·캡션
 
 변경 후 현재 버전 표기에 이전 문자열이 남지 않았는지 확인합니다.
@@ -53,10 +53,12 @@ rg -n "2\.2\.0|build-v2200-release" CMakeLists.txt src installer tools DEPENDENC
 
 테스트·비공개 미리보기는 새로 빌드한 격리 프로필 버전을 사용하세요.
 일반 앱을 옵션 없이 실행하면 실제 사용자 설정을 사용합니다.
-현재 검증 범위는 `tests/RELEASE_V2_3_2_AUDIT.md`, 설정 분리 정책은
+현재 검증 범위는 `tests/RIFE_VULKAN_RELEASE_GATE.md`, 설정 분리 정책은
 `tests/PROFILE_ISOLATION.md`에 기록합니다.
 
 릴리스 후보는 `LLCV_VFG_AMPERE_COMPAT=ON`으로 RTX 30(SM 8.6) 실험적 호환 코드를 포함합니다.
+v2.4.0에는 RIFE Vulkan Fast와 라이선스 고지 3종도 동봉합니다. 빌드에서 모델 해시를
+확인하고, ZIP과 설치 프로그램은 RIFE 빌드 확인값과 실행 파일이 일치할 때만 생성합니다.
 NVIDIA 실행 구성품·모델 및 Dolby 미리보기는 동봉하지 않고, 녹화에는 mux-only FFmpeg SDK를 사용합니다.
 RTX 40·50은 Veyra와의 소스·런타임 대조를 기록하며 LLCV 실기 검증으로 표기하지 않습니다.
 사용자용 구성품 설치 경로는 공개 전 별도로 확인합니다.
@@ -71,11 +73,11 @@ PATH 또는 `Python3_EXECUTABLE`·`LLCV_TEST_FFMPEG`·`LLCV_TEST_FFPROBE`로 지
 
 ```powershell
 chcp.com 65001 > $null
-if ((git branch --show-current) -ne 'release/v2.3.2') { throw 'release/v2.3.2 브랜치를 먼저 확인하세요.' }
+if ((git branch --show-current) -ne 'release/v2.4.0') { throw 'release/v2.4.0 브랜치를 먼저 확인하세요.' }
 .\tools\Build-RecordingFFmpeg.ps1
-cmake -S . -B build-v2320-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TRY_COMPILE_CONFIGURATION=Release -DBUILD_TESTING=ON -DLLCV_RECORDING=ON -DLLCV_UPSCALING_DIAGNOSTIC=OFF -DLLCV_SPATIAL_PROTOTYPE=OFF -DLLCV_HDR_FRAME_AUDIT=OFF -DLLCV_HDR_SCRGB_PROTOTYPE=OFF -DLLCV_VSR_EXPERIMENT=OFF -DLLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC=OFF -DLLCV_RECORDING_FFMPEG_ROOT="$PWD/outputs/dependencies/recording-ffmpeg/install" -DLLCV_INTERPOLATION_RELEASE=ON -DLLCV_VFG_AMPERE_COMPAT=ON -DLLCV_RIFE_ROOT="<TensorRT SDK directory containing tensorrt-include>"
-cmake --build build-v2320-release
-ctest --test-dir build-v2320-release --output-on-failure
+cmake -S . -B build-v2400-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TRY_COMPILE_CONFIGURATION=Release -DBUILD_TESTING=ON -DLLCV_RECORDING=ON -DLLCV_UPSCALING_DIAGNOSTIC=OFF -DLLCV_SPATIAL_PROTOTYPE=OFF -DLLCV_HDR_FRAME_AUDIT=OFF -DLLCV_HDR_SCRGB_PROTOTYPE=OFF -DLLCV_VSR_EXPERIMENT=OFF -DLLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC=OFF -DLLCV_RECORDING_FFMPEG_ROOT="$PWD/outputs/dependencies/recording-ffmpeg/install" -DLLCV_INTERPOLATION_RELEASE=ON -DLLCV_VFG_AMPERE_COMPAT=ON -DLLCV_RIFE_ROOT="<TensorRT SDK directory containing tensorrt-include>" -DLLCV_RIFE_VULKAN=ON -DLLCV_VULKAN_HEADERS="<Vulkan headers>" -DLLCV_NCNN_ROOT="<replay-enabled ncnn SDK>" -DLLCV_RIFE_NCNN_SOURCE="<patched ncnn source tree>" -DLLCV_RIFE_VULKAN_MODELS="<pinned Fast model directory>"
+cmake --build build-v2400-release
+ctest --test-dir build-v2400-release --output-on-failure
 git diff --check
 ```
 
@@ -91,21 +93,21 @@ git diff --check
 공개할 릴리스 자산은 아래 설치 파일과 포터블 ZIP 두 개입니다.
 
 ```text
-LowLatencyCaptureViewer_v2.3.2_Setup.exe
-LowLatencyCaptureViewer_v2.3.2_x64.zip
+LowLatencyCaptureViewer_v2.4.0_Setup.exe
+LowLatencyCaptureViewer_v2.4.0_x64.zip
 ```
 
 ```powershell
 chcp.com 65001 > $null
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
-  -Version 2.3.2 -BuildDir ..\build-v2320-release -OutputDir outputs\v2.3.2
+  -Version 2.4.0 -BuildDir ..\build-v2400-release -OutputDir outputs\v2.4.0
 & "C:\Program Files\Inno Setup 7\ISCC.exe" `
-  "--define=BuildDir=..\build-v2320-release" ".\installer\LowLatencyCaptureViewer.iss"
+  "--define=BuildDir=..\build-v2400-release" ".\installer\LowLatencyCaptureViewer.iss"
 ```
 
 `settings.ini`, `%LOCALAPPDATA%` 로그, `build-*` 폴더, PDB, ILK와 테스트 실행
-파일은 패키지에 넣지 않습니다. ZIP 안의 EXE와 설치 파일 버전이 `2.3.2` 또는
-`2.3.2.0`인지 확인합니다. 파일명만 새 버전이고 내부 EXE는 구버전이면 안 됩니다.
+파일은 패키지에 넣지 않습니다. ZIP 안의 EXE와 설치 파일 버전이 `2.4.0` 또는
+`2.4.0.0`인지 확인합니다. 파일명만 새 버전이고 내부 EXE는 구버전이면 안 됩니다.
 
 업스케일링 실험 보고서·비교 이미지와 셰이더 소스·수동 테스트 도구는 사용자 패키지에서 제외합니다.
 정식 NIS·CMAA2 셰이더는 실행 파일에 포함하고 아래 라이선스 고지는 함께 배포합니다.
@@ -125,7 +127,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
 ```powershell
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $releaseArchive = [IO.Compression.ZipFile]::OpenRead(
-  (Resolve-Path 'outputs\v2.3.2\LowLatencyCaptureViewer_v2.3.2_x64.zip').Path)
+  (Resolve-Path 'outputs\v2.4.0\LowLatencyCaptureViewer_v2.4.0_x64.zip').Path)
 try {
   foreach ($required in @('LowLatencyCaptureViewer.exe', 'LICENSE',
       'ASIO-SDK-LICENSE.txt', 'ASIO-HOST-LICENSE.txt', 'PRETENDARD-LICENSE.txt',
@@ -160,21 +162,21 @@ Inno Setup의 구성까지 확인된 것은 아닙니다.
 ```powershell
 git status --short
 git diff --cached --check
-git commit -m "Prepare v2.3.2 release"
-git push origin release/v2.3.2
+git commit -m "Prepare v2.4.0 release"
+git push origin release/v2.4.0
 ```
 
 릴리스 노트를 사용해 브랜치 HEAD를 태그 대상으로 공개합니다. 베타가 명시된 경우에만
-`--prerelease`를 추가합니다. **v2.3.2는 정식 릴리스**이므로 해당 옵션을 쓰지 않습니다.
+`--prerelease`를 추가합니다. **v2.4.0는 정식 릴리스**이므로 해당 옵션을 쓰지 않습니다.
 
 ```powershell
-gh release create v2.3.2 `
-  "outputs\v2.3.2\LowLatencyCaptureViewer_v2.3.2_Setup.exe" `
-  "outputs\v2.3.2\LowLatencyCaptureViewer_v2.3.2_x64.zip" `
+gh release create v2.4.0 `
+  "outputs\v2.4.0\LowLatencyCaptureViewer_v2.4.0_Setup.exe" `
+  "outputs\v2.4.0\LowLatencyCaptureViewer_v2.4.0_x64.zip" `
   --repo seria-aa/LowLatencyCaptureViewer `
-  --target release/v2.3.2 `
-  --title "LLCV v2.3.2" `
-  --notes-file ".\docs\release-notes-v2.3.2.md"
+  --target release/v2.4.0 `
+  --title "LLCV v2.4.0" `
+  --notes-file ".\docs\release-notes-v2.4.0.md"
 ```
 
 공개된 태그·자산은 덮어쓰지 않습니다. 문제가 생기면 다음 패치 버전으로 수정합니다.

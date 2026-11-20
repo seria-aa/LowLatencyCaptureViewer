@@ -14,6 +14,10 @@
 #ifdef LLCV_FLYHIGH_TEST
 #include "video/FlyHighGpu.h"
 #endif
+#ifdef LLCV_RIFE_VULKAN
+#include "video/RifeVulkanFast.h"
+#include <numeric>
+#endif
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -476,14 +480,219 @@ struct Half::Impl {
 #ifdef LLCV_FLYHIGH_TEST
 #include "video/FlyHighLive.inl"
 #endif
+#ifdef LLCV_RIFE_VULKAN
+// Fast and Half presets on ncnn Vulkan. Same playback contract as Impl: one job at a
+// time, never a queue, and the original is shown when the midpoint is late.
+struct Half::VulkanFast {
+    UINT W=rife_vulkan::kWidth,H=rife_vulkan::kHeight;
+    const Scale scale=vulkanScale;
+    Ptr<ID3D11Device5> device;Ptr<ID3D11DeviceContext4> context;Ptr<ID3D11VideoDevice> vd;Ptr<ID3D11VideoContext> vc;Ptr<ID3D11VideoContext1> vc1;
+    Ptr<ID3D11VideoProcessorEnumerator> nativeEnum,ownerEnum;Ptr<ID3D11VideoProcessor> native;
+    std::array<Ptr<ID3D11Texture2D>,3> cachedSources;
+    std::array<Ptr<ID3D11VideoProcessorInputView>,3> cachedInputs;
+    Ptr<ID3D11Texture2D> input,output;Ptr<ID3D11VideoProcessorOutputView> inputTarget;
+    Ptr<ID3D11VideoProcessorInputView> generatedView;
+    Ptr<ID3D11Fence> fence;HANDLE complete=nullptr,timer=nullptr;
+    std::unique_ptr<rife_vulkan::FastBackend> backend; // Released before the shared textures.
+    UINT64 serial=0,ticket=0;bool history=false;int64_t previousArrival=0,originalAt=0;
+    // Session statistics, written to the log when playback stops.
+    struct Row{int64_t arrival,submitted,decided,deadline;int outcome;};
+    std::vector<Row> rows;std::vector<double> gpuMs;
+    uint64_t pairs=0,seeds=0,onTime=0,lateCount=0,busyCount=0,cancelled=0;
+    uint64_t rgbCopies=0,rgbConversions=0;
+    void Texture(Ptr<ID3D11Texture2D>& texture,const char* what){
+        D3D11_TEXTURE2D_DESC desc{};desc.Width=W;desc.Height=H;desc.MipLevels=desc.ArraySize=1;desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_DEFAULT;
+        desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;desc.MiscFlags=D3D11_RESOURCE_MISC_SHARED_NTHANDLE|D3D11_RESOURCE_MISC_SHARED;
+        Hr(device->CreateTexture2D(&desc,nullptr,&texture),what);
+    }
+    void Initialize(ID3D11Device* d,ID3D11DeviceContext* c,ID3D11VideoDevice* videoDevice,ID3D11VideoContext* videoContext,int width,int height,int fps){
+        Check(width==int(W)&&height==int(H),"Vulkan RIFE needs FHD input");
+        Hr(d->QueryInterface(IID_PPV_ARGS(&device)),"Vulkan D3D11.4 device");Hr(c->QueryInterface(IID_PPV_ARGS(&context)),"Vulkan D3D11.4 context");
+        vd=videoDevice;vc=videoContext;Hr(vc.As(&vc1),"Vulkan video context1");
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};content.InputFrameFormat=D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;content.InputFrameRate={UINT(fps>0?fps:60),1};content.OutputFrameRate=content.InputFrameRate;content.InputWidth=content.OutputWidth=W;content.InputHeight=content.OutputHeight=H;content.Usage=D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+        Hr(vd->CreateVideoProcessorEnumerator(&content,&nativeEnum),"Vulkan native enumerator");Hr(vd->CreateVideoProcessor(nativeEnum.Get(),0,&native),"Vulkan native processor");
+        RECT rect{0,0,LONG(W),LONG(H)};vc->VideoProcessorSetStreamAutoProcessingMode(native.Get(),0,FALSE);vc->VideoProcessorSetStreamFrameFormat(native.Get(),0,D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);vc->VideoProcessorSetStreamSourceRect(native.Get(),0,TRUE,&rect);vc->VideoProcessorSetStreamDestRect(native.Get(),0,TRUE,&rect);vc->VideoProcessorSetOutputTargetRect(native.Get(),TRUE,&rect);
+        vc1->VideoProcessorSetOutputColorSpace1(native.Get(),DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        Texture(input,"Vulkan shared input");Texture(output,"Vulkan shared output");
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC view{};view.ViewDimension=D3D11_VPOV_DIMENSION_TEXTURE2D;
+        Hr(vd->CreateVideoProcessorOutputView(input.Get(),nativeEnum.Get(),&view,&inputTarget),"Vulkan input conversion target");
+        Hr(device->CreateFence(0,D3D11_FENCE_FLAG_SHARED,IID_PPV_ARGS(&fence)),"Vulkan shared fence");
+        complete=CreateEventW(nullptr,FALSE,FALSE,nullptr);timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);Check(complete&&timer,"Vulkan timer/event");
+        const auto preset=scale==Scale::Half?rife_vulkan::Preset::Half:rife_vulkan::Preset::Fast;
+        backend=std::make_unique<rife_vulkan::FastBackend>(device.Get(),input.Get(),output.Get(),fence.Get(),std::filesystem::path(vulkanModelDirectory),preset,vulkanHud,vulkanHudChroma);
+#ifdef LLCV_RIFE_VULKAN_BUNDLED
+        if(!useBundledInterpolation)
+#endif
+        {rows.reserve(65536);gpuMs.reserve(65536);}
+        activeScale.store(scale);status=Status::Pending;
+        fwprintf(stderr,L"[rife-vulkan] %s ready on %s; %ux%u, D3D11 shared textures and fence; HUD protection %s.\n",
+                 scale==Scale::Half?L"Half":L"Fast",backend->DeviceName().c_str(),W,H,
+                 vulkanHudChroma?L"on (edge history + chroma, 16 px)":vulkanHud?L"on (edge history, 16 px)":L"off");
+    }
+    void Harvest(){
+        double ms=0;
+        if(backend&&backend->TakeGpuMs(ms)&&ms>=0){
+            if(gpuMs.size()<gpuMs.capacity())gpuMs.push_back(ms);
+            const auto us=uint64_t(ms*1000);++jobs;gpuUs.fetch_add(us);
+            ++modeJobs[ScaleIndex(scale)];modeGpuUs[ScaleIndex(scale)].fetch_add(us);
+            auto old=maxGpuUs.load();while(old<us&&!maxGpuUs.compare_exchange_weak(old,us)){}
+        }
+    }
+    void Record(int64_t arrival,int64_t submitted,int64_t decided,int64_t deadline,int outcome){
+        if(rows.size()<rows.capacity())rows.push_back({arrival,submitted,decided,deadline,outcome});
+    }
+    ID3D11VideoProcessorInputView* Submit(ID3D11Texture2D* source,ID3D11VideoProcessor* original,ID3D11VideoProcessorEnumerator* originalEnum,int fps,int64_t arrival){
+        if(ticket&&(fence->GetCompletedValue()<ticket||!backend->Free())){
+            history=false;++busy;++busyCount;Record(arrival,0,Now(),0,3);status=Status::Late;return nullptr;
+        }
+        Harvest();
+        D3D11_TEXTURE2D_DESC srcDesc{};source->GetDesc(&srcDesc);
+        if(!SupportsVulkanSdrTexture(srcDesc.Format)){
+            history=false;Record(arrival,0,Now(),0,5);status=Status::Unsupported;return nullptr;
+        }
+        const auto step=PlanInputHistory(previousArrival,arrival,fps,history);
+        previousArrival=arrival;
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC desc{};desc.ViewDimension=D3D11_VPIV_DIMENSION_TEXTURE2D;
+        const bool rgb=srcDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM||srcDesc.Format==DXGI_FORMAT_B8G8R8X8_UNORM;
+        DXGI_COLOR_SPACE_TYPE color{};
+        BOOL mirror=FALSE,flipX=FALSE,flipY=FALSE;
+        if(rgb){
+            vc1->VideoProcessorGetStreamColorSpace1(original,0,&color);
+            vc1->VideoProcessorGetStreamMirror(original,0,&mirror,&flipX,&flipY);
+        }
+        const bool rgbCopy=vulkanTryRgbCopy&&srcDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM&&
+            color==DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709&&(!mirror||!flipX)&&
+            srcDesc.Width==W&&srcDesc.Height==H&&srcDesc.MipLevels==1&&srcDesc.ArraySize==1&&
+            srcDesc.SampleDesc.Count==1&&srcDesc.SampleDesc.Quality==0;
+        if(rgbCopy){
+            // RGB24 has already been expanded into RGBA8 on the GPU.
+            // Vulkan folds the optional Y flip into its existing input loads.
+            context->CopyResource(input.Get(),source);
+            ++rgbCopies;
+        }else{
+            size_t slot=0;
+            while(slot<cachedSources.size()&&cachedSources[slot].Get()!=source&&cachedSources[slot])++slot;
+            Check(slot<cachedSources.size(),"Vulkan upload surface count changed");
+            if(!cachedInputs[slot]){
+                cachedSources[slot]=source;
+                Hr(vd->CreateVideoProcessorInputView(source,nativeEnum.Get(),&desc,&cachedInputs[slot]),"Vulkan native input");
+            }
+            if(rgb){
+                vc1->VideoProcessorSetStreamColorSpace1(native.Get(),0,color);
+                vc1->VideoProcessorSetStreamMirror(native.Get(),0,mirror,flipX,flipY);
+                ++rgbConversions;
+            }else{
+                D3D11_VIDEO_PROCESSOR_COLOR_SPACE yuv{};
+                vc->VideoProcessorGetStreamColorSpace(original,0,&yuv);
+                vc->VideoProcessorSetStreamColorSpace(native.Get(),0,&yuv);
+            }
+            D3D11_VIDEO_PROCESSOR_STREAM s{};s.Enable=TRUE;s.pInputSurface=cachedInputs[slot].Get();
+            Hr(vc->VideoProcessorBlt(native.Get(),inputTarget.Get(),0,1,&s),"Vulkan SDR to RGB conversion");
+        }
+        // Every accepted input advances the GPU-resident history, including
+        // the first frame after a gap; only a valid pair is shown.
+        const auto submitted=Now();
+        const auto available=++serial;ticket=++serial;
+        Hr(context->Signal(fence.Get(),available),"Vulkan input signal");context->Flush();
+        backend->Enqueue(available,ticket,arrival,rgbCopy&&mirror&&flipY);
+        if(!step.pairReady){history=true;++seeds;Record(arrival,submitted,submitted,0,4);status=Status::Pending;return nullptr;}
+        history=true;++pairs;
+        const auto deadline=CompletionDeadlineUs(arrival,submitted,fps,false);const auto remaining=deadline-Now();
+        if(remaining>0&&fence->GetCompletedValue()<ticket){
+            ResetEvent(complete);Hr(fence->SetEventOnCompletion(ticket,complete),"Vulkan completion event");
+            const auto sleepMs=remaining>1500?DWORD((remaining-1500)/1000):0;
+            if(sleepMs)WaitForSingleObject(complete,sleepMs);
+            while(fence->GetCompletedValue()<ticket&&Now()<deadline&&requested.load(std::memory_order_relaxed))YieldProcessor();
+        }
+        const bool completed=fence->GetCompletedValue()>=ticket;
+        const auto decision=Now();
+        const bool ready=completed&&decision<=deadline;
+        if(!requested.load(std::memory_order_acquire)||!VulkanSelected()){
+            history=false;++cancelled;++modeCancelled[ScaleIndex(scale)];Record(arrival,submitted,decision,deadline,2);
+            status=requested.load()?Status::Pending:Status::Off;return nullptr;
+        }
+        if(!ready){++late;++lateCount;++modeLate[ScaleIndex(scale)];Record(arrival,submitted,decision,deadline,1);status=Status::Late;return nullptr;}
+        ++onTime;Record(arrival,submitted,decision,deadline,0);
+        Hr(context->Wait(fence.Get(),ticket),"Vulkan output acquire");
+        if(ownerEnum.Get()!=originalEnum){generatedView.Reset();ownerEnum=originalEnum;Hr(vd->CreateVideoProcessorInputView(output.Get(),ownerEnum.Get(),&desc,&generatedView),"Vulkan generated input view");}
+        status=Status::Active;return generatedView.Get();
+    }
+    void WaitOriginalSlot(int fps){
+        if(fps<=0||!requested.load())return;
+        context->Flush();const auto remaining=originalAt-Now();
+        if(remaining<=0)return;
+        LARGE_INTEGER due{};due.QuadPart=-LONGLONG(remaining*10);
+        if(SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE))WaitForSingleObject(timer,DWORD((remaining+999)/1000+10));
+    }
+    static double Percentile(std::vector<double> v,double p){
+        if(v.empty())return 0;std::sort(v.begin(),v.end());
+        return v[std::min(v.size()-1,size_t(p*double(v.size()-1)+0.5))];
+    }
+    void Report(){
+        Harvest();
+        std::vector<double> ready;
+        for(const auto& r:rows)if(r.outcome==0)ready.push_back(double(r.decided-r.arrival)/1000.0);
+        const auto shown=pairs?double(onTime)*100.0/double(pairs):0.0;
+        fwprintf(stderr,L"[rife-vulkan] pid=%lu\n",GetCurrentProcessId());
+        if(rgbCopies||rgbConversions)
+            fwprintf(stderr,L"[rife-vulkan] RGB input copies=%llu processor=%llu\n",
+                static_cast<unsigned long long>(rgbCopies),static_cast<unsigned long long>(rgbConversions));
+        fwprintf(stderr,L"[rife-vulkan] pairs=%llu on_time=%llu (%.2f%%) late=%llu busy=%llu seeds=%llu cancelled=%llu\n",
+            static_cast<unsigned long long>(pairs),static_cast<unsigned long long>(onTime),shown,static_cast<unsigned long long>(lateCount),
+            static_cast<unsigned long long>(busyCount),static_cast<unsigned long long>(seeds),static_cast<unsigned long long>(cancelled));
+        fwprintf(stderr,L"[rife-vulkan] arrival->ready ms p50=%.3f p95=%.3f p99=%.3f; GPU ms p50=%.3f p95=%.3f p99=%.3f (n=%zu)\n",
+            Percentile(ready,.5),Percentile(ready,.95),Percentile(ready,.99),
+            Percentile(gpuMs,.5),Percentile(gpuMs,.95),Percentile(gpuMs,.99),gpuMs.size());
+        uint64_t hudJobs=0,hudActive=0;double hudCore=0;
+        uint64_t chromaJobs=0,chromaCapped=0;
+        double chromaCore=0;
+        if(backend&&backend->HudSummary(hudJobs,hudActive,hudCore,chromaJobs,chromaCore,chromaCapped)){
+            fwprintf(stderr,L"[rife-vulkan] HUD detector jobs=%llu with_core=%llu mean_core=%.4f%%\n",
+                static_cast<unsigned long long>(hudJobs),static_cast<unsigned long long>(hudActive),hudCore*100.0);
+            if(vulkanHudChroma)
+                fwprintf(stderr,L"[rife-vulkan] HUD chroma extra_core_jobs=%llu mean_extra_core=%.4f%% luma_fallback_jobs=%llu\n",
+                    static_cast<unsigned long long>(chromaJobs),chromaCore*100.0,static_cast<unsigned long long>(chromaCapped));
+        }
+        if(vulkanTraceFile.empty()||rows.empty())return;
+        try{
+            std::ofstream csv(std::filesystem::path(vulkanTraceFile),std::ios::app);
+            csv.exceptions(std::ios::badbit|std::ios::failbit);
+            // The process id ties each row to the same run's log lines.
+            if(csv.tellp()==0)csv<<"pid,arrival_us,submitted_us,decided_us,deadline_us,outcome\n";
+            static constexpr const char* names[]{"ready","late","cancelled","busy","seed","unsupported"};
+            const auto pid=GetCurrentProcessId();
+            for(const auto& r:rows)csv<<pid<<','<<r.arrival<<','<<r.submitted<<','<<r.decided<<','<<r.deadline<<','<<names[r.outcome]<<'\n';
+        }catch(const std::exception& e){fprintf(stderr,"[rife-vulkan] trace not written: %s\n",e.what());}
+    }
+    ~VulkanFast(){
+        // Retire the in-flight job before the shared textures are released.
+        if(backend){
+            const auto start=Now();
+            while(ticket&&fence&&fence->GetCompletedValue()<ticket&&Now()-start<2000000)Sleep(1);
+            try{while(!backend->Free()&&Now()-start<2000000)Sleep(1);}catch(...){}
+            Report();
+        }
+        backend.reset();
+        if(complete)CloseHandle(complete);if(timer)CloseHandle(timer);
+    }
+};
+#endif
 Half::Half()=default;Half::~Half()=default;
 void Half::Reset(){
 #ifdef LLCV_FLYHIGH_TEST
     flyHigh_.reset();
     flyHighFailed_=false;
 #endif
+#ifdef LLCV_RIFE_VULKAN
+    vulkanFast_.reset();vulkanFailed_=false;
+#endif
     impl_.reset();failed_=false;status=Status::Off;}
-void Half::Invalidate(){if(impl_){impl_->history=false;
+void Half::Invalidate(){
+#ifdef LLCV_RIFE_VULKAN
+    if(vulkanFast_)vulkanFast_->history=false;
+    vulkanFailed_=false;
+#endif
+    if(impl_){impl_->history=false;
 #ifdef LLCV_RIFE_AUTO_UI_TEST
     impl_->uiReset=true;
 #endif
@@ -505,6 +714,24 @@ ID3D11VideoProcessorInputView* Half::Submit(ID3D11Device* d,ID3D11DeviceContext*
         }catch(const std::exception& e){fprintf(stderr,"[flyhigh] original fallback: %s\n",e.what());flyHigh_.reset();flyHighFailed_=true;status=Status::Failed;return nullptr;}
     }
     flyHigh_.reset();flyHighFailed_=false;
+#endif
+#ifdef LLCV_RIFE_VULKAN
+    if(VulkanSelected()){
+        impl_.reset();failed_=false;
+        if(vulkanFailed_){status=Status::Failed;return nullptr;}
+        try{
+            if(vulkanFast_&&(vulkanFast_->W!=UINT(width)||vulkanFast_->H!=UINT(height)))vulkanFast_.reset();
+            if(!vulkanFast_){vulkanFast_=std::make_unique<VulkanFast>();vulkanFast_->Initialize(d,c,vd,vc,width,height,fps);return nullptr;}
+            return vulkanFast_->Submit(source,processor,owner,fps,arrival);
+        }catch(const std::exception& e){
+#ifdef LLCV_RIFE_OPTIONAL
+            fallbackDetail.store(L"Vulkan runtime error");
+#endif
+            fprintf(stderr,"[rife-vulkan] original fallback: %s\n",e.what());
+            vulkanFast_.reset();vulkanFailed_=true;status=Status::Failed;return nullptr;
+        }
+    }
+    vulkanFast_.reset();vulkanFailed_=false;
 #endif
     const auto selected=selectedScale.load(std::memory_order_acquire);
 #ifdef LLCV_INTERPOLATION_RELEASE
@@ -566,10 +793,16 @@ void Half::ScheduleOriginalSlot(int fps){
 #ifdef LLCV_FLYHIGH_TEST
     if(flyHigh_&&fps>0)flyHigh_->originalAt=Now()+500000/fps;
 #endif
+#ifdef LLCV_RIFE_VULKAN
+    if(vulkanFast_&&fps>0)vulkanFast_->originalAt=Now()+500000/fps;
+#endif
     if(impl_&&fps>0)impl_->originalAt=Now()+500000/fps;}
 void Half::WaitOriginalSlot(int fps){
 #ifdef LLCV_FLYHIGH_TEST
     if(flyHigh_){flyHigh_->WaitOriginalSlot(fps);return;}
+#endif
+#ifdef LLCV_RIFE_VULKAN
+    if(vulkanFast_){vulkanFast_->WaitOriginalSlot(fps);return;}
 #endif
     if(!impl_||fps<=0||!requested.load())return;
     // Original-frame scaling/OSD has already been queued. Let it run while
