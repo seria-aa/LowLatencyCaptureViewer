@@ -1,4 +1,4 @@
-LLCV v2.3.2 - dependencies
+LLCV v2.4.1 - dependencies
 =========================
 
 License: GNU General Public License v3.0 or later. See the root LICENSE file.
@@ -48,7 +48,7 @@ configuration are pinned in that script. Preserve the SDK's licenses directory
 when distributing the application. FFmpeg source: https://ffmpeg.org/
 The recording-OFF application does not link or load these libraries.
 
-Optional frame interpolation (v2.4.0)
+Optional frame interpolation (since v2.4.0)
 ------------------------------------
 The base installer and portable ZIP include the Practical-RIFE 4.25 Fast
 model converted for ncnn Vulkan. RIFE does not need CUDA or TensorRT. It

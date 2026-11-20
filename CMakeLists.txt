@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LowLatencyCaptureViewer VERSION 2.4.0 LANGUAGES CXX)
+project(LowLatencyCaptureViewer VERSION 2.4.1 LANGUAGES CXX)
 
 include(cmake/MsvcDependencies.cmake)
 
@@ -1458,7 +1458,7 @@ if(LLCV_INTERPOLATION_RELEASE)
             include(\"${CMAKE_CURRENT_SOURCE_DIR}/cmake/ReleaseRifeStamp.cmake\")")
     endif()
     if(NOT LLCV_VFG_AMPERE_COMPAT)
-        install(CODE "message(FATAL_ERROR \"The v2.4.0 interpolation package requires the SM86 release configuration\")")
+        install(CODE "message(FATAL_ERROR \"The interpolation package requires the SM86 release configuration\")")
     else()
         install(CODE "
             set(exe \"$<TARGET_FILE:LowLatencyCaptureViewer>\")

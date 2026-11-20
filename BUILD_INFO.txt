@@ -1,4 +1,12 @@
-LLCV v2.4.0 x64 (continued from the v0.14.2 rework)
+LLCV v2.4.1 x64 (continued from the v0.14.2 rework)
+
+v2.4.1 frame interpolation stability
+------------------------------------
+- Keeps original playback running while RIFE initializes in the background.
+- Uses a fresh Vulkan device after a failed startup; distinguishes GPU removal from VFG completion.
+- Keeps RIFE history without generating a midpoint if the input is already late after its D3D11 wait.
+- Corrects HUD synchronization and separates ready and presented frames in diagnostics.
+- See tests/RIFE_VULKAN_RELEASE_GATE.md for verification.
 
 v2.4.0 Vulkan frame interpolation
 ---------------------------------

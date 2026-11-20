@@ -242,6 +242,7 @@ inline Scale vulkanScale=Scale::Fast;
 inline bool vulkanHud=false; // --rife-vulkan-hud on: edge-history HUD protection
 inline bool vulkanHudChroma=false; // --rife-vulkan-hud chroma: add color edges
 inline bool vulkanTryRgbCopy=false; // isolated RGB24 performance comparison
+inline bool vulkanTryCapturePacing=false; // isolated original-frame timing comparison
 #ifdef LLCV_RIFE_VULKAN_BUNDLED
 inline bool useBundledInterpolation=false;
 #endif
@@ -255,7 +256,7 @@ class Half {
 #ifdef LLCV_RIFE_VULKAN
     struct VulkanFast;
     std::unique_ptr<VulkanFast> vulkanFast_;
-    bool vulkanFailed_=false;
+    std::optional<uint64_t> vulkanFailedIntent_;
 #endif
 #ifdef LLCV_FLYHIGH_TEST
     struct FlyHigh;
@@ -276,7 +277,10 @@ public:
     ID3D11VideoProcessorInputView* Submit(ID3D11Device*,ID3D11DeviceContext*,
         ID3D11VideoDevice*,ID3D11VideoContext*,ID3D11VideoProcessor*,
         ID3D11VideoProcessorEnumerator*,ID3D11Texture2D*,int width,int height,int fps,int64_t arrivalUs);
-    void ScheduleOriginalSlot(int fps);
+    void ScheduleOriginalSlot(int fps,int64_t arrival);
     void WaitOriginalSlot(int fps);
+#ifdef LLCV_RIFE_VULKAN
+    void RecordPresent(int64_t arrival,bool interpolated,int64_t begin,int64_t end);
+#endif
 };
 }

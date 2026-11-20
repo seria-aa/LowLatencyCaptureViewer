@@ -4,7 +4,7 @@
 
 [README](../README.md) · [English](INDEX.md)
 
-현재 사용 가이드는 **LLCV 2.4.0** 기준입니다. 평소 사용에는 아래 가이드를 참고하세요.
+현재 사용 가이드는 **LLCV 2.4.1** 기준입니다. 평소 사용에는 아래 가이드를 참고하세요.
 과거 기록에 적힌 기능·기본값·테스트 결과는 해당 버전과 시험 환경을 기준으로 합니다.
 사용 가이드와 필요한 이미지는 배포본에 포함합니다. 개발·검증 기록은 GitHub 링크로 제공하며 인터넷 연결이 필요합니다.
 
@@ -14,6 +14,7 @@
 
 - [사용 가이드](USAGE.ko.md) — 설치, 설정, 절전 방지, 단축키, 업스케일링·VSR, 스크린샷
 - [영상·HDR](VIDEO.ko.md) — 포맷, 프레임, 40fps 캡처, HDR10, 확대, 창 크기
+- [프레임 보간](FRAME_INTERPOLATION.ko.md) — RIFE Vulkan, NVIDIA VFG, 지원 입력과 오류 시 동작
 - [녹화](RECORDING.ko.md) — 코덱·품질, 저장·분할, 파일 보호
 - [오디오·5.1](AUDIO.ko.md) — 출력 모드, LPCM 5.1, 버퍼, 클록 보정
 - [문제 해결](TROUBLESHOOTING.ko.md) — 증상별 확인 순서와 문제 제보
@@ -27,6 +28,7 @@
 
 ## 릴리스 노트
 
+- [v2.4.1](release-notes-v2.4.1.md)
 - [v2.4.0](release-notes-v2.4.0.md)
 - [v2.3.2](release-notes-v2.3.2.md)
 - [v2.3.1](release-notes-v2.3.1.md)

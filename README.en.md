@@ -5,7 +5,7 @@
 A low-latency Windows viewer for video and audio from HDMI capture devices.
 Use it to play console games without OBS, or listen in audio-only mode.
 
-**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.4.0.md) · [한국어](README.md)
+**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.4.1.md) · [한국어](README.md)
 
 <br>
 
@@ -16,6 +16,10 @@ Use it to play console games without OBS, or listen in audio-only mode.
 <sub>2.1.6 UI examples. Device lists and supported formats vary by system. Click an image to view it at full resolution.</sub>
 
 <br>
+
+## What's new in 2.4.1
+
+Original frames keep playing while RIFE Vulkan initializes in the background. Jobs that have already missed their deadline skip interpolation. This update also improves GPU error handling for RIFE and NVIDIA VFG.
 
 ## What's new in 2.4.0
 
@@ -33,7 +37,7 @@ VFG settings now survive F2 and app restarts. F7 remembers whether playback inte
 
 ## What's new in 2.3.0
 
-Optional **frame interpolation** for supported NVIDIA GPUs is off by default. The current release candidate does not bundle the runtimes or models.
+Optional **NVIDIA VFG frame interpolation** is off by default. NVIDIA runtimes and models are not bundled.
 A compact **REC badge and timer** appears during recording. Windows Explorer shows the duration of normally completed MP4s.
 Start video-only if capture audio cannot connect. Press F1 to see all assigned shortcuts.
 [Full release notes](docs/release-notes-v2.3.0.md) · [Frame interpolation guide](docs/FRAME_INTERPOLATION.md)

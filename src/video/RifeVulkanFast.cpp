@@ -10,6 +10,7 @@
 #include <vulkan/vulkan.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -19,12 +20,17 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace llcv::rife_vulkan {
 namespace {
 using Microsoft::WRL::ComPtr;
 void Require(bool ok, const char* stage) { if (!ok) throw std::runtime_error(stage); }
+int64_t TraceClockUs() {
+    using namespace std::chrono;
+    return duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+}
 void Check(VkResult result, const char* stage) {
     if (result != VK_SUCCESS) {
         char text[200];
@@ -416,6 +422,9 @@ void main(){
 struct FastBackend::Impl {
     Loader loader;
     std::unique_ptr<FastGraph> graph;
+    ComPtr<ID3D11Texture2D> sharedInput, sharedOutput;
+    ComPtr<ID3D11Fence> sharedFence;
+    Handle inputReady;
     VkInstance instance = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     PFN_vkGetDeviceProcAddr deviceAddress = nullptr;
@@ -428,7 +437,7 @@ struct FastBackend::Impl {
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline pack = VK_NULL_HANDLE, unpack = VK_NULL_HANDLE;
     VkCommandPool pool = VK_NULL_HANDLE;
-    VkCommandBuffer before = VK_NULL_HANDLE, after = VK_NULL_HANDLE;
+    VkCommandBuffer before = VK_NULL_HANDLE, after = VK_NULL_HANDLE, releaseInput = VK_NULL_HANDLE;
     uint64_t waitValue = 0, signalValue = 0;
     std::wstring name;
     // Kept for re-recording the input commands each job.
@@ -439,6 +448,7 @@ struct FastBackend::Impl {
     bool hud = false, chroma = false;
     HudTrial hudTrial = HudTrial::None;
     bool verifyHud = false;
+    bool traceSubmission = false;
     VkQueryPool hudTiming = VK_NULL_HANDLE;
     double timestampNs = 0.;
     VkPipeline detector[kHudStages]{};
@@ -454,13 +464,74 @@ struct FastBackend::Impl {
 
     std::mutex lock;
     std::condition_variable changed;
-    bool stop = false, busy = false, queued = false, finished = false;
+    bool busy = false, queued = false, finished = false;
     uint64_t queuedWait = 0, queuedSignal = 0;
     int64_t queuedArrival = 0;
+    int64_t queuedDeadlineUs = 0;
+    int64_t queuedAtUs = 0;
+    SubmissionTiming activeTiming{}, reportedTiming{};
     bool queuedFlipY = false;
+    JobKind queuedKind = JobKind::Generate, jobKind = JobKind::Generate;
     double lastGpuMs = -1;
     std::exception_ptr error;
+    std::atomic<bool> failed{false}, stop{false}, exited{false};
+    std::atomic<uint64_t> generatingTicket{0};
+    VkFence pendingFence = VK_NULL_HANDLE; // Written by the worker; inspect only once it is idle.
+    PFN_vkGetFenceStatus getFenceStatus = nullptr;
+    const char* submitFailure = nullptr;
+    bool failBeforeSubmitForTest = false;
+    bool failAfterSubmitForTest = false;
+    bool observeBlockedInputForTest = false;
+    std::atomic<bool> blockedInputForTest{false};
     std::thread worker;
+
+    struct Slot {
+        std::mutex lock;
+        bool active = false;
+        // Keep at most one unretired backend out of the render path.
+        Impl* retired = nullptr;
+        std::chrono::steady_clock::time_point retiredAt{};
+        ~Slot() {
+            if(retired){
+                retired->DrainAtShutdown();
+                delete retired;
+            }
+        }
+    };
+    static Slot& PlaybackSlot() {
+        static Slot slot;
+        return slot;
+    }
+    bool RequestStop() {
+        std::lock_guard lk(lock);
+        stop.store(true,std::memory_order_release);
+        changed.notify_one();
+        return !busy;
+    }
+    bool GpuRetired() {
+        if(!pendingFence)return true;
+        const auto result=getFenceStatus(device,pendingFence);
+        if(result!=VK_SUCCESS&&result!=VK_ERROR_DEVICE_LOST)return false;
+        pendingFence=VK_NULL_HANDLE;
+        return true;
+    }
+    void DrainAtShutdown() {
+        // The owned VkDevice must retire before ncnn destroys its VkInstance.
+        // This is never called from renderer teardown.
+        if(worker.joinable())worker.join();
+        if(!pendingFence)return;
+        const auto wait=D<PFN_vkWaitForFences>("vkWaitForFences");
+        while(!GpuRetired()){
+            const auto result=wait(device,1,&pendingFence,VK_TRUE,50'000'000);
+            if(result==VK_SUCCESS||result==VK_ERROR_DEVICE_LOST){pendingFence=VK_NULL_HANDLE;break;}
+            if(result!=VK_TIMEOUT)Sleep(10);
+        }
+    }
+    void RethrowWorkerError() const {
+        if(!error)return;
+        if(submitFailure)throw std::runtime_error(submitFailure);
+        std::rethrow_exception(error);
+    }
 
     template<typename T> T D(const char* fn) const {
         auto value = reinterpret_cast<T>(deviceAddress(device, fn));
@@ -564,15 +635,13 @@ struct FastBackend::Impl {
         const VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr,
             VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
         Check(start(before, &begin), "record input pack");
-        const VkImageMemoryBarrier acquire[]{
-            {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr, 0, VK_ACCESS_SHADER_READ_BIT,
-             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_EXTERNAL, native.computeFamily, images[0], kColor},
-            {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr, 0, VK_ACCESS_SHADER_WRITE_BIT,
-             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_EXTERNAL, native.computeFamily, images[1], kColor}};
+        const VkImageMemoryBarrier acquire{
+            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr, 0, VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_EXTERNAL, native.computeFamily, images[0], kColor};
         const VkMemoryBarrier history{VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_MEMORY_WRITE_BIT,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
         barrier(before, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-            1, &history, 0, nullptr, 2, acquire);
+            1, &history, 0, nullptr, 1, &acquire);
         bindPipeline(before, VK_PIPELINE_BIND_POINT_COMPUTE, pack);
         bindSets(before, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &bound, 0, nullptr);
         steps[6]=flipY?1:0;
@@ -583,12 +652,18 @@ struct FastBackend::Impl {
             struct { int p, reset; float dt; int radius,flipY; } step{parity, reset ? 1 : 0,
                 reset ? 0.f : float(double(arrival - lastArrival) / 1e6), 8,flipY?1:0};
             lastArrival = arrival;
-            const VkMemoryBarrier between{VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
+            const VkMemoryBarrier toFill{VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
+                VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT};
+            const VkMemoryBarrier toCompute{VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
                 VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT};
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
+            // Counters without any shader increments still come from the fill.
+            const VkMemoryBarrier toReaders{VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
+                VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT};
             const auto hudBuffer = reinterpret_cast<VkBuffer>(native.hud.handle);
             const VkDeviceSize countOffset = native.hud.offset + VkDeviceSize(29 * kHudPlane + 4) * 4;
-            barrier(before, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &between, 0, nullptr, 0, nullptr);
+            barrier(before, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toFill, 0, nullptr, 0, nullptr);
             D<PFN_vkCmdFillBuffer>("vkCmdFillBuffer")(before, hudBuffer, countOffset, 16, 0);
             if (hudTiming) {
                 D<PFN_vkCmdResetQueryPool>("vkCmdResetQueryPool")(before,hudTiming,0,2);
@@ -596,7 +671,7 @@ struct FastBackend::Impl {
             }
             for (int stage = 0; stage < kHudStages; ++stage) {
                 barrier(before, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &between, 0, nullptr, 0, nullptr);
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &toCompute, 0, nullptr, 0, nullptr);
                 bindPipeline(before, VK_PIPELINE_BIND_POINT_COMPUTE, detector[stage]);
                 push(before, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(step), &step);
                 if (stage == 2) dispatch(before, 1, 1, 1);
@@ -604,14 +679,19 @@ struct FastBackend::Impl {
             }
             if (hudTiming)
                 D<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(before,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,hudTiming,1);
-            barrier(before, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                0, 1, &between, 0, nullptr, 0, nullptr);
+            constexpr auto computeAndTransfer=VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+            barrier(before, computeAndTransfer, computeAndTransfer, 0, 1, &toReaders, 0, nullptr, 0, nullptr);
             const VkBufferCopy copy{countOffset, 0, 16};
             D<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(before, hudBuffer, readback, 1, &copy);
             if (verifyHud) {
                 const VkBufferCopy mask{native.hud.offset + sizeof(uint32_t)*kHudWeight,64,sizeof(uint32_t)*kHudPlane};
                 D<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(before,hudBuffer,readback,1,&mask);
             }
+            const VkBufferMemoryBarrier toHost{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, nullptr,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT,
+                VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, readback, 0, VK_WHOLE_SIZE};
+            barrier(before, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                0, 0, nullptr, 1, &toHost, 0, nullptr);
             parity = 1 - parity;
         }
         Check(end(before), "finish input pack");
@@ -668,10 +748,10 @@ struct FastBackend::Impl {
             VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, native.computeFamily};
         Check(D<PFN_vkCreateCommandPool>("vkCreateCommandPool")(device, &commandPool, nullptr, &pool), "bridge command pool");
         const VkCommandBufferAllocateInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr, pool,
-            VK_COMMAND_BUFFER_LEVEL_PRIMARY, 2};
-        VkCommandBuffer cmds[2]{};
+            VK_COMMAND_BUFFER_LEVEL_PRIMARY, 3};
+        VkCommandBuffer cmds[3]{};
         Check(D<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers")(device, &commandInfo, cmds), "bridge commands");
-        before = cmds[0]; after = cmds[1];
+        before = cmds[0]; after = cmds[1]; releaseInput = cmds[2];
         const VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         const auto start = D<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer");
         const auto end = D<PFN_vkEndCommandBuffer>("vkEndCommandBuffer");
@@ -695,8 +775,11 @@ struct FastBackend::Impl {
         Check(start(after, &begin), "record output unpack");
         const VkMemoryBarrier produced{VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
             VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
+        const VkImageMemoryBarrier acquireOutput{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr,
+            0, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_QUEUE_FAMILY_EXTERNAL, native.computeFamily, images[1], kColor};
         barrier(after, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-            1, &produced, 0, nullptr, 0, nullptr);
+            1, &produced, 0, nullptr, 1, &acquireOutput);
         run(after, unpack);
         const VkImageMemoryBarrier release[]{
             {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr, VK_ACCESS_SHADER_READ_BIT, 0,
@@ -706,8 +789,46 @@ struct FastBackend::Impl {
         barrier(after, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
             0, nullptr, 0, nullptr, 2, release);
         Check(end(after), "finish output unpack");
+        // History-only jobs never acquire or write the output texture.
+        Check(start(releaseInput, &begin), "record history-only input release");
+        barrier(releaseInput, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
+            0, nullptr, 0, nullptr, 1, release);
+        Check(end(releaseInput), "finish history-only input release");
     }
 
+    VkResult WaitForInput() {
+        using namespace std::chrono;
+        using llcv::rife_test::SharedFenceProgress;
+        using llcv::rife_test::SharedFenceState;
+        const auto progress=[&] {return SharedFenceProgress(sharedFence->GetCompletedValue(),waitValue);};
+        auto state=progress();
+        if(state==SharedFenceState::Ready)return VK_SUCCESS;
+        if(state==SharedFenceState::DeviceRemoved){
+            submitFailure="D3D11 device removed before Vulkan input";
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        // Never leave the Vulkan queue waiting for a D3D signal that may not
+        // arrive (e.g. after device removal). Keep the GPU semaphore wait for visibility.
+        ResetEvent(inputReady.value);
+        if(FAILED(sharedFence->SetEventOnCompletion(waitValue,inputReady.value))){
+            submitFailure="could not monitor the D3D11 input fence";
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        if(observeBlockedInputForTest)blockedInputForTest.store(true,std::memory_order_release);
+        const auto limit=steady_clock::now()+seconds(1);
+        do {
+            if(stop.load(std::memory_order_acquire))return VK_TIMEOUT;
+            if(WaitForSingleObject(inputReady.value,10)==WAIT_FAILED){
+                submitFailure="D3D11 input fence wait failed";
+                return VK_ERROR_INITIALIZATION_FAILED;
+            }
+            state=progress();
+            if(state==SharedFenceState::Ready)return VK_SUCCESS;
+        } while(state==SharedFenceState::Waiting&&steady_clock::now()<limit);
+        submitFailure=state==SharedFenceState::DeviceRemoved
+            ?"D3D11 device removed before Vulkan input":"D3D11 input fence did not signal";
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
     static int Submit(void* cookie, uintptr_t call, void* queue, uint32_t count, const void* infos, uintptr_t fence) {
         auto& self = *static_cast<Impl*>(cookie);
         const auto& main = *static_cast<const VkSubmitInfo*>(infos);
@@ -715,30 +836,85 @@ struct FastBackend::Impl {
             return VK_ERROR_INITIALIZATION_FAILED;
         const VkTimelineSemaphoreSubmitInfo values{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO, nullptr,
             1, &self.waitValue, 1, &self.signalValue};
-        const VkCommandBuffer commands[]{self.before, main.pCommandBuffers[0], self.after};
+        const VkCommandBuffer commands[]{self.before, main.pCommandBuffers[0],
+            self.jobKind==JobKind::HistoryOnly?self.releaseInput:self.after};
         constexpr VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         const VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO, &values, 1, &self.timeline, &stage,
             3, commands, 1, &self.timeline};
-        return reinterpret_cast<PFN_vkQueueSubmit>(call)(static_cast<VkQueue>(queue), 1, &submit,
-            reinterpret_cast<VkFence>(fence));
+        if(self.stop.load(std::memory_order_acquire))return VK_TIMEOUT;
+        const auto submitted=reinterpret_cast<VkFence>(fence);
+        if(self.traceSubmission)self.activeTiming.submitBeginUs=TraceClockUs();
+        const auto result=reinterpret_cast<PFN_vkQueueSubmit>(call)(static_cast<VkQueue>(queue),1,&submit,submitted);
+        if(self.traceSubmission){
+            self.activeTiming.submitEndUs=TraceClockUs();
+            self.activeTiming.submitResult=result;
+            std::lock_guard lk(self.lock);
+            self.reportedTiming=self.activeTiming;
+        }
+        if(result==VK_SUCCESS)self.pendingFence=submitted;
+        return result;
+    }
+    static int Wait(void* cookie,uintptr_t call,void* device,uint32_t count,const void* rawFences,uint32_t all,uint64_t) {
+        using namespace std::chrono;
+        auto& self=*static_cast<Impl*>(cookie);
+        const auto* fences=static_cast<const VkFence*>(rawFences);
+        if(count!=1||fences[0]!=self.pendingFence)return VK_ERROR_INITIALIZATION_FAILED;
+        if(self.failAfterSubmitForTest) {
+            self.submitFailure="injected Vulkan failure after submission";
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+        const auto wait=reinterpret_cast<PFN_vkWaitForFences>(call);
+        const auto limit=steady_clock::now()+seconds(1);
+        do {
+            const auto result=wait(static_cast<VkDevice>(device),count,fences,all,10'000'000);
+            if(result!=VK_TIMEOUT){
+                if(result==VK_SUCCESS||result==VK_ERROR_DEVICE_LOST)self.pendingFence=VK_NULL_HANDLE;
+                return result;
+            }
+        } while(!self.stop.load(std::memory_order_acquire)&&steady_clock::now()<limit);
+        self.submitFailure="Vulkan job did not retire";
+        return VK_TIMEOUT;
     }
 
     void Work() {
+        struct PublishExit {
+            std::atomic<bool>& flag;
+            ~PublishExit() {flag.store(true,std::memory_order_release);}
+        } publish{exited};
         for (;;) {
             bool flipY=false;
+            int64_t deadlineUs=0;
             {
                 std::unique_lock lk(lock);
-                changed.wait(lk, [&] { return queued || stop; });
-                if (!queued) return;
+                changed.wait(lk, [&] { return queued || stop.load(std::memory_order_acquire); });
+                if (stop.load(std::memory_order_acquire)) {queued=busy=false;return;}
                 waitValue = queuedWait;
                 signalValue = queuedSignal;
                 jobArrival = queuedArrival;
+                deadlineUs=queuedDeadlineUs;
                 flipY = queuedFlipY;
+                jobKind = queuedKind;
+                if(traceSubmission){
+                    activeTiming={signalValue,queuedAtUs};
+                    activeTiming.kind=jobKind;
+                }
                 queued = false;
             }
             try {
+                Require(!failBeforeSubmitForTest, "injected Vulkan failure before submission");
                 RecordBefore(jobArrival,flipY);
-                const double gpu = graph->Execute(&Impl::Submit, this);
+                if(traceSubmission)activeTiming.inputWaitBeginUs=TraceClockUs();
+                Check(WaitForInput(),"wait for D3D11 input");
+                if(traceSubmission)activeTiming.inputReadyUs=TraceClockUs();
+                // The frame may have expired while the render thread's D3D11
+                // work was still in flight. Keep history but never write a midpoint.
+                if(jobKind==JobKind::Generate&&deadlineUs&&TraceClockUs()>=deadlineUs){
+                    jobKind=JobKind::HistoryOnly;
+                    if(traceSubmission)activeTiming.expiredBeforeGraph=true;
+                }
+                if(traceSubmission)activeTiming.kind=jobKind;
+                if(jobKind==JobKind::Generate)generatingTicket.store(signalValue,std::memory_order_release);
+                const double gpu = graph->Execute(jobKind,&Impl::Submit,&Impl::Wait,this);
                 std::lock_guard lk(lock);
                 if (hud && readbackData) {
                     // counts[1] = HUD core pixels for this frame (after retirement).
@@ -761,8 +937,10 @@ struct FastBackend::Impl {
                 busy = false;
             } catch (...) {
                 std::lock_guard lk(lock);
+                if(traceSubmission&&!activeTiming.submitEndUs)reportedTiming=activeTiming;
                 error = std::current_exception();
                 busy = false;
+                failed.store(true,std::memory_order_release);
                 return;
             }
         }
@@ -770,12 +948,10 @@ struct FastBackend::Impl {
 
     ~Impl() {
         if (worker.joinable()) {
-            { std::lock_guard lk(lock); stop = true; }
-            changed.notify_one();
+            // Destruction is reached only once the worker and GPU are safe.
             worker.join();
         }
         if (device && deviceAddress) {
-            // The worker waited for its last job; no submission is pending here.
             if (pool) D<PFN_vkDestroyCommandPool>("vkDestroyCommandPool")(device, pool, nullptr);
             for (auto p : {pack, unpack}) if (p) D<PFN_vkDestroyPipeline>("vkDestroyPipeline")(device, p, nullptr);
             for (auto p : detector) if (p) D<PFN_vkDestroyPipeline>("vkDestroyPipeline")(device, p, nullptr);
@@ -798,9 +974,25 @@ struct FastBackend::Impl {
 
 FastBackend::FastBackend(ID3D11Device* d3d, ID3D11Texture2D* input, ID3D11Texture2D* output,
                          ID3D11Fence* fence, const std::filesystem::path& models, Preset preset, bool hud, bool chroma,
-                         HudTrial trial, bool verifyHud)
+                         HudTrial trial, bool verifyHud, bool traceSubmission,std::stop_token startupStop)
     : impl_(std::make_unique<Impl>()) {
     auto& s = *impl_;
+    Require(!startupStop.stop_requested(),"Vulkan RIFE initialization cancelled");
+    auto& slot=Impl::PlaybackSlot();
+    std::lock_guard lease(slot.lock);
+    Require(!slot.active,"another Vulkan RIFE backend is active");
+    if(slot.retired) {
+        if(!slot.retired->exited.load(std::memory_order_acquire)||!slot.retired->GpuRetired()){
+            if(std::chrono::steady_clock::now()-slot.retiredAt<std::chrono::milliseconds(250))throw BackendRetiring{};
+            throw std::runtime_error("previous Vulkan RIFE job has not retired");
+        }
+        delete std::exchange(slot.retired,nullptr);
+    }
+    s.sharedInput=input;
+    s.sharedOutput=output;
+    s.sharedFence=fence;
+    s.inputReady.value=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+    Require(s.inputReady.value!=nullptr,"create Vulkan input fence event");
     ComPtr<IDXGIDevice> dxgi;
     ComPtr<IDXGIAdapter> adapter;
     CheckHr(d3d->QueryInterface(IID_PPV_ARGS(&dxgi)), "Vulkan DXGI device");
@@ -809,16 +1001,19 @@ FastBackend::FastBackend(ID3D11Device* d3d, ID3D11Texture2D* input, ID3D11Textur
     CheckHr(adapter->GetDesc(&identity), "Vulkan adapter identity");
     s.name = identity.Description;
     Sharing sharing{s.loader, identity.AdapterLuid};
-    s.graph = CreateFastGraph(&Sharing::Match, &Sharing::Extend, &sharing, models, preset, hud, chroma);
+    s.graph = CreateFastGraph(&Sharing::Match,&Sharing::Extend,&sharing,models,preset,hud,chroma,startupStop,
+        trial==HudTrial::StartupDeviceLoss);
     const auto native = s.graph->Native();
     s.native = native;
     s.hud = native.hud.handle != 0;
     s.chroma = chroma;
     s.hudTrial = trial;
     s.verifyHud = verifyHud;
+    s.traceSubmission = traceSubmission;
     s.instance = static_cast<VkInstance>(native.instance);
     s.device = static_cast<VkDevice>(native.device);
     s.deviceAddress = s.I<PFN_vkGetDeviceProcAddr>("vkGetDeviceProcAddr");
+    s.getFenceStatus = s.D<PFN_vkGetFenceStatus>("vkGetFenceStatus");
     s.Import(0, input, static_cast<VkPhysicalDevice>(native.physical));
     s.Import(1, output, static_cast<VkPhysicalDevice>(native.physical));
 
@@ -833,29 +1028,97 @@ FastBackend::FastBackend(ID3D11Device* d3d, ID3D11Texture2D* input, ID3D11Textur
     Check(s.D<PFN_vkImportSemaphoreWin32HandleKHR>("vkImportSemaphoreWin32HandleKHR")(s.device, &importFence),
         "import D3D11 fence");
 
+    Require(!startupStop.stop_requested(),"Vulkan RIFE initialization cancelled");
     s.Build();
+    Require(!startupStop.stop_requested(),"Vulkan RIFE initialization cancelled");
     s.graph->Record();
+    Require(!startupStop.stop_requested(),"Vulkan RIFE initialization cancelled");
     s.worker = std::thread([&s] { s.Work(); });
+    slot.active=true;
 }
 
-FastBackend::~FastBackend() = default;
+FastBackend::~FastBackend() {
+    auto& slot=Impl::PlaybackSlot();
+    std::lock_guard lease(slot.lock);
+    const bool idle=impl_->RequestStop();
+    if((idle||impl_->exited.load(std::memory_order_acquire))&&impl_->GpuRetired())impl_.reset();
+    else {
+        slot.retired=impl_.release();
+        slot.retiredAt=std::chrono::steady_clock::now();
+    }
+    slot.active=false;
+}
+
+std::future<std::unique_ptr<FastBackend>> FastBackend::TryInitializeAsync(
+    ID3D11Device* device, ID3D11Texture2D* input, ID3D11Texture2D* output, ID3D11Fence* fence,
+    std::filesystem::path models, Preset preset, bool hud, bool chroma, bool traceSubmission,std::stop_source cancel) {
+    // Initialize the playback slot first so it outlives this worker at exit.
+    (void)Impl::PlaybackSlot();
+    struct LoaderSlot {
+        std::mutex lock;
+        std::atomic<bool> done{true};
+        std::thread worker;
+        std::stop_source cancel{std::nostopstate};
+        ~LoaderSlot() {if(worker.joinable()){cancel.request_stop();worker.join();}}
+    };
+    static LoaderSlot loader;
+    std::lock_guard guard(loader.lock);
+    if(!loader.done.load(std::memory_order_acquire))return {};
+    if(loader.worker.joinable())loader.worker.join();
+    std::packaged_task<std::unique_ptr<FastBackend>()> task(
+        [device=ComPtr<ID3D11Device>(device),input=ComPtr<ID3D11Texture2D>(input),
+         output=ComPtr<ID3D11Texture2D>(output),fence=ComPtr<ID3D11Fence>(fence),
+         models=std::move(models),preset,hud,chroma,traceSubmission,stop=cancel.get_token()] {
+            return std::make_unique<FastBackend>(device.Get(),input.Get(),output.Get(),fence.Get(),
+                models,preset,hud,chroma,HudTrial::None,false,traceSubmission,stop);
+        });
+    auto result=task.get_future();
+    loader.cancel=std::move(cancel);
+    loader.done.store(false,std::memory_order_release);
+    try{
+        loader.worker=std::thread([task=std::move(task),done=&loader.done]() mutable {
+            {
+                // Release the result here if the renderer cancelled its future.
+                auto build=std::move(task);
+                build();
+            }
+            done->store(true,std::memory_order_release);
+        });
+    }catch(...){
+        loader.done.store(true,std::memory_order_release);
+        throw;
+    }
+    return result;
+}
 
 bool FastBackend::Free() {
     std::lock_guard lk(impl_->lock);
-    if (impl_->error) std::rethrow_exception(impl_->error);
+    impl_->RethrowWorkerError();
     return !impl_->busy;
 }
 
-void FastBackend::Enqueue(uint64_t waitValue, uint64_t signalValue, int64_t arrivalUs, bool flipY) {
+bool FastBackend::HasFailed() const noexcept {
+    return impl_->failed.load(std::memory_order_acquire);
+}
+
+bool FastBackend::GeneratesOutputFor(uint64_t ticket) const noexcept {
+    return ticket!=0&&impl_->generatingTicket.load(std::memory_order_acquire)==ticket;
+}
+
+void FastBackend::Enqueue(uint64_t waitValue, uint64_t signalValue, int64_t arrivalUs, bool flipY, JobKind kind,
+                          int64_t deadlineUs) {
     {
         std::lock_guard lk(impl_->lock);
-        if (impl_->error) std::rethrow_exception(impl_->error);
+        impl_->RethrowWorkerError();
         Require(!impl_->busy, "a second Vulkan job cannot be queued");
         impl_->queued = impl_->busy = true;
         impl_->queuedWait = waitValue;
         impl_->queuedSignal = signalValue;
         impl_->queuedArrival = arrivalUs;
+        impl_->queuedDeadlineUs = deadlineUs;
         impl_->queuedFlipY = flipY;
+        impl_->queuedKind = kind;
+        if(impl_->traceSubmission)impl_->queuedAtUs=TraceClockUs();
     }
     impl_->changed.notify_one();
 }
@@ -877,6 +1140,13 @@ bool FastBackend::TakeGpuMs(double& ms) {
     if (!impl_->finished) return false;
     impl_->finished = false;
     ms = impl_->lastGpuMs;
+    return true;
+}
+
+bool FastBackend::TakeSubmissionTiming(SubmissionTiming& timing) {
+    std::lock_guard lk(impl_->lock);
+    if(!impl_->reportedTiming.ticket)return false;
+    timing=std::exchange(impl_->reportedTiming,{});
     return true;
 }
 
@@ -902,9 +1172,183 @@ int FastBackend::CompareHud(const std::filesystem::path& models,const std::files
         ComPtr<ID3D11Texture2D> input,output;
         CheckHr(device->CreateTexture2D(&desc,nullptr,&input),"HUD comparison input");
         CheckHr(device->CreateTexture2D(&desc,nullptr,&output),"HUD comparison output");
+        if(trial==HudTrial::WorkerFailure){
+            using llcv::rife_test::CheckPreviousVulkanJob;
+            const auto createFence=[&] {
+                ComPtr<ID3D11Fence> fence;
+                CheckHr(device5->CreateFence(0,D3D11_FENCE_FLAG_SHARED,IID_PPV_ARGS(&fence)),"worker failure test fence");
+                return fence;
+            };
+            const auto waitForFailure=[](FastBackend& path) {
+                const auto expires=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+                while(!path.HasFailed()){
+                    Require(std::chrono::steady_clock::now()<expires,"worker did not publish failure");
+                    Sleep(1);
+                }
+            };
+            {
+                auto fence=createFence();
+                bool received=false;
+                try{FastBackend path(device.Get(),input.Get(),output.Get(),fence.Get(),models,Preset::Fast,
+                        false,false,HudTrial::StartupDeviceLoss);}
+                catch(const std::runtime_error& e){
+                    received=std::string_view(e.what()).find("VK_ERROR_DEVICE_LOST")!=std::string_view::npos;
+                }
+                Require(received,"startup swallowed the Vulkan device loss");
+                FastBackend retry(device.Get(),input.Get(),output.Get(),fence.Get(),models,Preset::Fast);
+                out<<"PASS: Vulkan startup propagates device loss and the fresh device initializes\n";
+            }
+            {
+                auto fence=createFence();
+                std::stop_source cancel;
+                cancel.request_stop();
+                auto task=TryInitializeAsync(device.Get(),input.Get(),output.Get(),fence.Get(),
+                    models,Preset::Fast,false,false,false,cancel);
+                Require(task.valid()&&task.wait_for(std::chrono::seconds(3))==std::future_status::ready,
+                    "cancelled Vulkan startup did not return");
+                bool received=false;
+                try{(void)task.get();}catch(const std::runtime_error& e){
+                    received=std::string_view(e.what()).find("initialization cancelled")!=std::string_view::npos;
+                }
+                Require(received,"cancelled Vulkan startup produced a backend");
+                out<<"PASS: a cancelled startup never publishes a Vulkan backend\n";
+            }
+            {
+                auto fence=createFence();
+                FastBackend path(device.Get(),input.Get(),output.Get(),fence.Get(),models,Preset::Fast);
+                path.impl_->failBeforeSubmitForTest=true;
+                path.Enqueue(1,2);
+                waitForFailure(path);
+                bool received=false, fenceRead=false;
+                try {
+                    (void)CheckPreviousVulkanJob(2,[&]{return path.Free();},[&]{
+                        fenceRead=true;return fence->GetCompletedValue();
+                    });
+                }catch(const std::runtime_error& e){
+                    received=std::string_view(e.what())=="injected Vulkan failure before submission";
+                }
+                Require(received&&!fenceRead&&fence->GetCompletedValue()==0,
+                    "worker failure was masked by the unsignaled fence");
+                out<<"PASS: playback checks the worker error before the unsignaled GPU fence\n";
+            }
+            {
+                auto fence=createFence();
+                FastBackend path(device.Get(),input.Get(),output.Get(),fence.Get(),models,Preset::Fast);
+                path.Enqueue(1,2);
+                waitForFailure(path);
+                bool received=false;
+                try{(void)path.Free();}
+                catch(const std::runtime_error& e){received=std::string_view(e.what())=="D3D11 input fence did not signal";}
+                Require(received&&!path.impl_->pendingFence&&fence->GetCompletedValue()==0,
+                    "Vulkan submitted against a missing D3D11 input signal");
+                out<<"PASS: missing D3D11 input signal times out without Vulkan submission\n";
+            }
+            {
+                using namespace std::chrono;
+                auto fence=createFence();
+                auto path=std::make_unique<FastBackend>(device.Get(),input.Get(),output.Get(),fence.Get(),models,Preset::Fast);
+                path->impl_->observeBlockedInputForTest=true;
+                path->Enqueue(1,2);
+                const auto expires=steady_clock::now()+seconds(5);
+                while(!path->impl_->blockedInputForTest.load(std::memory_order_acquire)){
+                    Require(steady_clock::now()<expires&&!path->HasFailed(),"worker did not wait for D3D11 input");
+                    Sleep(1);
+                }
+                const auto start=steady_clock::now();
+                path.reset();
+                Require(steady_clock::now()-start<milliseconds(500)&&fence->GetCompletedValue()==0,
+                    "closing playback blocked on a missing input fence");
+                // The stop request is asynchronous; a new session may retry next frame.
+                while(true) {
+                    try{path=std::make_unique<FastBackend>(device.Get(),input.Get(),output.Get(),fence.Get(),models,Preset::Fast);break;}
+                    catch(const BackendRetiring&){Sleep(1);}
+                }
+                out<<"PASS: closing playback does not wait for a missing D3D11 signal\n";
+            }
+            {
+                auto fence=createFence();
+                FastBackend path(device.Get(),input.Get(),output.Get(),fence.Get(),models,Preset::Fast);
+                CheckHr(context4->Signal(fence.Get(),1),"submitted failure test input");
+                context->Flush();
+                path.impl_->failAfterSubmitForTest=true;
+                path.Enqueue(1,2,1,false,JobKind::HistoryOnly);
+                waitForFailure(path);
+                Require(path.impl_->pendingFence!=VK_NULL_HANDLE,
+                    "a wait failure cleared a submission before GPU retirement was verified");
+                out<<"PASS: failed wait preserves the submitted fence for retirement\n";
+            }
+            {
+                auto fence=createFence();
+                std::unique_ptr<FastBackend> path;
+                // A reset may discard an unfinished initialization. The next
+                // playback session must not adopt that result.
+                {
+                    auto abandoned=TryInitializeAsync(device.Get(),input.Get(),output.Get(),fence.Get(),
+                        models,Preset::Fast,false,false,true);
+                    Require(abandoned.valid(),"background initializer did not accept the request");
+                }
+                const auto expires=std::chrono::steady_clock::now()+std::chrono::seconds(8);
+                while(!path){
+                    auto loading=TryInitializeAsync(device.Get(),input.Get(),output.Get(),fence.Get(),
+                        models,Preset::Fast,false,false,true);
+                    if(loading.valid()){
+                        Require(loading.wait_until(expires)==std::future_status::ready,"Vulkan initialization timed out");
+                        try{path=loading.get();}catch(const BackendRetiring&){}
+                    }
+                    Require(path||std::chrono::steady_clock::now()<expires,"old Vulkan job never retired");
+                    if(!path)Sleep(1);
+                }
+                out<<"PASS: abandoned background initialization does not prevent a fresh session\n";
+                path->impl_->observeBlockedInputForTest=true;
+                path->Enqueue(1,2,1,false,JobKind::Generate);
+                const auto finishedBy=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+                while(!path->impl_->blockedInputForTest.load(std::memory_order_acquire)){
+                    Require(std::chrono::steady_clock::now()<finishedBy&&!path->HasFailed(),"timing test did not wait for input");
+                    Sleep(1);
+                }
+                const auto inputRelease=TraceClockUs();
+                CheckHr(context4->Signal(fence.Get(),1),"Vulkan recovery input");
+                context->Flush();
+                while(!path->Free()){
+                    Require(std::chrono::steady_clock::now()<finishedBy,"new Vulkan job did not retire");
+                    Sleep(1);
+                }
+                Require(fence->GetCompletedValue()==2&&path->GeneratesOutputFor(2),"new Vulkan job did not generate a midpoint");
+                SubmissionTiming t;
+                Require(path->TakeSubmissionTiming(t)&&t.ticket==2&&t.kind==JobKind::Generate&&
+                    t.submitResult==VK_SUCCESS&&
+                    t.enqueuedUs>0&&t.enqueuedUs<=t.inputWaitBeginUs&&t.inputWaitBeginUs<=inputRelease&&
+                    inputRelease<=t.inputReadyUs&&t.inputReadyUs<=t.submitBeginUs&&t.submitBeginUs<=t.submitEndUs,
+                    "D3D11 input wait and Vulkan submit trace were not separated");
+                Require(!path->TakeSubmissionTiming(t),"Vulkan submit timing was reported twice");
+                out<<"PASS: a fresh Vulkan backend works after retirement\n";
+                out<<"PASS: trace pairs the job ticket with enqueue, input wait and Vulkan submit\n";
+                path->impl_->blockedInputForTest.store(false,std::memory_order_release);
+                const auto deadline=TraceClockUs()+20'000;
+                path->Enqueue(3,4,2,false,JobKind::Generate,deadline);
+                const auto expiredTestBy=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+                while(TraceClockUs()<deadline||!path->impl_->blockedInputForTest.load(std::memory_order_acquire)){
+                    Require(std::chrono::steady_clock::now()<expiredTestBy&&!path->HasFailed(),"deadline test did not wait for input");
+                    Sleep(1);
+                }
+                CheckHr(context4->Signal(fence.Get(),3),"expired Vulkan input");
+                context->Flush();
+                while(!path->Free()){
+                    Require(std::chrono::steady_clock::now()<expiredTestBy,"expired Vulkan job did not retire");
+                    Sleep(1);
+                }
+                Require(fence->GetCompletedValue()==4&&!path->GeneratesOutputFor(4)&&
+                    path->TakeSubmissionTiming(t)&&t.ticket==4&&t.kind==JobKind::HistoryOnly&&t.expiredBeforeGraph,
+                    "expired Vulkan input generated or exposed a stale midpoint");
+                out<<"PASS: expiry during the D3D11 wait updates history without exposing an old midpoint\n";
+            }
+            return 0;
+        }
         const bool orientationTest=trial==HudTrial::InputFlip;
+        const bool historyTest=trial==HudTrial::HistoryOnly;
+        const bool compareOutput=orientationTest||historyTest;
         ComPtr<ID3D11Texture2D> staging;
-        if(orientationTest){
+        if(compareOutput){
             auto stagingDesc=desc;
             stagingDesc.BindFlags=stagingDesc.MiscFlags=0;
             stagingDesc.Usage=D3D11_USAGE_STAGING;
@@ -913,22 +1357,22 @@ int FastBackend::CompareHud(const std::filesystem::path& models,const std::files
         }
         constexpr int frames=110, warmup=12;
         std::vector<uint32_t> pixels(kWidth*kHeight), reference(size_t(frames)*kHudPlane);
-        std::vector<uint32_t> expectedOutput(orientationTest?size_t(kWidth)*kHeight*3:0);
+        std::vector<uint32_t> expectedOutput(compareOutput?size_t(kWidth)*kHeight*3:0);
         auto rgba=[](int r,int g,int b){return 0xff000000u|uint32_t(r)|(uint32_t(g)<<8)|(uint32_t(b)<<16);};
         auto percentile=[](const std::vector<double>& sorted,double p){return sorted[size_t(p*(sorted.size()-1)+.5)];};
         for(bool color : {false,true}){
-            if(!color&&(trial==HudTrial::WeakChroma||orientationTest))continue;
-            for(int round=0;round<(orientationTest?2:4);++round){
+            if(!color&&(trial==HudTrial::WeakChroma||compareOutput))continue;
+            for(int round=0;round<(compareOutput?2:4);++round){
                 const bool candidate=round==1||round==2;
                 const bool flip=orientationTest&&candidate;
                 ComPtr<ID3D11Fence> fence;
                 CheckHr(device5->CreateFence(0,D3D11_FENCE_FLAG_SHARED,IID_PPV_ARGS(&fence)),"HUD comparison fence");
                 FastBackend path(device.Get(),input.Get(),output.Get(),fence.Get(),models,Preset::Fast,true,color,
-                    candidate?trial:HudTrial::None,true);
+                        candidate&&!historyTest?trial:HudTrial::None,true);
                 auto& state=*path.impl_;
                 out<<"mode="<<(color?"chroma":"luma")<<" round="<<round<<" candidate="<<candidate
                    <<" trial="<<static_cast<int>(trial)<<std::endl;
-                std::vector<double> times,emptyTimes,activeTimes;
+                std::vector<double> times,emptyTimes,activeTimes,seedTimes;
                 uint64_t differences=0,nonzero=0,afterCut=0,outputDifferences=0;
                 for(int frame=0;frame<frames;++frame){
                     for(int y=0;y<kHeight;++y) for(int x=0;x<kWidth;++x){
@@ -945,17 +1389,24 @@ int FastBackend::CompareHud(const std::filesystem::path& models,const std::files
                     const uint64_t value=2ull*frame+1;
                     CheckHr(context4->Signal(fence.Get(),value),"HUD comparison signal");
                     context->Flush();
-                    path.Enqueue(value,value+1,10000+int64_t(frame)*16667+(frame>=95?200000:0),flip);
+                    const bool afterSeed=frame==67||frame==76||frame==96;
+                    const bool seed=historyTest&&!afterSeed&&(frame%7==2||frame==0||frame==66||frame==75||frame==95);
+                    const auto enqueueAt=std::chrono::steady_clock::now();
+                    path.Enqueue(value,value+1,10000+int64_t(frame)*16667+(frame>=95?200000:0),flip,
+                        seed&&candidate?JobKind::HistoryOnly:JobKind::Generate);
                     const auto expires=std::chrono::steady_clock::now()+std::chrono::seconds(8);
                     while(!path.Free()){
                         Require(std::chrono::steady_clock::now()<expires,"HUD comparison GPU timeout");
                         SwitchToThread();
                     }
+                    if(seed&&frame>=warmup)
+                        seedTimes.push_back(std::chrono::duration<double,std::milli>(
+                            std::chrono::steady_clock::now()-enqueueAt).count());
                     const auto* actual=state.readbackData+16;
                     auto* expected=reference.data()+size_t(frame)*kHudPlane;
                     if(round==0)std::copy_n(actual,kHudPlane,expected);
                     else for(int i=0;i<kHudPlane;++i)differences+=actual[i]!=expected[i];
-                    if(orientationTest&&(frame==67||frame==76||frame==96)){
+                    if(compareOutput&&afterSeed){
                         const int image=frame==67?0:frame==76?1:2;
                         CheckHr(context4->Wait(fence.Get(),value+1),"RIFE comparison acquire");
                         context->CopyResource(staging.Get(),output.Get());
@@ -991,9 +1442,13 @@ int FastBackend::CompareHud(const std::filesystem::path& models,const std::files
                    <<" weights_after_scene_cut="<<afterCut<<std::endl;
                 Require(differences==0&&nonzero>0&&afterCut==0,"HUD mask comparison failed");
                 if(color)Require(state.chromaJobs>0,"synthetic color HUD was not detected");
-                if(orientationTest&&candidate){
+                if(!seedTimes.empty()){
+                    std::sort(seedTimes.begin(),seedTimes.end());
+                    out<<"seed_jobs="<<seedTimes.size()<<" seed_observed_p50_ms="<<percentile(seedTimes,.5)<<std::endl;
+                }
+                if(compareOutput&&candidate){
                     out<<"output_differences="<<outputDifferences<<" output_pixels_compared="<<expectedOutput.size()<<std::endl;
-                    Require(outputDifferences==0,"RIFE bottom-up output differs");
+                    Require(outputDifferences==0,"RIFE comparison output differs");
                 }
             }
         }

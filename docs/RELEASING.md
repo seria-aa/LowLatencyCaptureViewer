@@ -7,12 +7,12 @@
 [1. Versioning](#1-versioning) · [2. Build and verify](#2-build-and-verify) · [3. Package](#3-package) · [4. Publish](#4-publish)
 
 Use this checklist to keep versioning, builds, packages, and GitHub releases
-consistent. Use `release/v2.4.0` for final release validation and publication. Confirm that
+consistent. Use `release/v2.4.1` for final release validation and publication. Confirm that
 the checkout is on that branch before building or publishing; in another clone,
 create or check out the matching branch first. Do not rewrite branch names in
 historical audits or merge records to match a new naming convention.
-All executable examples below are for **v2.4.0**, using the compact build-folder
-name `build-v2400-release`. For another version, update the version, build
+All executable examples below are for **v2.4.1**, using the compact build-folder
+name `build-v2410-release`. For another version, update the version, build
 folder, and output paths together; do not substitute a dotted version into
 the build-folder name and leave the packaging defaults unchanged.
 
@@ -20,7 +20,7 @@ the build-folder name and leave the packaging defaults unchanged.
 
 ## 1. Versioning
 
-Use `v2.4.0` for the Git tag and app version label. Resource and installer
+Use `v2.4.1` for the Git tag and app version label. Resource and installer
 version fields use the numeric version without `v`. Keep these locations aligned:
 
 - `project(... VERSION ...)` in `CMakeLists.txt`
@@ -30,14 +30,14 @@ version fields use the numeric version without `v`. Keep these locations aligned
   `installer/LowLatencyCaptureViewer.iss`
 - default build/output paths in `tools/package-v1.ps1`
 - current-version headers in `BUILD_INFO.txt`, `DEPENDENCIES.txt`, and `실행안내.txt`
-- `docs/release-notes-v2.4.0.md`
+- `docs/release-notes-v2.4.1.md`
 - current version/changes in both READMEs and guides, settings example images and captions
 
 Search for stale active version strings after editing. Historical release
 notes and changelog entries keep their original version numbers.
 
 ```powershell
-rg -n "2\.2\.0|build-v2200-release" CMakeLists.txt src installer tools DEPENDENCIES.txt 실행안내.txt
+rg -n "2\.4\.0|build-v2400-release" CMakeLists.txt src installer tools DEPENDENCIES.txt 실행안내.txt
 ```
 
 <br>
@@ -59,7 +59,7 @@ See `tests/RIFE_VULKAN_RELEASE_GATE.md` for the current validation scope and
 `tests/PROFILE_ISOLATION.md` for the isolation policy.
 
 Set `LLCV_VFG_AMPERE_COMPAT=ON` to include experimental RTX 30 (SM 8.6) compatibility.
-The v2.4.0 package also requires bundled RIFE Vulkan Fast and its three license
+The v2.4.1 package also requires bundled RIFE Vulkan Fast and its three license
 notices. The build pins the model hashes; the ZIP and installer reject an
 executable that does not match the bundled RIFE build stamp.
 Do not bundle NVIDIA runtime DLLs/models or the Dolby preview; use the mux-only recording
@@ -78,11 +78,11 @@ gate. Confirm the independent media and crash-recovery tests are registered.
 
 ```powershell
 chcp.com 65001 > $null
-if ((git branch --show-current) -ne 'release/v2.4.0') { throw 'Check out release/v2.4.0 first.' }
+if ((git branch --show-current) -ne 'release/v2.4.1') { throw 'Check out release/v2.4.1 first.' }
 .\tools\Build-RecordingFFmpeg.ps1
-cmake -S . -B build-v2400-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TRY_COMPILE_CONFIGURATION=Release -DBUILD_TESTING=ON -DLLCV_RECORDING=ON -DLLCV_UPSCALING_DIAGNOSTIC=OFF -DLLCV_SPATIAL_PROTOTYPE=OFF -DLLCV_HDR_FRAME_AUDIT=OFF -DLLCV_HDR_SCRGB_PROTOTYPE=OFF -DLLCV_VSR_EXPERIMENT=OFF -DLLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC=OFF -DLLCV_RECORDING_FFMPEG_ROOT="$PWD/outputs/dependencies/recording-ffmpeg/install" -DLLCV_INTERPOLATION_RELEASE=ON -DLLCV_VFG_AMPERE_COMPAT=ON -DLLCV_RIFE_ROOT="<TensorRT SDK directory containing tensorrt-include>" -DLLCV_RIFE_VULKAN=ON -DLLCV_VULKAN_HEADERS="<Vulkan headers>" -DLLCV_NCNN_ROOT="<replay-enabled ncnn SDK>" -DLLCV_RIFE_NCNN_SOURCE="<patched ncnn source tree>" -DLLCV_RIFE_VULKAN_MODELS="<pinned Fast model directory>"
-cmake --build build-v2400-release
-ctest --test-dir build-v2400-release --output-on-failure
+cmake -S . -B build-v2410-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TRY_COMPILE_CONFIGURATION=Release -DBUILD_TESTING=ON -DLLCV_RECORDING=ON -DLLCV_UPSCALING_DIAGNOSTIC=OFF -DLLCV_SPATIAL_PROTOTYPE=OFF -DLLCV_HDR_FRAME_AUDIT=OFF -DLLCV_HDR_SCRGB_PROTOTYPE=OFF -DLLCV_VSR_EXPERIMENT=OFF -DLLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC=OFF -DLLCV_RECORDING_FFMPEG_ROOT="$PWD/outputs/dependencies/recording-ffmpeg/install" -DLLCV_INTERPOLATION_RELEASE=ON -DLLCV_VFG_AMPERE_COMPAT=ON -DLLCV_RIFE_ROOT="<TensorRT SDK directory containing tensorrt-include>" -DLLCV_RIFE_VULKAN=ON -DLLCV_VULKAN_HEADERS="<Vulkan headers>" -DLLCV_NCNN_ROOT="<replay-enabled ncnn SDK>" -DLLCV_RIFE_NCNN_SOURCE="<patched ncnn source tree>" -DLLCV_RIFE_VULKAN_MODELS="<pinned Fast model directory>"
+cmake --build build-v2410-release
+ctest --test-dir build-v2410-release --output-on-failure
 git diff --check
 ```
 
@@ -100,22 +100,22 @@ long-duration playback.
 Build exactly these two release assets:
 
 ```text
-LowLatencyCaptureViewer_v2.4.0_Setup.exe
-LowLatencyCaptureViewer_v2.4.0_x64.zip
+LowLatencyCaptureViewer_v2.4.1_Setup.exe
+LowLatencyCaptureViewer_v2.4.1_x64.zip
 ```
 
 ```powershell
 chcp.com 65001 > $null
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-v1.ps1 `
-  -Version 2.4.0 -BuildDir ..\build-v2400-release -OutputDir outputs\v2.4.0
+  -Version 2.4.1 -BuildDir ..\build-v2410-release -OutputDir outputs\v2.4.1
 & "C:\Program Files\Inno Setup 7\ISCC.exe" `
-  "--define=BuildDir=..\build-v2400-release" ".\installer\LowLatencyCaptureViewer.iss"
+  "--define=BuildDir=..\build-v2410-release" ".\installer\LowLatencyCaptureViewer.iss"
 ```
 
 Do not ship `settings.ini`, `%LOCALAPPDATA%` logs, `build-*` directories, PDB
 files, ILK files, or test executables. Verify the executable inside the ZIP and
-the installer version before uploading: v2.4.0 uses a numeric file version of
-`2.4.0` or `2.4.0.0`, not the previous release's executable under a new ZIP name.
+the installer version before uploading: v2.4.1 uses a numeric file version of
+`2.4.1` or `2.4.1.0`, not the previous release's executable under a new ZIP name.
 
 Keep upscaling experiment reports, comparison images, shader sources and manual test tools out of
 user packages. Production NIS/CMAA2 shaders are embedded; their notices must still be shipped.
@@ -136,7 +136,7 @@ and common accidental build/settings files.
 ```powershell
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $releaseArchive = [IO.Compression.ZipFile]::OpenRead(
-  (Resolve-Path 'outputs\v2.4.0\LowLatencyCaptureViewer_v2.4.0_x64.zip').Path)
+  (Resolve-Path 'outputs\v2.4.1\LowLatencyCaptureViewer_v2.4.1_x64.zip').Path)
 try {
   foreach ($required in @('LowLatencyCaptureViewer.exe', 'LICENSE',
       'ASIO-SDK-LICENSE.txt', 'ASIO-HOST-LICENSE.txt', 'PRETENDARD-LICENSE.txt',
@@ -171,21 +171,21 @@ Review the worktree and stage only confirmed files before committing.
 ```powershell
 git status --short
 git diff --cached --check
-git commit -m "Prepare v2.4.0 release"
-git push origin release/v2.4.0
+git commit -m "Prepare v2.4.1 release"
+git push origin release/v2.4.1
 ```
 
 Publish from the branch HEAD using the matching release-notes file. Add
-`--prerelease` only when a beta is intended; **v2.4.0 is a regular release**.
+`--prerelease` only when a beta is intended; **v2.4.1 is a regular release**.
 
 ```powershell
-gh release create v2.4.0 `
-  "outputs\v2.4.0\LowLatencyCaptureViewer_v2.4.0_Setup.exe" `
-  "outputs\v2.4.0\LowLatencyCaptureViewer_v2.4.0_x64.zip" `
+gh release create v2.4.1 `
+  "outputs\v2.4.1\LowLatencyCaptureViewer_v2.4.1_Setup.exe" `
+  "outputs\v2.4.1\LowLatencyCaptureViewer_v2.4.1_x64.zip" `
   --repo seria-aa/LowLatencyCaptureViewer `
-  --target release/v2.4.0 `
-  --title "LLCV v2.4.0" `
-  --notes-file ".\docs\release-notes-v2.4.0.md"
+  --target release/v2.4.1 `
+  --title "LLCV v2.4.1" `
+  --notes-file ".\docs\release-notes-v2.4.1.md"
 ```
 
 Never overwrite published tags or assets. Fix a published-release issue in the

@@ -10,7 +10,8 @@ Frame interpolation inserts a generated frame between two captured frames. It sm
 | RIFE Vulkan | FHD SDR, 24–60 fps · low-latency output | Vulkan-capable playback GPU · Fast model included |
 
 - Enable interpolation under **Settings → Frame interpolation** and select RIFE Vulkan or NVIDIA VFG. In new profiles interpolation is off and RIFE Vulkan is selected by default. Existing VFG preferences are preserved. The method does not change automatically.
-- RIFE Vulkan does not require a separate download. HUD protection uses luma and color edges by default; you can use luma edges only or turn protection off. Playback uses original frames if RIFE fails to initialize or does not support the input.
+- RIFE Vulkan does not require a separate download. HUD protection uses luma and color edges by default; you can use luma edges only or turn protection off.
+- Original frames keep playing while RIFE starts. If initialization fails or the input is unsupported, playback stays on original frames. After the GPU recovers from an error, toggle interpolation off and on with F7 to retry.
 - RIFE Vulkan accepts NV12, YUY2, UYVY/HDYC, RGB24, XRGB (RGB32), and MJPEG. Starting in low-latency mode sets capture to FHD while keeping the selected pixel format. P010 HDR is not interpolated and its capture resolution is left unchanged.
 - With RIFE selected, the Video tab offers Auto or a detected rate from 24 to 60 fps. Starting without RIFE uses your usual capture rate.
 - The Video tab previews the effective input without changing display resolution or saved video settings. Switch methods or disable interpolation to see your saved input again. F7 does not reconnect capture.

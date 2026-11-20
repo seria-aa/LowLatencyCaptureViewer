@@ -4,7 +4,7 @@
 
 [README](../README.en.md) · [한국어](INDEX.ko.md)
 
-The current user guides cover **LLCV 2.4.0**. Historical development records are listed separately below.
+The current user guides cover **LLCV 2.4.1**. Historical development records are listed separately below.
 Features, defaults, and test results in historical records apply to the version and environment tested.
 User guides and their images are included in binary packages. Development and validation records are linked on GitHub and require an internet connection.
 
@@ -14,6 +14,7 @@ User guides and their images are included in binary packages. Development and va
 
 - [User guide](USAGE.md) — Installation, settings, sleep prevention, shortcuts, upscaling/VSR, screenshots
 - [Video and HDR](VIDEO.md) — Formats, frame rates, 40 fps capture, HDR10, scaling, window size
+- [Frame interpolation](FRAME_INTERPOLATION.md) — RIFE Vulkan, NVIDIA VFG, supported inputs, and fallback
 - [Recording](RECORDING.md) — codecs, quality, storage, splitting and file protection
 - [Audio and 5.1](AUDIO.md) — Output modes, LPCM 5.1, buffers, clock correction
 - [Troubleshooting](TROUBLESHOOTING.md) — Symptoms, checks, and issue reporting
@@ -27,6 +28,7 @@ Each guide links to its Korean and English versions.
 
 ## Release notes
 
+- [v2.4.1](release-notes-v2.4.1.md)
 - [v2.4.0](release-notes-v2.4.0.md)
 - [v2.3.2](release-notes-v2.3.2.md)
 - [v2.3.1](release-notes-v2.3.1.md)
