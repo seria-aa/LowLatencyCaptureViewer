@@ -193,11 +193,11 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
 #if defined(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
-constexpr wchar_t kAppVersionLabel[] = L"v2.4.0-audio-recovery-diagnostic";
+constexpr wchar_t kAppVersionLabel[] = L"v2.4.1-audio-recovery-diagnostic";
 #elif defined(LLCV_VSR_EXPERIMENT)
-constexpr wchar_t kAppVersionLabel[] = L"v2.4.0-vsr-test";
+constexpr wchar_t kAppVersionLabel[] = L"v2.4.1-vsr-test";
 #else
-constexpr wchar_t kAppVersionLabel[] = L"v2.4.0";
+constexpr wchar_t kAppVersionLabel[] = L"v2.4.1";
 #endif
 
 constexpr int kRecommendedCaptureBufferMs = 20;
@@ -4715,7 +4715,7 @@ struct DirectD3D11Renderer {
                         ++modeGenerated[ScaleIndex(activeScale.load())];
                         if(OsdTrackingActive())g_videoPresentedFrames.fetch_add(1,std::memory_order_relaxed);
                         waitForOriginalSlot=llcv::presentation::UseVfgOriginalTimer(mode,captureFps,refreshHz);
-                        if(waitForOriginalSlot)rifeHalf.ScheduleOriginalSlot(captureFps);
+                        if(waitForOriginalSlot)rifeHalf.ScheduleOriginalSlot(captureFps,arrivalUs);
                         if(syncVfg){
                             // The generated Present consumed the first credit.
                             // Admit the original separately before drawing it.
@@ -4736,6 +4736,11 @@ struct DirectD3D11Renderer {
                     }
                     else if(result==DXGI_STATUS_OCCLUDED)return result;
                     else {Request(false);status=Status::Failed;rifeHalf.Invalidate();const auto removed=device->GetDeviceRemovedReason();if(FAILED(removed))return removed;}
+                }
+                else if(status.load(std::memory_order_acquire)==Status::Failed){
+                    // A removed D3D11 device is a renderer failure, not a missed interpolation slot.
+                    const auto removed=device->GetDeviceRemovedReason();
+                    if(FAILED(removed))return removed;
                 }
             }
             if(const auto notice=rifeNotifications.Observe(requested.load(std::memory_order_acquire),selectedScale.load(),status.load(std::memory_order_acquire))){
@@ -4840,7 +4845,18 @@ struct DirectD3D11Renderer {
         LARGE_INTEGER spatialPresentTime{};QueryPerformanceCounter(&spatialPresentTime);
         spatialPresentQpc=spatialPresentTime.QuadPart;
 #endif
+#ifdef LLCV_RIFE_VULKAN
+        const auto traceClock=[] {
+            return std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        };
+        const int64_t tracePresentBegin=llcv::rife_test::vulkanTraceFile.empty()?0:traceClock();
+#endif
         hr = swapChain->Present(syncInterval, flags);
+#ifdef LLCV_RIFE_VULKAN
+        if(hr==S_OK&&(tracePresentBegin||generatedInput))
+            rifeHalf.RecordPresent(arrivalUs,generatedInput!=nullptr,tracePresentBegin,tracePresentBegin?traceClock():0);
+#endif
         presentationReadiness.Presented();
 #ifdef LLCV_RIFE_TEST
         if(!generatedInput && hr==S_OK)
@@ -11863,10 +11879,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
         if(models.empty())return 2;
         const auto candidate=CommandLineOptionValue(L"--rife-vulkan-hud-trial");
         using llcv::rife_vulkan::HudTrial;
-        if(!candidate.empty()&&candidate!=L"tiled"&&candidate!=L"empty"&&candidate!=L"weak"&&candidate!=L"flip")return 2;
+        if(!candidate.empty()&&candidate!=L"tiled"&&candidate!=L"empty"&&candidate!=L"weak"&&
+            candidate!=L"flip"&&candidate!=L"history"&&candidate!=L"worker-failure")return 2;
         return llcv::rife_vulkan::FastBackend::CompareHud(models,report,
             candidate==L"empty"?HudTrial::EmptyMask:candidate==L"weak"?HudTrial::WeakChroma:
-            candidate==L"flip"?HudTrial::InputFlip:HudTrial::Tiled);
+            candidate==L"flip"?HudTrial::InputFlip:candidate==L"history"?HudTrial::HistoryOnly:
+            candidate==L"worker-failure"?HudTrial::WorkerFailure:HudTrial::Tiled);
     }
 #endif
 #ifdef LLCV_RECORDING
@@ -12174,6 +12192,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
 #ifdef LLCV_RIFE_VULKAN
         vulkanTryRgbCopy=smokeTest &&
             std::find(smokeArgs.begin(),smokeArgs.end(),L"--rife-vulkan-rgb-copy")!=smokeArgs.end();
+        vulkanTryCapturePacing=smokeTest &&
+            std::find(smokeArgs.begin(),smokeArgs.end(),L"--rife-vulkan-capture-pacing")!=smokeArgs.end();
         // Hidden measurement session: RIFE Fast on Vulkan, nothing persisted.
         if (const auto models=CommandLineOptionValue(L"--rife-vulkan-fast"); !models.empty()) {
 #ifdef LLCV_RIFE_VULKAN_BUNDLED

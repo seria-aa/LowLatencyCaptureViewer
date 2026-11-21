@@ -5,7 +5,7 @@
 HDMI 캡처보드로 들어오는 영상과 소리를 재생하는 Windows용 저지연 뷰어입니다.
 OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리만 들을 수 있습니다.
 
-**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.4.0.md) · [English](README.en.md)
+**[다운로드](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [사용 가이드](docs/USAGE.ko.md) · [변경 내역](docs/release-notes-v2.4.1.md) · [English](README.en.md)
 
 <br>
 
@@ -16,6 +16,10 @@ OBS 없이 콘솔 게임 화면을 보거나, 오디오 전용 모드로 소리�
 <sub>2.1.6 UI 예시입니다. 장치 목록과 지원 형식은 환경에 따라 다릅니다. 이미지를 누르면 원본 크기로 볼 수 있습니다.</sub>
 
 <br>
+
+## 2.4.1 업데이트
+
+RIFE Vulkan이 백그라운드에서 준비되는 동안 원본 영상이 계속 재생됩니다. 이미 기한을 넘긴 보간은 건너뛰고, RIFE와 NVIDIA VFG의 장치 오류 처리를 개선했습니다.
 
 ## 2.4.0 업데이트
 

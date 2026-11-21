@@ -4,11 +4,14 @@
 #include <gpu.h>
 #include <command.h>
 #include <layer.h>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <chrono>
 #include <vector>
 #include "video/ncnn/NcnnRifeWarp.h"
 #include "video/ncnn/NcnnRifeWarpConcat.h"
@@ -28,6 +31,7 @@ struct ModelShape {
 constexpr ModelShape Fast{768,432,448,"fast"};
 constexpr ModelShape Half{960,540,544,"half"};
 void Require(bool valid,const char* what) { if(!valid) throw std::runtime_error(what); }
+void CheckStartup(std::stop_token stop) { Require(!stop.stop_requested(),"Vulkan RIFE initialization cancelled"); }
 
 #include "video/ncnn/NcnnRifeTail.h"
 #include "video/ncnn/NcnnRifeFrameCache.h"
@@ -156,19 +160,101 @@ void main() {
 PFN_vkCreateDevice plainCreate = nullptr;
 llcv::rife_vulkan::ExtendDevice extendCreate = nullptr;
 void* createCookie = nullptr;
+VkResult createResult=VK_SUCCESS;
+VkDevice startupDevice=VK_NULL_HANDLE;
 VkResult VKAPI_CALL ExtendCreate(VkPhysicalDevice physical,const VkDeviceCreateInfo* info,
                                   const VkAllocationCallbacks* allocator,VkDevice* device) {
-    return VkResult(extendCreate(createCookie,reinterpret_cast<uintptr_t>(plainCreate),
+    createResult=VkResult(extendCreate(createCookie,reinterpret_cast<uintptr_t>(plainCreate),
         physical,info,allocator,device));
+    if(createResult==VK_SUCCESS)startupDevice=*static_cast<VkDevice*>(device);
+    return createResult;
 }
 PFN_vkQueueSubmit plainSubmit = nullptr;
+PFN_vkWaitForFences plainWait = nullptr;
 llcv::rife_vulkan::WrappedSubmit wrappedSubmit = nullptr;
+llcv::rife_vulkan::WrappedWait wrappedWait = nullptr;
 void* submitCookie = nullptr;
 VkResult VKAPI_CALL ExtendSubmit(VkQueue queue,uint32_t count,const VkSubmitInfo* infos,VkFence fence) {
     return VkResult(wrappedSubmit(submitCookie,reinterpret_cast<uintptr_t>(plainSubmit),queue,
         count,infos,reinterpret_cast<uintptr_t>(fence)));
 }
+VkResult VKAPI_CALL ExtendWait(VkDevice device,uint32_t count,const VkFence* fences,VkBool32 all,uint64_t timeout) {
+    return VkResult(wrappedWait(submitCookie,reinterpret_cast<uintptr_t>(plainWait),device,count,fences,all,timeout));
+}
 std::mutex g_ncnnLock; // One graph build/submission at a time across owners.
+
+struct SubmissionHooks {
+    SubmissionHooks(llcv::rife_vulkan::WrappedSubmit submit,llcv::rife_vulkan::WrappedWait wait,void* cookie) {
+        plainSubmit=ncnn::vkQueueSubmit;
+        plainWait=ncnn::vkWaitForFences;
+        wrappedSubmit=submit;
+        wrappedWait=wait;
+        submitCookie=cookie;
+        ncnn::vkQueueSubmit=&ExtendSubmit;
+        ncnn::vkWaitForFences=&ExtendWait;
+    }
+    ~SubmissionHooks(){ncnn::vkQueueSubmit=plainSubmit;ncnn::vkWaitForFences=plainWait;}
+};
+struct StartupResult {
+    bool lost=false;
+    bool injectLoss=false;
+    // ncnn can submit a transfer and a compute acquire on separate queues.
+    std::array<VkFence,2> pending{};
+    static int Submit(void* cookie,uintptr_t call,void* queue,uint32_t count,const void* infos,uintptr_t fence) {
+        auto& state=*static_cast<StartupResult*>(cookie);
+        const auto result=state.injectLoss?VK_ERROR_DEVICE_LOST:reinterpret_cast<PFN_vkQueueSubmit>(call)(static_cast<VkQueue>(queue),count,
+            static_cast<const VkSubmitInfo*>(infos),reinterpret_cast<VkFence>(fence));
+        state.injectLoss=false;
+        if(result==VK_ERROR_DEVICE_LOST){state.lost=true;return result;}
+        if(result==VK_SUCCESS&&fence){
+            for(auto& entry:state.pending){
+                if(!entry){entry=reinterpret_cast<VkFence>(fence);break;}
+            }
+        }else if(result!=VK_SUCCESS){
+            // If the second queue rejected its submit, ncnn will free the
+            // staging command immediately on return. Retire the first one first.
+            const auto pending=state.pending;
+            for(auto entry:pending){
+                if(entry&&Wait(cookie,reinterpret_cast<uintptr_t>(plainWait),startupDevice,1,&entry,VK_TRUE,
+                               UINT64_MAX)==VK_ERROR_DEVICE_LOST)return VK_ERROR_DEVICE_LOST;
+            }
+        }
+        return result;
+    }
+    static int Wait(void* cookie,uintptr_t call,void* device,uint32_t count,const void* rawFences,uint32_t all,uint64_t timeout) {
+        const auto wait=reinterpret_cast<PFN_vkWaitForFences>(call);
+        const auto gpu=static_cast<VkDevice>(device);
+        const auto* fences=static_cast<const VkFence*>(rawFences);
+        auto& state=*static_cast<StartupResult*>(cookie);
+        // ncnn owns the staging buffers in the caller. Do not unwind that
+        // caller on an application timeout while the upload is still pending.
+        constexpr uint64_t sliceNs=50'000'000;
+        const bool unbounded=timeout==UINT64_MAX;
+        VkResult firstError=VK_SUCCESS;
+        const auto release=[&]{
+            for(auto& entry:state.pending)for(uint32_t i=0;entry&&i<count;++i){
+                if(entry==fences[i]&&(all||count==1||ncnn::vkGetFenceStatus(gpu,entry)==VK_SUCCESS))
+                    entry=VK_NULL_HANDLE;
+            }
+        };
+        for(;;){
+            const auto result=wait(gpu,count,fences,all,unbounded?sliceNs:timeout);
+            if(result==VK_ERROR_DEVICE_LOST){state.lost=true;return result;}
+            if(result==VK_SUCCESS){release();return firstError;}
+            if(!unbounded)return result;
+            if(result==VK_TIMEOUT)continue;
+            if(firstError==VK_SUCCESS)firstError=result;
+            uint32_t signaled=0;
+            for(uint32_t i=0;i<count;++i){
+                const auto status=ncnn::vkGetFenceStatus(gpu,fences[i]);
+                if(status==VK_ERROR_DEVICE_LOST){state.lost=true;return status;}
+                if(status==VK_SUCCESS)++signaled;
+            }
+            if(all?signaled==count:signaled>0){release();return firstError;}
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+};
 
 llcv::rife_vulkan::NativeBuffer Expose(const ncnn::VkMat& m) {
     Require(!m.empty()&&m.elempack==1,"Vulkan planar GPU buffer");
@@ -177,6 +263,7 @@ llcv::rife_vulkan::NativeBuffer Expose(const ncnn::VkMat& m) {
 
 class Graph final : public llcv::rife_vulkan::FastGraph {
     const ModelShape shape_;
+    std::unique_ptr<ncnn::VulkanDevice> gpu_;
     ncnn::Net net_;
     std::unique_ptr<Allocators> alloc_;
     ncnn::VkMat full_,low_,endpoint_,output_,flow_,mask_,hud_;
@@ -184,11 +271,14 @@ class Graph final : public llcv::rife_vulkan::FastGraph {
     std::unique_ptr<Synthesis> synthesis_;
     std::unique_ptr<RifeTail> tail_;
     std::unique_ptr<RifeFrameCache> cache_;
-    std::unique_ptr<ncnn::VkCompute> commands_;
-    bool submitted_=false;
+    std::unique_ptr<ncnn::VkCompute> commands_, historyCommands_;
+    bool submitted_=false, historySubmitted_=false;
 public:
-    Graph(const ncnn::VulkanDevice* device,const std::filesystem::path& models,ModelShape shape,bool hud,bool chroma)
-        : shape_(shape) {
+    Graph(std::unique_ptr<ncnn::VulkanDevice> gpu,const std::filesystem::path& models,ModelShape shape,
+          bool hud,bool chroma,std::stop_token stop)
+        : shape_(shape),gpu_(std::move(gpu)) {
+        const auto* device=gpu_.get();
+        CheckStartup(stop);
         net_.opt.use_vulkan_compute=true;
         net_.opt.use_cooperative_matrix=false;
         net_.opt.use_fp16_packed=net_.opt.use_fp16_storage=true;
@@ -208,10 +298,12 @@ public:
             net_.register_custom_layer("RifeWarpConcat",RifeWarpConcat_layer_creator)==0&&
             net_.register_custom_layer("RifeInitial",RifeInitial_layer_creator)==0,"Vulkan Fast graph layers");
         graph=FuseRefinementInputs(graph,0,true,true,true,true);
+        CheckStartup(stop);
         const auto weights=models/(stem+"-fold-cache.ncnn.bin");
         Require(net_.load_param_mem(graph.c_str())==0&&net_.load_model(weights.c_str())==0,
             "load Vulkan Fast model");
         for(const auto* layer:net_.layers()) Require(layer->support_vulkan,"CPU layer in Vulkan Fast graph");
+        CheckStartup(stop);
         alloc_=std::make_unique<Allocators>(net_);
         const int hudFloats=chroma?llcv::rife_vulkan::kHudChromaFloats:llcv::rife_vulkan::kHudFloats;
         {
@@ -231,6 +323,7 @@ public:
             }
             Require(init.submit_and_wait()==0,"initialize Vulkan frame history");
         }
+        CheckStartup(stop);
         if(hud){
             // A 1-D array keeps element order even when ncnn packs it by 4.
             if(!(hud_.dims==1&&hud_.elemsize==size_t(4*hud_.elempack)&&
@@ -250,15 +343,18 @@ public:
         synthesis_->SetDispatcher(dispatch);
         tail_=std::make_unique<RifeTail>(device,net_.opt);
         cache_=std::make_unique<RifeFrameCache>(device,net_.opt,models/(stem+"-encoder"));
+        CheckStartup(stop);
         {
             ncnn::VkCompute seed(device);
             cache_->Prime(seed,endpoint_);
             Require(seed.submit_and_wait()==0,"initialize Vulkan encoder history");
         }
+        CheckStartup(stop);
         commands_=std::make_unique<ncnn::VkCompute>(device,true,true);
+        historyCommands_=std::make_unique<ncnn::VkCompute>(device,false,true);
     }
     ~Graph() override {
-        commands_.reset(); cache_.reset(); tail_.reset(); synthesis_.reset(); protect_.reset();
+        historyCommands_.reset(); commands_.reset(); cache_.reset(); tail_.reset(); synthesis_.reset(); protect_.reset();
         full_.release(); low_.release(); endpoint_.release(); output_.release(); flow_.release(); mask_.release(); hud_.release();
         alloc_.reset();
     }
@@ -278,6 +374,10 @@ public:
         if(protect_)protect_->Record(*commands_,flow_,mask_,hud_);
         synthesis_->Record(*commands_,full_,flow_,mask_,output_);
         cache_->RecordStableCommit(*commands_,net_.opt);
+        // Both replay paths use the same stable previous-feature buffer.
+        endpoint_.data->access_flags=VK_ACCESS_SHADER_WRITE_BIT;
+        endpoint_.data->stage_flags=VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        cache_->RecordHistoryOnly(*historyCommands_,endpoint_,net_.opt);
     }
     llcv::rife_vulkan::NativeGraph Native() const override {
         const auto* device=net_.vulkan_device();
@@ -293,15 +393,16 @@ public:
         Require(ncnn::compile_spirv_module(source,net_.opt,words)==0&&!words.empty(),"compile Vulkan image bridge");
         return words;
     }
-    double Execute(llcv::rife_vulkan::WrappedSubmit submit,void* cookie) override {
+    double Execute(llcv::rife_vulkan::JobKind kind,llcv::rife_vulkan::WrappedSubmit submit,
+                   llcv::rife_vulkan::WrappedWait wait,void* cookie) override {
         std::lock_guard lock(g_ncnnLock);
-        plainSubmit=ncnn::vkQueueSubmit;
-        wrappedSubmit=submit;
-        submitCookie=cookie;
-        struct Restore {~Restore(){ncnn::vkQueueSubmit=plainSubmit;}} restore;
-        ncnn::vkQueueSubmit=&ExtendSubmit;
-        Require((submitted_?commands_->resubmit_and_wait():commands_->submit_and_wait())==0,"submit Vulkan RIFE frame");
-        submitted_=true;
+        SubmissionHooks hooks(submit,wait,cookie);
+        const bool historyOnly=kind==llcv::rife_vulkan::JobKind::HistoryOnly;
+        auto& commands=historyOnly?historyCommands_:commands_;
+        auto& submitted=historyOnly?historySubmitted_:submitted_;
+        Require((submitted?commands->resubmit_and_wait():commands->submit_and_wait())==0,"submit Vulkan RIFE frame");
+        submitted=true;
+        if(historyOnly)return -1;
         double gpu=0;
         if(commands_->elapsed_gpu_ms(gpu)!=0)gpu=-1;
         return gpu;
@@ -311,8 +412,10 @@ public:
 
 namespace llcv::rife_vulkan {
 std::unique_ptr<FastGraph> CreateFastGraph(MatchDevice match,ExtendDevice extend,void* cookie,
-                                           const std::filesystem::path& modelDirectory,Preset preset,bool hud,bool chroma) {
+        const std::filesystem::path& modelDirectory,Preset preset,bool hud,bool chroma,std::stop_token stop,
+        bool injectStartupDeviceLoss) {
     std::lock_guard lock(g_ncnnLock);
+    CheckStartup(stop);
     Require(ncnn::create_gpu_instance()==0,"create ncnn GPU instance");
     int index=-1;
     for(int i=0;i<ncnn::get_gpu_count();++i) {
@@ -322,15 +425,26 @@ std::unique_ptr<FastGraph> CreateFastGraph(MatchDevice match,ExtendDevice extend
     Require(index>=0,"no Vulkan device matches the playback GPU");
     Require(ncnn::get_gpu_info(index).support_fp16_storage(),"Vulkan device lacks FP16 storage");
     plainCreate=ncnn::vkCreateDevice;
+    createResult=VK_SUCCESS;
+    startupDevice=VK_NULL_HANDLE;
     extendCreate=extend;
     createCookie=cookie;
-    const ncnn::VulkanDevice* device=nullptr;
-    {
-        struct Restore {~Restore(){ncnn::vkCreateDevice=plainCreate;}} restore;
-        ncnn::vkCreateDevice=&ExtendCreate;
-        device=ncnn::get_gpu_device(index);
+    StartupResult startup;
+    SubmissionHooks hooks(&StartupResult::Submit,&StartupResult::Wait,&startup);
+    try{
+        std::unique_ptr<ncnn::VulkanDevice> device;
+        {
+            struct Restore {~Restore(){ncnn::vkCreateDevice=plainCreate;}} restore;
+            ncnn::vkCreateDevice=&ExtendCreate;
+            device=std::make_unique<ncnn::VulkanDevice>(index);
+        }
+        Require(device->is_valid(),"create sharing-enabled ncnn device");
+        startup.injectLoss=injectStartupDeviceLoss;
+        return std::make_unique<Graph>(std::move(device),modelDirectory,preset==Preset::Half?Half:Fast,hud,chroma,stop);
+    }catch(...){
+        if(startup.lost||createResult==VK_ERROR_DEVICE_LOST)
+            throw std::runtime_error("Vulkan device lost during RIFE initialization (VK_ERROR_DEVICE_LOST)");
+        throw;
     }
-    Require(device&&device->vkdevice(),"create sharing-enabled ncnn device");
-    return std::make_unique<Graph>(device,modelDirectory,preset==Preset::Half?Half:Fast,hud,chroma);
 }
 } // namespace llcv::rife_vulkan

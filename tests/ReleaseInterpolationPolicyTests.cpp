@@ -1,6 +1,7 @@
 #include "video/RifeHalfTest.h"
 #include "video/VfgPreferences.h"
 #include "video/InterpolationMethodPolicy.h"
+#include "video/RifeHistoryPolicy.h"
 #include "video/PlaybackGpu.h"
 #include "ui/SettingsView.h"
 #include "ui/SettingsDialogControls.h"
@@ -14,6 +15,18 @@
 #endif
 
 using namespace llcv::rife_test;
+static_assert(!CanGeneratePair(false, 100, 120) &&
+              !CanGeneratePair(true, 120, 120) &&
+              !CanGeneratePair(true, 121, 120) && CanGeneratePair(true, 119, 120));
+static_assert(CaptureBoundedOriginalSlot(100000,104000,60)==112333);
+static_assert(CaptureBoundedOriginalSlot(100000,109000,60)==115625);
+static_assert(CaptureBoundedOriginalSlot(100000,117000,60)==117000);
+static_assert(CaptureBoundedOriginalSlot(100000,108000,30)==124666);
+static_assert(SharedFenceProgress(0,2)==SharedFenceState::Waiting);
+static_assert(SharedFenceProgress(2,2)==SharedFenceState::Ready);
+static_assert(SharedFenceProgress(UINT64_MAX,2)==SharedFenceState::DeviceRemoved);
+static_assert(!VulkanStartupExpired(1,kVulkanStartupLimitUs));
+static_assert(VulkanStartupExpired(1,kVulkanStartupLimitUs+1));
 using Method = llcv::settings::InterpolationMethod;
 using Provider = llcv::interpolation::Provider;
 static_assert(llcv::interpolation::ChooseProvider(Method::NvidiaVfg,true,true)==Provider::NvidiaVfg);
@@ -214,6 +227,10 @@ int main(int argc, char** argv){
     if (!SelectScale(Scale::VfgMedium) || requested.load()) return 3;
     EnableComponents(true);
     if (!requested.load() || selectedScale.load()!=Scale::VfgMedium) return 4;
+    const auto onIntent=intentChanges.load();
+    Request(false);
+    Request(true);
+    if (!requested.load() || intentChanges.load()!=onIntent+2) return 15;
     EnableComponents(false);
     if (requested.load()) return 5;
     llcv::settings_ui::SettingsControls controls;

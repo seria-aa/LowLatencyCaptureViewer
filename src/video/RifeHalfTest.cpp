@@ -189,8 +189,16 @@ struct Half::Impl {
             fwprintf(stderr,L"[rife-pair] saved actual inference input and output: %s\n",folder.c_str());
         }catch(const std::exception& e){++pairSaveFailures;fprintf(stderr,"[rife-pair] save failed: %s\n",e.what());}
     }
+    bool FenceReady() const {
+        const auto progress=SharedFenceProgress(fence->GetCompletedValue(),ticket);
+        if(progress==SharedFenceState::DeviceRemoved){
+            const auto reason=device->GetDeviceRemovedReason();
+            Hr(FAILED(reason)?reason:DXGI_ERROR_DEVICE_REMOVED,"RIFE shared D3D11 fence");
+        }
+        return progress==SharedFenceState::Ready;
+    }
     void HarvestTiming(){
-        if(!timingPending||fence->GetCompletedValue()<ticket)return;
+        if(!timingPending||!FenceReady())return;
 #ifdef LLCV_RIFE_TRAJECTORY
         trace.harvest(gpuBegin,gpuEnd);
 #endif
@@ -221,7 +229,7 @@ struct Half::Impl {
     struct Logger:nvinfer1::ILogger{void log(Severity s,const char* text)noexcept override{if(s<=Severity::kWARNING)fprintf(stderr,"[rife-trt] %s\n",text);}}logger;
     std::unique_ptr<nvinfer1::IRuntime> runtime;std::unique_ptr<nvinfer1::ICudaEngine> engine;std::unique_ptr<nvinfer1::IExecutionContext> inference;
     float *input=nullptr,*output=nullptr;cudaGraphExec_t graph=nullptr;
-    bool Idle()const{return !ticket||fence->GetCompletedValue()>=ticket;}
+    bool Idle()const{return !ticket||FenceReady();}
     void ResetModel(){
         if(graph){cudaGraphExecDestroy(graph);graph=nullptr;}
         inference.reset();engine.reset();
@@ -328,7 +336,7 @@ struct Half::Impl {
         const auto providerTicket=providerEpoch.load(std::memory_order_acquire);
         if(IsFlyHigh()){history=false;status=Status::Pending;return nullptr;}
 #endif
-        if(ticket&&fence->GetCompletedValue()<ticket){history=false;++busy;status=Status::Late;return nullptr;}
+        if(ticket&&!FenceReady()){history=false;++busy;status=Status::Late;return nullptr;}
         HarvestTiming();
 #ifdef LLCV_RIFE_AUTO_UI_TEST
         const int protect=HudWidthFor(scale);
@@ -402,13 +410,13 @@ struct Half::Impl {
         // Quality comparison explicitly trades responsiveness for seeing the
         // selected model. It still has one job and a bounded, cancellable wait.
         const auto deadline=CompletionDeadlineUs(arrival,Now(),fps,quality);const auto remaining=deadline-Now();
-        if(remaining>0&&fence->GetCompletedValue()<ticket){
+        if(remaining>0&&!FenceReady()){
             ResetEvent(complete);Hr(fence->SetEventOnCompletion(ticket,complete),"RIFE completion event");
             // Millisecond rounding of an 8.33ms budget can wake *after* the
             // deadline even when CUDA completed in time. Sleep for the coarse
             // portion, then use a bounded pause loop for the final sub-ms gap.
             if(quality){
-                while(fence->GetCompletedValue()<ticket&&Now()<deadline&&requested.load()&&qualityComparison.load()&&selectedScale.load()==scale
+                while(!FenceReady()&&Now()<deadline&&requested.load()&&qualityComparison.load()&&selectedScale.load()==scale
 #ifdef LLCV_FLYHIGH_TEST
                     &&!IsFlyHigh()&&providerEpoch.load()==providerTicket
 #endif
@@ -420,10 +428,10 @@ struct Half::Impl {
             }else{
                 const auto sleepMs=remaining>1500?DWORD((remaining-1500)/1000):0;
                 if(sleepMs)WaitForSingleObject(complete,sleepMs);
-                while(fence->GetCompletedValue()<ticket&&Now()<deadline&&requested.load(std::memory_order_relaxed))YieldProcessor();
+                while(!FenceReady()&&Now()<deadline&&requested.load(std::memory_order_relaxed))YieldProcessor();
             }
         }
-        const bool completed=fence->GetCompletedValue()>=ticket;
+        const bool completed=FenceReady();
         const auto decision=Now();
         const bool ready=completed&&decision<=deadline;
 #ifdef LLCV_RIFE_TRAJECTORY
@@ -494,11 +502,24 @@ struct Half::VulkanFast {
     Ptr<ID3D11VideoProcessorInputView> generatedView;
     Ptr<ID3D11Fence> fence;HANDLE complete=nullptr,timer=nullptr;
     std::unique_ptr<rife_vulkan::FastBackend> backend; // Released before the shared textures.
+    // Unlike a std::async future, abandoning this state does not wait for the loader.
+    std::future<std::unique_ptr<rife_vulkan::FastBackend>> loading;
+    std::stop_source startupStop;
+    int64_t startupAt=0;
     UINT64 serial=0,ticket=0;bool history=false;int64_t previousArrival=0,originalAt=0;
     // Session statistics, written to the log when playback stops.
-    struct Row{int64_t arrival,submitted,decided,deadline;int outcome;};
+    struct Row{
+        int64_t arrival,submitted,decided,deadline;
+        int outcome;
+        int64_t generatedPresentEnd=0,originalPresentBegin=0,originalPresentEnd=0;
+        uint64_t ticket=0;
+        rife_vulkan::SubmissionTiming vulkan{};
+    };
     std::vector<Row> rows;std::vector<double> gpuMs;
+    bool traceSubmission=false;
+    size_t lastTicketRow=0;
     uint64_t pairs=0,seeds=0,onTime=0,lateCount=0,busyCount=0,cancelled=0;
+    uint64_t inputAttempts=0,generatedPresented=0;
     uint64_t rgbCopies=0,rgbConversions=0;
     void Texture(Ptr<ID3D11Texture2D>& texture,const char* what){
         D3D11_TEXTURE2D_DESC desc{};desc.Width=W;desc.Height=H;desc.MipLevels=desc.ArraySize=1;desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_DEFAULT;
@@ -518,18 +539,38 @@ struct Half::VulkanFast {
         Hr(vd->CreateVideoProcessorOutputView(input.Get(),nativeEnum.Get(),&view,&inputTarget),"Vulkan input conversion target");
         Hr(device->CreateFence(0,D3D11_FENCE_FLAG_SHARED,IID_PPV_ARGS(&fence)),"Vulkan shared fence");
         complete=CreateEventW(nullptr,FALSE,FALSE,nullptr);timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);Check(complete&&timer,"Vulkan timer/event");
-        const auto preset=scale==Scale::Half?rife_vulkan::Preset::Half:rife_vulkan::Preset::Fast;
-        backend=std::make_unique<rife_vulkan::FastBackend>(device.Get(),input.Get(),output.Get(),fence.Get(),std::filesystem::path(vulkanModelDirectory),preset,vulkanHud,vulkanHudChroma);
-#ifdef LLCV_RIFE_VULKAN_BUNDLED
-        if(!useBundledInterpolation)
-#endif
-        {rows.reserve(65536);gpuMs.reserve(65536);}
+        traceSubmission=!vulkanTraceFile.empty();
+        if(traceSubmission){rows.reserve(65536);gpuMs.reserve(65536);}
+    }
+    bool PollBackend(){
+        if(backend)return true;
+        if(!startupAt)startupAt=Now();
+        if(!loading.valid()){
+            const auto preset=scale==Scale::Half?rife_vulkan::Preset::Half:rife_vulkan::Preset::Fast;
+            loading=rife_vulkan::FastBackend::TryInitializeAsync(device.Get(),input.Get(),output.Get(),fence.Get(),
+                std::filesystem::path(vulkanModelDirectory),preset,vulkanHud,vulkanHudChroma,traceSubmission,startupStop);
+        }
+        if(!loading.valid()||loading.wait_for(std::chrono::seconds(0))!=std::future_status::ready){
+            if(VulkanStartupExpired(startupAt,Now())){
+                startupStop.request_stop();
+                throw std::runtime_error("Vulkan RIFE initialization timed out; continuing original playback");
+            }
+            return false;
+        }
+        try{backend=loading.get();}
+        catch(const rife_vulkan::BackendRetiring&){return false;}
         activeScale.store(scale);status=Status::Pending;
         fwprintf(stderr,L"[rife-vulkan] %s ready on %s; %ux%u, D3D11 shared textures and fence; HUD protection %s.\n",
                  scale==Scale::Half?L"Half":L"Fast",backend->DeviceName().c_str(),W,H,
                  vulkanHudChroma?L"on (edge history + chroma, 16 px)":vulkanHud?L"on (edge history, 16 px)":L"off");
+        return true;
     }
     void Harvest(){
+        if(backend&&traceSubmission){
+            rife_vulkan::SubmissionTiming timing;
+            if(backend->TakeSubmissionTiming(timing)&&lastTicketRow<rows.size()&&rows[lastTicketRow].ticket==timing.ticket)
+                rows[lastTicketRow].vulkan=timing;
+        }
         double ms=0;
         if(backend&&backend->TakeGpuMs(ms)&&ms>=0){
             if(gpuMs.size()<gpuMs.capacity())gpuMs.push_back(ms);
@@ -538,11 +579,22 @@ struct Half::VulkanFast {
             auto old=maxGpuUs.load();while(old<us&&!maxGpuUs.compare_exchange_weak(old,us)){}
         }
     }
-    void Record(int64_t arrival,int64_t submitted,int64_t decided,int64_t deadline,int outcome){
-        if(rows.size()<rows.capacity())rows.push_back({arrival,submitted,decided,deadline,outcome});
+    void Record(int64_t arrival,int64_t submitted,int64_t decided,int64_t deadline,int outcome,uint64_t jobTicket=0){
+        if(rows.size()>=rows.capacity())return;
+        if(jobTicket)lastTicketRow=rows.size();
+        rows.push_back({arrival,submitted,decided,deadline,outcome,0,0,0,jobTicket});
+    }
+    bool FenceReady(SharedFenceState state) const {
+        if(state==SharedFenceState::DeviceRemoved) {
+            const auto reason=device->GetDeviceRemovedReason();
+            Hr(FAILED(reason)?reason:DXGI_ERROR_DEVICE_REMOVED,"Vulkan shared D3D11 fence");
+        }
+        return state==SharedFenceState::Ready;
     }
     ID3D11VideoProcessorInputView* Submit(ID3D11Texture2D* source,ID3D11VideoProcessor* original,ID3D11VideoProcessorEnumerator* originalEnum,int fps,int64_t arrival){
-        if(ticket&&(fence->GetCompletedValue()<ticket||!backend->Free())){
+        ++inputAttempts;
+        const auto fenceValue=[&]{return fence->GetCompletedValue();};
+        if(ticket&&!FenceReady(CheckPreviousVulkanJob(ticket,[&]{return backend->Free();},fenceValue))){
             history=false;++busy;++busyCount;Record(arrival,0,Now(),0,3);status=Status::Late;return nullptr;
         }
         Harvest();
@@ -594,25 +646,36 @@ struct Half::VulkanFast {
         const auto submitted=Now();
         const auto available=++serial;ticket=++serial;
         Hr(context->Signal(fence.Get(),available),"Vulkan input signal");context->Flush();
-        backend->Enqueue(available,ticket,arrival,rgbCopy&&mirror&&flipY);
-        if(!step.pairReady){history=true;++seeds;Record(arrival,submitted,submitted,0,4);status=Status::Pending;return nullptr;}
+        const auto deadline=CompletionDeadlineUs(arrival,submitted,fps,false);
+        const auto admitted=Now();
+        const auto kind=CanGeneratePair(step.pairReady,admitted,deadline)
+            ?rife_vulkan::JobKind::Generate:rife_vulkan::JobKind::HistoryOnly;
+        backend->Enqueue(available,ticket,arrival,rgbCopy&&mirror&&flipY,kind,deadline);
+        if(!step.pairReady){history=true;++seeds;Record(arrival,submitted,submitted,0,4,ticket);status=Status::Pending;return nullptr;}
         history=true;++pairs;
-        const auto deadline=CompletionDeadlineUs(arrival,submitted,fps,false);const auto remaining=deadline-Now();
-        if(remaining>0&&fence->GetCompletedValue()<ticket){
+        const auto miss=[&](int64_t decided){
+            ++late;++lateCount;++modeLate[ScaleIndex(scale)];
+            Record(arrival,submitted,decided,deadline,1,ticket);status=Status::Late;
+        };
+        if(kind==rife_vulkan::JobKind::HistoryOnly){miss(admitted);return nullptr;}
+        const auto remaining=deadline-Now();
+        if(remaining>0&&!FenceReady(SharedFenceProgress(fenceValue(),ticket))){
             ResetEvent(complete);Hr(fence->SetEventOnCompletion(ticket,complete),"Vulkan completion event");
             const auto sleepMs=remaining>1500?DWORD((remaining-1500)/1000):0;
             if(sleepMs)WaitForSingleObject(complete,sleepMs);
-            while(fence->GetCompletedValue()<ticket&&Now()<deadline&&requested.load(std::memory_order_relaxed))YieldProcessor();
+            while(!FenceReady(SharedFenceProgress(fenceValue(),ticket))&&Now()<deadline&&!backend->HasFailed()&&
+                requested.load(std::memory_order_relaxed))YieldProcessor();
         }
-        const bool completed=fence->GetCompletedValue()>=ticket;
+        if(backend->HasFailed())backend->Free(); // Rethrows even without a fence signal.
+        const bool completed=FenceReady(SharedFenceProgress(fenceValue(),ticket));
         const auto decision=Now();
-        const bool ready=completed&&decision<=deadline;
+        const bool ready=completed&&backend->GeneratesOutputFor(ticket)&&decision<=deadline;
         if(!requested.load(std::memory_order_acquire)||!VulkanSelected()){
-            history=false;++cancelled;++modeCancelled[ScaleIndex(scale)];Record(arrival,submitted,decision,deadline,2);
+            history=false;++cancelled;++modeCancelled[ScaleIndex(scale)];Record(arrival,submitted,decision,deadline,2,ticket);
             status=requested.load()?Status::Pending:Status::Off;return nullptr;
         }
-        if(!ready){++late;++lateCount;++modeLate[ScaleIndex(scale)];Record(arrival,submitted,decision,deadline,1);status=Status::Late;return nullptr;}
-        ++onTime;Record(arrival,submitted,decision,deadline,0);
+        if(!ready){miss(decision);return nullptr;}
+        ++onTime;Record(arrival,submitted,decision,deadline,0,ticket);
         Hr(context->Wait(fence.Get(),ticket),"Vulkan output acquire");
         if(ownerEnum.Get()!=originalEnum){generatedView.Reset();ownerEnum=originalEnum;Hr(vd->CreateVideoProcessorInputView(output.Get(),ownerEnum.Get(),&desc,&generatedView),"Vulkan generated input view");}
         status=Status::Active;return generatedView.Get();
@@ -624,14 +687,34 @@ struct Half::VulkanFast {
         LARGE_INTEGER due{};due.QuadPart=-LONGLONG(remaining*10);
         if(SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE))WaitForSingleObject(timer,DWORD((remaining+999)/1000+10));
     }
-    static double Percentile(std::vector<double> v,double p){
-        if(v.empty())return 0;std::sort(v.begin(),v.end());
-        return v[std::min(v.size()-1,size_t(p*double(v.size()-1)+0.5))];
+    static void ReportDistribution(const wchar_t* label,std::vector<double>& values){
+        if(values.empty()){
+            fwprintf(stderr,L"[rife-vulkan] %ls: not measured (n=0)\n",label);
+            return;
+        }
+        std::sort(values.begin(),values.end());
+        const auto percentile=[&](double p){return values[size_t(p*double(values.size()-1)+0.5)];};
+        fwprintf(stderr,L"[rife-vulkan] %ls p50=%.3f p95=%.3f p99=%.3f (n=%zu)\n",
+            label,percentile(.5),percentile(.95),percentile(.99),values.size());
     }
     void Report(){
         Harvest();
-        std::vector<double> ready;
-        for(const auto& r:rows)if(r.outcome==0)ready.push_back(double(r.decided-r.arrival)/1000.0);
+        std::vector<double> ready, inputWait, workerPrep, enqueueToSubmit;
+        uint64_t measuredGenerate=0,generateSubmittedAfterDeadline=0,expiredBeforeGraph=0;
+        for(const auto& r:rows){
+            if(r.outcome==0)ready.push_back(double(r.decided-r.arrival)/1000.0);
+            const auto& t=r.vulkan;
+            if(t.expiredBeforeGraph)++expiredBeforeGraph;
+            if(t.inputReadyUs)inputWait.push_back(double(t.inputReadyUs-t.inputWaitBeginUs)/1000.0);
+            if(t.inputWaitBeginUs)workerPrep.push_back(double(t.inputWaitBeginUs-t.enqueuedUs)/1000.0);
+            if(t.submitBeginUs){
+                enqueueToSubmit.push_back(double(t.submitBeginUs-t.enqueuedUs)/1000.0);
+                if(t.submitEndUs&&t.submitResult==0&&t.kind==rife_vulkan::JobKind::Generate&&r.deadline){
+                    ++measuredGenerate;
+                    if(t.submitBeginUs>=r.deadline)++generateSubmittedAfterDeadline;
+                }
+            }
+        }
         const auto shown=pairs?double(onTime)*100.0/double(pairs):0.0;
         fwprintf(stderr,L"[rife-vulkan] pid=%lu\n",GetCurrentProcessId());
         if(rgbCopies||rgbConversions)
@@ -640,9 +723,20 @@ struct Half::VulkanFast {
         fwprintf(stderr,L"[rife-vulkan] pairs=%llu on_time=%llu (%.2f%%) late=%llu busy=%llu seeds=%llu cancelled=%llu\n",
             static_cast<unsigned long long>(pairs),static_cast<unsigned long long>(onTime),shown,static_cast<unsigned long long>(lateCount),
             static_cast<unsigned long long>(busyCount),static_cast<unsigned long long>(seeds),static_cast<unsigned long long>(cancelled));
-        fwprintf(stderr,L"[rife-vulkan] arrival->ready ms p50=%.3f p95=%.3f p99=%.3f; GPU ms p50=%.3f p95=%.3f p99=%.3f (n=%zu)\n",
-            Percentile(ready,.5),Percentile(ready,.95),Percentile(ready,.99),
-            Percentile(gpuMs,.5),Percentile(gpuMs,.95),Percentile(gpuMs,.99),gpuMs.size());
+        fwprintf(stderr,L"[rife-vulkan] generated Present accepted=%llu / interpolation inputs=%llu (%.2f%%; includes busy/seed inputs)\n",
+            static_cast<unsigned long long>(generatedPresented),static_cast<unsigned long long>(inputAttempts),
+            inputAttempts?double(generatedPresented)*100.0/double(inputAttempts):0.0);
+        ReportDistribution(L"arrival->ready ms (on-time only)",ready);
+        ReportDistribution(L"GPU ms",gpuMs);
+        if(traceSubmission){
+            ReportDistribution(L"enqueue->input check ms",workerPrep);
+            ReportDistribution(L"D3D11 input wait ms (completed only)",inputWait);
+            ReportDistribution(L"enqueue->Vulkan submit ms",enqueueToSubmit);
+            fwprintf(stderr,L"[rife-vulkan] generated jobs submitted at/after deadline=%llu / %llu traced\n",
+                static_cast<unsigned long long>(generateSubmittedAfterDeadline),static_cast<unsigned long long>(measuredGenerate));
+            fwprintf(stderr,L"[rife-vulkan] expired before graph; kept only history=%llu\n",
+                static_cast<unsigned long long>(expiredBeforeGraph));
+        }
         uint64_t hudJobs=0,hudActive=0;double hudCore=0;
         uint64_t chromaJobs=0,chromaCapped=0;
         double chromaCore=0;
@@ -655,23 +749,36 @@ struct Half::VulkanFast {
         }
         if(vulkanTraceFile.empty()||rows.empty())return;
         try{
-            std::ofstream csv(std::filesystem::path(vulkanTraceFile),std::ios::app);
+            constexpr auto header="pid,arrival_us,submitted_us,decided_us,deadline_us,outcome,"
+                "generated_present_end_us,original_present_begin_us,original_present_end_us,ticket,"
+                "worker_enqueued_us,d3d_input_wait_begin_us,d3d_input_ready_us,vk_submit_begin_us,vk_submit_end_us,vk_job_kind,vk_submit_result,expired_before_graph";
+            const std::filesystem::path tracePath(vulkanTraceFile);
+            {
+                std::ifstream existing(tracePath);
+                if(std::string line;std::getline(existing,line)&&line!=header)
+                    throw std::runtime_error("incompatible trace format; use a new CSV file");
+            }
+            std::ofstream csv(tracePath,std::ios::app);
             csv.exceptions(std::ios::badbit|std::ios::failbit);
             // The process id ties each row to the same run's log lines.
-            if(csv.tellp()==0)csv<<"pid,arrival_us,submitted_us,decided_us,deadline_us,outcome\n";
+            if(csv.tellp()==0)csv<<header<<'\n';
             static constexpr const char* names[]{"ready","late","cancelled","busy","seed","unsupported"};
             const auto pid=GetCurrentProcessId();
-            for(const auto& r:rows)csv<<pid<<','<<r.arrival<<','<<r.submitted<<','<<r.decided<<','<<r.deadline<<','<<names[r.outcome]<<'\n';
+            for(const auto& r:rows){
+                const auto& t=r.vulkan;
+                csv<<pid<<','<<r.arrival<<','<<r.submitted<<','<<r.decided<<','<<r.deadline<<','<<names[r.outcome]
+                    <<','<<r.generatedPresentEnd<<','<<r.originalPresentBegin<<','<<r.originalPresentEnd<<','<<r.ticket
+                    <<','<<t.enqueuedUs<<','<<t.inputWaitBeginUs<<','<<t.inputReadyUs<<','<<t.submitBeginUs<<','<<t.submitEndUs
+                    <<','<<(t.ticket?(t.kind==rife_vulkan::JobKind::Generate?"generate":"history"):"")<<',';
+                if(t.submitEndUs)csv<<t.submitResult;
+                csv<<','<<int(t.expiredBeforeGraph)<<'\n';
+            }
         }catch(const std::exception& e){fprintf(stderr,"[rife-vulkan] trace not written: %s\n",e.what());}
     }
     ~VulkanFast(){
-        // Retire the in-flight job before the shared textures are released.
-        if(backend){
-            const auto start=Now();
-            while(ticket&&fence&&fence->GetCompletedValue()<ticket&&Now()-start<2000000)Sleep(1);
-            try{while(!backend->Free()&&Now()-start<2000000)Sleep(1);}catch(...){}
-            Report();
-        }
+        startupStop.request_stop();
+        // The backend keeps ownership of the shared textures until retirement.
+        if(backend)Report();
         backend.reset();
         if(complete)CloseHandle(complete);if(timer)CloseHandle(timer);
     }
@@ -684,13 +791,13 @@ void Half::Reset(){
     flyHighFailed_=false;
 #endif
 #ifdef LLCV_RIFE_VULKAN
-    vulkanFast_.reset();vulkanFailed_=false;
+    vulkanFast_.reset();vulkanFailedIntent_.reset();
 #endif
     impl_.reset();failed_=false;status=Status::Off;}
 void Half::Invalidate(){
 #ifdef LLCV_RIFE_VULKAN
     if(vulkanFast_)vulkanFast_->history=false;
-    vulkanFailed_=false;
+    vulkanFailedIntent_.reset();
 #endif
     if(impl_){impl_->history=false;
 #ifdef LLCV_RIFE_AUTO_UI_TEST
@@ -718,20 +825,30 @@ ID3D11VideoProcessorInputView* Half::Submit(ID3D11Device* d,ID3D11DeviceContext*
 #ifdef LLCV_RIFE_VULKAN
     if(VulkanSelected()){
         impl_.reset();failed_=false;
-        if(vulkanFailed_){status=Status::Failed;return nullptr;}
+        const auto intent=intentChanges.load(std::memory_order_acquire);
+        if(vulkanFailedIntent_==intent){status=Status::Failed;return nullptr;}
+        // F7 can be toggled twice before another capture frame arrives.
+        // Retry once for the new intent even if the render path never saw Off.
+        vulkanFailedIntent_.reset();
         try{
             if(vulkanFast_&&(vulkanFast_->W!=UINT(width)||vulkanFast_->H!=UINT(height)))vulkanFast_.reset();
-            if(!vulkanFast_){vulkanFast_=std::make_unique<VulkanFast>();vulkanFast_->Initialize(d,c,vd,vc,width,height,fps);return nullptr;}
+            if(!vulkanFast_){
+#ifdef LLCV_RIFE_OPTIONAL
+                fallbackDetail.store(L"");
+#endif
+                vulkanFast_=std::make_unique<VulkanFast>();vulkanFast_->Initialize(d,c,vd,vc,width,height,fps);
+            }
+            if(!vulkanFast_->PollBackend()){status=Status::Pending;return nullptr;}
             return vulkanFast_->Submit(source,processor,owner,fps,arrival);
         }catch(const std::exception& e){
 #ifdef LLCV_RIFE_OPTIONAL
             fallbackDetail.store(L"Vulkan runtime error");
 #endif
             fprintf(stderr,"[rife-vulkan] original fallback: %s\n",e.what());
-            vulkanFast_.reset();vulkanFailed_=true;status=Status::Failed;return nullptr;
+            vulkanFast_.reset();vulkanFailedIntent_=intent;status=Status::Failed;return nullptr;
         }
     }
-    vulkanFast_.reset();vulkanFailed_=false;
+    vulkanFast_.reset();vulkanFailedIntent_.reset();
 #endif
     const auto selected=selectedScale.load(std::memory_order_acquire);
 #ifdef LLCV_INTERPOLATION_RELEASE
@@ -789,14 +906,29 @@ ID3D11VideoProcessorInputView* Half::Submit(ID3D11Device* d,ID3D11DeviceContext*
 #endif
         return nullptr;}
 }
-void Half::ScheduleOriginalSlot(int fps){
+void Half::ScheduleOriginalSlot(int fps,[[maybe_unused]] int64_t arrival){
 #ifdef LLCV_FLYHIGH_TEST
     if(flyHigh_&&fps>0)flyHigh_->originalAt=Now()+500000/fps;
 #endif
 #ifdef LLCV_RIFE_VULKAN
-    if(vulkanFast_&&fps>0)vulkanFast_->originalAt=Now()+500000/fps;
+    if(vulkanFast_&&fps>0){
+        const auto now=Now();
+        vulkanFast_->originalAt=vulkanTryCapturePacing
+            ?CaptureBoundedOriginalSlot(arrival,now,fps):now+500000/fps;
+    }
 #endif
     if(impl_&&fps>0)impl_->originalAt=Now()+500000/fps;}
+#ifdef LLCV_RIFE_VULKAN
+void Half::RecordPresent(int64_t arrival,bool interpolated,int64_t begin,int64_t end){
+    if(!vulkanFast_)return;
+    if(interpolated)++vulkanFast_->generatedPresented;
+    if(!begin||vulkanFast_->rows.empty())return;
+    auto& row=vulkanFast_->rows.back();
+    if(row.arrival!=arrival)return;
+    if(interpolated)row.generatedPresentEnd=end;
+    else {row.originalPresentBegin=begin;row.originalPresentEnd=end;}
+}
+#endif
 void Half::WaitOriginalSlot(int fps){
 #ifdef LLCV_FLYHIGH_TEST
     if(flyHigh_){flyHigh_->WaitOriginalSlot(fps);return;}

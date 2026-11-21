@@ -5,6 +5,9 @@
 class RifeFrameCache {
     ncnn::Net encoder_;
     ncnn::VkMat previous_, staged_, packed_;
+#ifdef LLCV_RIFE_VULKAN_LIVE
+    ncnn::VkMat historyStaged_;
+#endif
     ncnn::Pipeline pack_;
     ncnn::VkAllocator* allocator_;
 
@@ -85,6 +88,15 @@ void main() {
         const auto* storage=previous_.data;
         cmd.record_clone(staged_,previous_,opt);
         Require(previous_.data==storage,"live cache changed recorded buffer");
+    }
+    void RecordHistoryOnly(ncnn::VkCompute& cmd,const ncnn::VkMat& input,const ncnn::Option& opt) {
+        // Replays keep raw buffer bindings, not references to the VkMat.
+        historyStaged_=Encode(cmd,input);
+        Require(historyStaged_.w==previous_.w&&historyStaged_.h==previous_.h&&historyStaged_.c==previous_.c&&
+                historyStaged_.elempack==previous_.elempack,"history-only endpoint layout mismatch");
+        const auto* storage=previous_.data;
+        cmd.record_clone(historyStaged_,previous_,opt);
+        Require(previous_.data==storage,"history-only cache changed recorded buffer");
     }
 #endif
 };
