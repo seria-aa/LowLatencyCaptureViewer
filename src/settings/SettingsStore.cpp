@@ -184,6 +184,8 @@ LoadResult LoadFromIni(const std::wstring& path) {
         if(used(settings.shortcuts[i]))for(unsigned k=VK_F13;k<=VK_F24;++k)if(!used(shortcuts::Ctrl|k)){settings.shortcuts[i]=shortcuts::Ctrl|k;break;}
     }
 #endif
+    if (ReadString(path,L"Shortcuts",L"FpsOverlay",L"missing")==L"missing")
+        shortcuts::AddFpsOverlayDefault(settings.shortcuts);
     if (!shortcuts::Valid(settings.shortcuts)) settings.shortcuts=shortcuts::Defaults;
     settings.settingsLightTheme = _wcsicmp(
         ReadString(path, L"General", L"SettingsTheme", L"Dark").c_str(), L"Light") == 0;

@@ -654,12 +654,13 @@ void TestShortcutRouting() {
     const auto savedGeneration=g_outputConfigurationGeneration.load();
     const auto savedOverlay=g_overlayGeneration.load();
     const bool savedDiagnostic=g_osdVisible.load(), savedAudio=g_audioOsdVisible.load();
+    const bool savedFps=g_fpsOsdVisible.load();
     const int savedHover=g_audioOsdHoverTarget.load();
     g_settings.shortcuts=keys::Defaults;
     g_settings.shortcuts[static_cast<size_t>(keys::Action::Diagnostics)]=keys::Ctrl|'D';
     g_settings.shortcuts[static_cast<size_t>(keys::Action::AudioOsd)]='A';
     g_settings.audioOnly=false;
-    g_osdVisible=false; g_audioOsdVisible=false;
+    g_osdVisible=false; g_audioOsdVisible=false; g_fpsOsdVisible=false;
     HandleViewerShortcut(nullptr,VK_TAB,0,0);
     HandleViewerShortcut(nullptr,'D',0,0);
     Require(!g_osdVisible.load(),"old key and missing modifier do not toggle diagnostics");
@@ -667,16 +668,31 @@ void TestShortcutRouting() {
     Require(g_osdVisible.load(),"configured Ctrl+D toggles diagnostics");
     for (int i=0;i<10;++i) HandleViewerShortcut(nullptr,'D',LPARAM{1}<<30,keys::Ctrl);
     Require(g_osdVisible.load(),"held diagnostic key toggles only once");
+    HandleViewerShortcut(nullptr,'F',0,0);
+    Require(g_fpsOsdVisible.load()&&!g_osdVisible.load(),"F switches to FPS only");
+    HandleViewerShortcut(nullptr,'F',LPARAM{1}<<30,0);
+    Require(g_fpsOsdVisible.load(),"held F leaves the FPS badge on");
+    HandleViewerShortcut(nullptr,'D',0,keys::Ctrl);
+    Require(!g_fpsOsdVisible.load()&&g_osdVisible.load(),"diagnostics replace FPS overlay");
+    g_settings.shortcuts[static_cast<size_t>(keys::Action::FpsOverlay)]=keys::Shift|'C';
+    HandleViewerShortcut(nullptr,'F',0,0);
+    Require(!g_fpsOsdVisible.load(),"old FPS binding no longer toggles the badge");
+    HandleViewerShortcut(nullptr,'C',0,keys::Shift);
+    Require(g_fpsOsdVisible.load()&&!g_osdVisible.load(),"custom FPS key toggles only the FPS badge");
+    HandleViewerShortcut(nullptr,'C',0,keys::Shift);
+    Require(!g_fpsOsdVisible.load(),"custom FPS key hides the badge");
     HandleViewerShortcut(nullptr,'A',0,0);
     Require(g_audioOsdVisible.load(),"custom audio OSD key routes in video mode");
     HandleViewerShortcut(nullptr,'A',LPARAM{1}<<30,0);
     Require(g_audioOsdVisible.load(),"held audio OSD key does not toggle back");
     g_settings.audioOnly=true;
+    HandleViewerShortcut(nullptr,'C',0,keys::Shift);
+    Require(!g_fpsOsdVisible.load(),"FPS overlay stays off in audio-only playback");
     HandleViewerShortcut(nullptr,'A',0,0);
     Require(g_audioOsdVisible.load(),"audio-only retains its OSD mode gate");
     Require(g_outputConfigurationGeneration.load()==savedGeneration,
             "shortcut dispatch does not rebuild capture or renderer output");
-    g_settings=savedSettings; g_osdVisible=savedDiagnostic; g_audioOsdVisible=savedAudio;
+    g_settings=savedSettings; g_osdVisible=savedDiagnostic; g_audioOsdVisible=savedAudio; g_fpsOsdVisible=savedFps;
     g_overlayGeneration=savedOverlay; g_audioOsdHoverTarget=savedHover;
 }
 

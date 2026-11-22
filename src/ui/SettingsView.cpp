@@ -148,14 +148,12 @@ void BeginShortcutEdit(SettingsControls* state,size_t index) {
     state->editingShortcut=static_cast<int>(index);
     SetFocus(state->guideKeys[index]);
     SetSettingsText(state->guideKeys[index],state->english ? L"Press key" : L"키 입력");
-#ifdef LLCV_RIFE_OPTIONAL
-    if (index==static_cast<size_t>(shortcuts::Action::HudCorrection)) {
+    if (shortcuts::MayUnassign(static_cast<shortcuts::Action>(index))) {
         SetSettingsText(state->guideVideoHint,state->english
             ? L"Press a key to assign. Backspace clears it.\nClick the key button again to cancel."
             : L"새 키를 입력합니다. Backspace로 배정을 해제합니다.\n키 버튼을 다시 누르면 취소합니다.");
         return;
     }
-#endif
     SetSettingsText(state->guideVideoHint,state->english
         ? L"Press a key with Ctrl / Alt / Shift.\nClick the key button again to cancel."
         : L"키 입력 (Ctrl / Alt / Shift 조합 가능)\n취소하려면 키 버튼을 다시 누르세요.");
@@ -178,14 +176,12 @@ bool ProcessShortcutEdit(SettingsControls* state,const MSG& message,unsigned mod
     const UINT key=static_cast<UINT>(message.wParam);
     if (message.lParam & (LPARAM{1}<<30)) return true;
     if (shortcuts::Modifier(key)) return true;
-#ifdef LLCV_RIFE_OPTIONAL
-    if (index==static_cast<size_t>(shortcuts::Action::HudCorrection) && key==VK_BACK && !modifiers) {
+    if (shortcuts::MayUnassign(static_cast<shortcuts::Action>(index)) && key==VK_BACK && !modifiers) {
         state->shortcutBindings[index]=0;
         state->shortcutKeyToRelease=key;
         CancelShortcutEdit(state);
         return true;
     }
-#endif
     const unsigned binding=key|modifiers;
     if (!shortcuts::Valid(binding)) {
         SetSettingsText(state->guideVideoHint,state->english
@@ -735,8 +731,9 @@ void LayoutSettingsControls(SettingsControls* state, UINT dpi) {
     place(state->guideShortcutsTitle, 204, 120, 216, 20);
     place(state->shortcutResetButton, 432, 118, 108, 24);
     const auto shortcutLayout=MeasureShortcutLayout(state,dpi);
-    const int shortcutStep=state->guideKeys.size()>10 ? 32 : state->guideKeys.size()>9 ? 35 : 36;
-    constexpr int shortcutKeyHeight=29;
+    const bool extraShortcutRow=state->guideKeys.size()>10;
+    const int shortcutStep=extraShortcutRow ? 29 : state->guideKeys.size()>9 ? 35 : 36;
+    const int shortcutKeyHeight=extraShortcutRow ? 25 : 29;
     constexpr int shortcutTop=156;
     int shortcutY=shortcutTop;
     for (const auto i : viewer_help::kDisplayOrder) {

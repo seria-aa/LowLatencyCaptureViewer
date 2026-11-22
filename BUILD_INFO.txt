@@ -1,4 +1,11 @@
-LLCV v2.4.1 x64 (continued from the v0.14.2 rework)
+LLCV v2.4.2 x64 (continued from the v0.14.2 rework)
+
+v2.4.2 playback HUD and VFG Low input reuse
+-------------------------------------------
+- F shows playback FPS only; Tab still opens full diagnostics.
+- Automatic interpolation recovery no longer repeats the On notice.
+- VFG Low reuses the previous GPU input; VFG Medium and display pacing stay unchanged.
+- See tests/RIFE_VULKAN_RELEASE_GATE.md for verification.
 
 v2.4.1 frame interpolation stability
 ------------------------------------

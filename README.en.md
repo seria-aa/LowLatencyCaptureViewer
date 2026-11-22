@@ -5,7 +5,7 @@
 A low-latency Windows viewer for video and audio from HDMI capture devices.
 Use it to play console games without OBS, or listen in audio-only mode.
 
-**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.4.1.md) · [한국어](README.md)
+**[Download](https://github.com/seria-aa/LowLatencyCaptureViewer/releases/latest)** · [User guide](docs/USAGE.md) · [Release notes](docs/release-notes-v2.4.2.md) · [한국어](README.md)
 
 <br>
 
@@ -16,6 +16,10 @@ Use it to play console games without OBS, or listen in audio-only mode.
 <sub>2.1.6 UI examples. Device lists and supported formats vary by system. Click an image to view it at full resolution.</sub>
 
 <br>
+
+## What's new in 2.4.2
+
+Press `F` to show only playback FPS. `Tab` still opens full diagnostics. Interpolation no longer repeats the On notice when it resumes after falling back to original frames. VFG Low also avoids a redundant input copy.
 
 ## What's new in 2.4.1
 

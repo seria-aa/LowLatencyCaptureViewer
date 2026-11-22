@@ -16,7 +16,7 @@ enum class Action : size_t { Help, Settings, AudioOsd, PixelPerfect, Vsr, Fullsc
 #ifdef LLCV_RIFE_OPTIONAL
     HudCorrection, FrameInterpolation,
 #endif
-    Count };
+    FpsOverlay, Count };
 inline constexpr size_t Count = static_cast<size_t>(Action::Count);
 inline constexpr unsigned Ctrl = 0x100, Alt = 0x200, Shift = 0x400;
 using Bindings = std::array<unsigned, Count>;
@@ -28,6 +28,7 @@ inline constexpr Bindings Defaults{VK_F1,VK_F2,VK_F3,VK_F5,VK_F6,VK_F11,VK_F12,V
 #ifdef LLCV_RIFE_OPTIONAL
     ,0,VK_F7
 #endif
+    ,'F'
 };
 inline constexpr std::array<const wchar_t*, Count> Names{L"Help",L"Settings",L"AudioOsd",L"PixelPerfect",L"Vsr",L"Fullscreen",L"Screenshot",L"Diagnostics",L"Exit"
 #ifdef LLCV_RECORDING
@@ -37,6 +38,7 @@ inline constexpr std::array<const wchar_t*, Count> Names{L"Help",L"Settings",L"A
 #ifdef LLCV_RIFE_OPTIONAL
     ,L"HudCorrection",L"FrameInterpolation"
 #endif
+    ,L"FpsOverlay"
 };
 inline constexpr std::array<const wchar_t*, Count> DefaultLabels{L"F1",L"F2",L"F3",L"F5",L"F6",L"F11",L"F12",L"Tab",L"Esc"
 #ifdef LLCV_RECORDING
@@ -46,6 +48,7 @@ inline constexpr std::array<const wchar_t*, Count> DefaultLabels{L"F1",L"F2",L"F
 #ifdef LLCV_RIFE_OPTIONAL
     ,L"F4",L"F7"
 #endif
+    ,L"F"
 };
 #ifdef LLCV_RECORDING
 // Preserve legacy custom bindings when the new action has no saved key yet.
@@ -68,6 +71,20 @@ inline void AddMuteDefault(Bindings& bindings) {
     for (unsigned key=VK_F1;key<=VK_F24;++key)
         if (key!=VK_F4 && available(key)) { bindings[index]=key; return; }
 }
+inline void AddFpsOverlayDefault(Bindings& bindings) {
+    constexpr auto index=static_cast<size_t>(Action::FpsOverlay);
+    bindings[index]='F';
+    for(size_t i=0;i<Count;++i){
+        if(i!=index&&bindings[i]=='F'){bindings[index]=0;return;}
+    }
+}
+constexpr bool MayUnassign(Action action) {
+    return action==Action::FpsOverlay
+#ifdef LLCV_RIFE_OPTIONAL
+        ||action==Action::HudCorrection
+#endif
+        ;
+}
 inline bool Modifier(UINT key) {
     return key==VK_CONTROL || key==VK_LCONTROL || key==VK_RCONTROL || key==VK_MENU ||
         key==VK_LMENU || key==VK_RMENU || key==VK_SHIFT || key==VK_LSHIFT || key==VK_RSHIFT;
@@ -87,9 +104,7 @@ inline bool Valid(unsigned binding) {
 }
 inline bool Valid(const Bindings& bindings) {
     for (size_t i=0;i<Count;++i) {
-#ifdef LLCV_RIFE_OPTIONAL
-        if (i==static_cast<size_t>(Action::HudCorrection) && bindings[i]==0) continue;
-#endif
+        if (bindings[i]==0 && MayUnassign(static_cast<Action>(i))) continue;
         if (!Valid(bindings[i])) return false;
         for (size_t j=0;j<i;++j) if (bindings[i]==bindings[j]) return false;
     }

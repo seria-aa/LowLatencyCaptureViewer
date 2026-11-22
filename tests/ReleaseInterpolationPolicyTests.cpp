@@ -1,5 +1,6 @@
 #include "video/RifeHalfTest.h"
 #include "video/VfgPreferences.h"
+#include "video/VfgInputCache.h"
 #include "video/InterpolationMethodPolicy.h"
 #include "video/RifeHistoryPolicy.h"
 #include "video/PlaybackGpu.h"
@@ -27,6 +28,48 @@ static_assert(SharedFenceProgress(2,2)==SharedFenceState::Ready);
 static_assert(SharedFenceProgress(UINT64_MAX,2)==SharedFenceState::DeviceRemoved);
 static_assert(!VulkanStartupExpired(1,kVulkanStartupLimitUs));
 static_assert(VulkanStartupExpired(1,kVulkanStartupLimitUs+1));
+constexpr bool CheckVfgInputReuse() {
+    VfgInputCache cache;
+    if(!cache.NeedsCopy(0,1)||!cache.NeedsCopy(1,2))return false;
+    cache.MarkCopied(0,1);
+    cache.MarkCopied(1,2);
+    if(cache.NeedsCopy(1,2)||!cache.NeedsCopy(0,3))return false;
+    cache.MarkCopied(0,3);
+    // Slot 1 was overwritten by a seed frame but was not submitted to CUDA.
+    if(!cache.NeedsCopy(1,4)||!cache.NeedsCopy(0,5))return false;
+    return VfgInputCache{}.NeedsCopy(0,3)&&cache.NeedsCopy(0,0);
+}
+static_assert(CheckVfgInputReuse());
+static_assert(VfgInputReuseEnabled(false)&&!VfgInputReuseEnabled(true));
+constexpr bool CheckInterpolationNotices(Scale scale) {
+    NotificationTracker tracker;
+    auto frame=[&](Status state){return tracker.Observe(true,scale,state,1);};
+    if(frame(Status::Pending)!=Status::Pending||frame(Status::Pending)||
+       frame(Status::Active)!=Status::Active||frame(Status::Active))return false;
+    // A rebuild can go through Pending again without a new interpolation request.
+    if(frame(Status::Pending)||frame(Status::Active))return false;
+    for(int streak=0;streak<2;++streak){
+        if(frame(Status::Late)||frame(Status::Late)||frame(Status::Late)!=Status::Late||
+           frame(Status::Late))return false;
+        for(int i=0;i<4;++i)if(frame(Status::Active))return false;
+    }
+    if(tracker.Observe(false,scale,Status::Off,2)!=Status::Off||
+       tracker.Observe(false,scale,Status::Off,2))return false;
+    if(tracker.Observe(true,scale,Status::Active,3)!=Status::Active)return false;
+    // F7 can go off and on again before the next captured frame.
+    return tracker.Observe(true,scale,Status::Active,5)==Status::Active&&
+           !tracker.Observe(true,scale,Status::Active,5);
+}
+constexpr bool CheckInterpolationStartupRecovery(Scale scale,Status problem) {
+    NotificationTracker tracker;
+    auto frame=[&](Status state){return tracker.Observe(true,scale,state,1);};
+    if(frame(Status::Pending)!=Status::Pending||frame(problem)!=problem||frame(problem))return false;
+    for(int i=0;i<4;++i)if(frame(Status::Active))return false;
+    return frame(problem)==problem;
+}
+static_assert(CheckInterpolationNotices(Scale::Fast)&&CheckInterpolationNotices(Scale::VfgMedium));
+static_assert(CheckInterpolationStartupRecovery(Scale::Fast,Status::Failed)&&
+              CheckInterpolationStartupRecovery(Scale::VfgMedium,Status::Unsupported));
 using Method = llcv::settings::InterpolationMethod;
 using Provider = llcv::interpolation::Provider;
 static_assert(llcv::interpolation::ChooseProvider(Method::NvidiaVfg,true,true)==Provider::NvidiaVfg);

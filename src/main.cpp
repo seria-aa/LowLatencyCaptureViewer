@@ -78,6 +78,7 @@
 #include "ui/ViewerHelpWindow.h"
 #include "ui/AudioOsdLayout.h"
 #include "ui/OverlayStyle.h"
+#include "ui/FpsBadge.h"
 #include "ui/ViewerOverlayGeometry.h"
 #include "ui/AudioOnlyView.h"
 #include "ui/SpeakerIcon.h"
@@ -193,11 +194,11 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kBitsPerSample = 16;
 #if defined(LLCV_AUDIO_INPUT_RECOVERY_DIAGNOSTIC)
-constexpr wchar_t kAppVersionLabel[] = L"v2.4.1-audio-recovery-diagnostic";
+constexpr wchar_t kAppVersionLabel[] = L"v2.4.2-audio-recovery-diagnostic";
 #elif defined(LLCV_VSR_EXPERIMENT)
-constexpr wchar_t kAppVersionLabel[] = L"v2.4.1-vsr-test";
+constexpr wchar_t kAppVersionLabel[] = L"v2.4.2-vsr-test";
 #else
-constexpr wchar_t kAppVersionLabel[] = L"v2.4.1";
+constexpr wchar_t kAppVersionLabel[] = L"v2.4.2";
 #endif
 
 constexpr int kRecommendedCaptureBufferMs = 20;
@@ -554,6 +555,7 @@ static std::atomic<double> g_osdInputFps{0.0};
 static std::atomic<double> g_osdPresentFps{0.0};
 static std::atomic<bool> g_captureFrameRateOverdelivery{false};
 static std::atomic<bool> g_osdVisible{false};
+static std::atomic<bool> g_fpsOsdVisible{false};
 static std::atomic<bool> g_audioOsdVisible{false};
 static std::atomic<int> g_audioOsdHoverTarget{0}; // 0 = none, 1 = left, 2 = right
 static std::atomic<int> g_audioPeakLeft{0};
@@ -2605,6 +2607,7 @@ struct DirectD3D11Renderer {
     ID3D11Buffer* hdrOverlayConstants = nullptr;
     IDWriteFactory* dwriteFactory = nullptr;
     llcv::overlay_ui::Fonts overlayFonts;
+    llcv::overlay_ui::FpsBadge fpsBadge;
 #ifdef LLCV_RECORDING
     llcv::recording::GpuIndicator recordingIndicator;
 #endif
@@ -2908,6 +2911,7 @@ struct DirectD3D11Renderer {
         SafeRelease(audioValueFormat);
         SafeRelease(audioSmallFormat);
         SafeRelease(osdTextFormat);
+        fpsBadge.Reset();
 #ifdef LLCV_RECORDING
         recordingIndicator.Reset();
 #endif
@@ -4422,6 +4426,10 @@ struct DirectD3D11Renderer {
 #endif
         const bool osdVisible =
             g_osdVisible.load(std::memory_order_acquire);
+        auto* fpsView = !osdVisible && g_fpsOsdVisible.load(std::memory_order_acquire)
+            ? fpsBadge.Refresh(device, d2dFactory, dwriteFactory, overlayFonts,
+                hdrOutput, IsEnglishUi(), g_osdPresentFps.load(std::memory_order_relaxed))
+            : nullptr;
         const bool volumeVisible = GetTickCount64() <
             g_volumeHudUntilMs.load(std::memory_order_acquire);
         const bool audioVisible =
@@ -4441,7 +4449,7 @@ struct DirectD3D11Renderer {
                 hr = S_OK;
             }
         }
-        if (!osdVisible && !volumeVisible && !audioVisible && !recordingVisible && !muteVisible) return S_OK;
+        if (!osdVisible && !fpsView && !volumeVisible && !audioVisible && !recordingVisible && !muteVisible) return S_OK;
         hr = refreshOverlayLayouts(osdVisible, volumeVisible, audioVisible);
         if (FAILED(hr)) return hr;
 
@@ -4482,9 +4490,12 @@ struct DirectD3D11Renderer {
         using namespace llcv::overlay_ui;
         const SIZE outputSize{static_cast<LONG>(outputWidth), static_cast<LONG>(outputHeight)};
         const RECT osdRect = osdVisible ? FitPanel(outputSize,
-            {static_cast<LONG>(kOsdOverlayWidth), static_cast<LONG>(kOsdOverlayHeight)}) : RECT{};
+            {static_cast<LONG>(kOsdOverlayWidth), static_cast<LONG>(kOsdOverlayHeight)})
+            : fpsView ? FitPanel(outputSize,{fpsBadge.Width,fpsBadge.Height}) : RECT{};
         if (osdVisible) {
             draw(osdOverlayShaderView, osdRect.left, osdRect.top, osdRect.right, osdRect.bottom);
+        } else if (fpsView) {
+            draw(fpsView, osdRect.left, osdRect.top, osdRect.right, osdRect.bottom);
         }
 
         if (volumeVisible) {
@@ -4502,7 +4513,7 @@ struct DirectD3D11Renderer {
                 g_settings.volumeHudPosition ==
                     VolumeHudPosition::BottomRight;
             auto hud = FitPanel(outputSize, {hudWidth, hudHeight}, hudMargin, right, bottom);
-            if (!bottom && !right && osdVisible) {
+            if (!bottom && !right && (osdVisible || fpsView)) {
                 const auto below = At(hud, hud.left, osdRect.bottom + 12);
                 const auto beside = At(hud, osdRect.right + 12, hud.top);
                 if (Fits(below, outputSize)) hud = below;
@@ -4708,7 +4719,15 @@ struct DirectD3D11Renderer {
                 rifeHalf.Invalidate();status=Status::Unsupported;
             }else {
                 if(arrivalUs<=0)arrivalUs=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-                if(auto* view=rifeHalf.Submit(device,context,videoDevice,videoContext,processor,enumerator,nv12Textures[activeUploadSurface],captureWidth,captureHeight,captureFps,arrivalUs)) {
+#ifdef LLCV_VFG_PACING_DIAGNOSTIC
+                const bool measureVfg=!vfgPacingTraceFile.empty()&&IsVfg(scale);
+                if(measureVfg)rifeHalf.BeginVfgPacingSample(arrivalUs,captureWidth,captureHeight,captureFps);
+#endif
+                auto* view=rifeHalf.Submit(device,context,videoDevice,videoContext,processor,enumerator,nv12Textures[activeUploadSurface],captureWidth,captureHeight,captureFps,arrivalUs);
+#ifdef LLCV_VFG_PACING_DIAGNOSTIC
+                if(measureVfg)rifeHalf.RecordVfgPacingDecision(arrivalUs);
+#endif
+                if(view) {
                     const auto result=presentUploaded(arrivalUs,view);
                     if(result==S_OK){
                         ++generated;
@@ -4743,7 +4762,8 @@ struct DirectD3D11Renderer {
                     if(FAILED(removed))return removed;
                 }
             }
-            if(const auto notice=rifeNotifications.Observe(requested.load(std::memory_order_acquire),selectedScale.load(),status.load(std::memory_order_acquire))){
+            if(const auto notice=rifeNotifications.Observe(requested.load(std::memory_order_acquire),
+                selectedScale.load(),status.load(std::memory_order_acquire),intentChanges.load(std::memory_order_acquire))){
                 const auto current=*notice;
                 ShowTransientHud(current==Status::Off?TransientHudContent::RifeOff:
                     current==Status::Active?TransientHudContent::RifeOn:
@@ -4845,17 +4865,32 @@ struct DirectD3D11Renderer {
         LARGE_INTEGER spatialPresentTime{};QueryPerformanceCounter(&spatialPresentTime);
         spatialPresentQpc=spatialPresentTime.QuadPart;
 #endif
-#ifdef LLCV_RIFE_VULKAN
+#if defined(LLCV_RIFE_VULKAN) || defined(LLCV_VFG_PACING_DIAGNOSTIC)
         const auto traceClock=[] {
             return std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
         };
-        const int64_t tracePresentBegin=llcv::rife_test::vulkanTraceFile.empty()?0:traceClock();
+        const bool measurePresent=false
+#ifdef LLCV_RIFE_VULKAN
+            ||!llcv::rife_test::vulkanTraceFile.empty()
+#endif
+#ifdef LLCV_VFG_PACING_DIAGNOSTIC
+            ||!llcv::rife_test::vfgPacingTraceFile.empty()
+#endif
+            ;
+        const int64_t tracePresentBegin=measurePresent?traceClock():0;
 #endif
         hr = swapChain->Present(syncInterval, flags);
+#if defined(LLCV_RIFE_VULKAN) || defined(LLCV_VFG_PACING_DIAGNOSTIC)
+        const int64_t tracePresentEnd=hr==S_OK&&tracePresentBegin?traceClock():0;
+#endif
 #ifdef LLCV_RIFE_VULKAN
         if(hr==S_OK&&(tracePresentBegin||generatedInput))
-            rifeHalf.RecordPresent(arrivalUs,generatedInput!=nullptr,tracePresentBegin,tracePresentBegin?traceClock():0);
+            rifeHalf.RecordPresent(arrivalUs,generatedInput!=nullptr,tracePresentBegin,tracePresentEnd);
+#endif
+#ifdef LLCV_VFG_PACING_DIAGNOSTIC
+        if(tracePresentEnd&&!llcv::rife_test::vfgPacingTraceFile.empty())
+            rifeHalf.RecordVfgPacingPresent(arrivalUs,generatedInput!=nullptr,tracePresentBegin,tracePresentEnd);
 #endif
         presentationReadiness.Presented();
 #ifdef LLCV_RIFE_TEST
@@ -10580,8 +10615,17 @@ static void UpdateOsdRates() {
 
 static void ToggleRuntimeOsd() {
     const bool visible = !g_osdVisible.load(std::memory_order_acquire);
+    if(visible)g_fpsOsdVisible.store(false,std::memory_order_release);
     g_osdVisible.store(visible, std::memory_order_release);
     g_overlayGeneration.fetch_add(1, std::memory_order_relaxed);
+}
+
+static void ToggleFpsOsd() {
+    if(g_settings.audioOnly)return;
+    const bool visible=!g_fpsOsdVisible.load(std::memory_order_acquire);
+    if(visible)g_osdVisible.store(false,std::memory_order_release);
+    g_fpsOsdVisible.store(visible,std::memory_order_release);
+    g_overlayGeneration.fetch_add(1,std::memory_order_relaxed);
 }
 
 static void ToggleAudioOsd() {
@@ -10938,6 +10982,7 @@ static bool HandleViewerShortcut(HWND hwnd, WPARAM key, LPARAM flags, unsigned m
 #endif
     case keys::Action::Fullscreen: ToggleFullscreen(hwnd); break;
     case keys::Action::Diagnostics: ToggleRuntimeOsd(); break;
+    case keys::Action::FpsOverlay: ToggleFpsOsd(); break;
     case keys::Action::Exit: HandleViewerExit(hwnd); break;
 #ifdef LLCV_RECORDING
     case keys::Action::Recording:
@@ -12168,6 +12213,26 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR commandLine, int show) {
 #ifdef LLCV_INTERPOLATION_RELEASE
     {
         using namespace llcv::rife_test;
+#ifdef LLCV_VFG_PACING_DIAGNOSTIC
+        const auto vfgPacing=CommandLineOptionValue(L"--smoke-test-vfg-pacing");
+        const auto vfgTrace=CommandLineOptionValue(L"--smoke-test-vfg-pacing-trace");
+        const auto vfgInput=CommandLineOptionValue(L"--smoke-test-vfg-input");
+        if(!vfgPacing.empty()||!vfgTrace.empty()||!vfgInput.empty()){
+            if(!smokeTest||!smokeVideoOverride||audioOnlySmokeTest||exclusiveProbe||
+               CommandLineOptionValue(L"--smoke-test-frame-interpolation")!=L"vfg"||
+               (vfgPacing!=L"legacy"&&vfgPacing!=L"capture")||vfgTrace.empty())return 2;
+            if(!vfgInput.empty()){
+                // Isolate the copy comparison from output pacing changes.
+                if(vfgPacing!=L"legacy"||(vfgInput!=L"fixed"&&vfgInput!=L"reuse"))return 2;
+                vfgInputTrial=vfgInput==L"reuse"?VfgInputTrial::Reuse:VfgInputTrial::Fixed;
+            }
+            vfgTryCapturePacing=vfgPacing==L"capture";
+            vfgPacingTraceFile=vfgTrace;
+            g_settings.presentationMode=PresentationMode::AllowTearing;
+            SelectScale(Scale::VfgMedium);
+            SetQualityComparison(false);
+        }
+#endif
         if (!smokeTest && !exclusiveProbe) {
 #ifdef LLCV_RIFE_VULKAN_BUNDLED
             vulkanModelDirectory = AppDirectory() + L"\\rife-vulkan";

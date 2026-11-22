@@ -1,7 +1,7 @@
 ﻿param(
-    [string]$Version = "2.4.1",
-    [string]$BuildDir = "..\build-v2410-release",
-    [string]$OutputDir = "outputs\v2.4.1"
+    [string]$Version = "2.4.2",
+    [string]$BuildDir = "..\build-v2420-release",
+    [string]$OutputDir = "outputs\v2.4.2"
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +14,9 @@ $exe = Join-Path $build "LowLatencyCaptureViewer.exe"
 
 if (Test-Path -LiteralPath (Join-Path $build 'llcv-audio-recovery-diagnostic.txt')) {
     throw "Audio-input recovery diagnostic builds cannot be packaged as a regular release."
+}
+if (Test-Path -LiteralPath (Join-Path $build 'llcv-vfg-pacing-diagnostic.txt')) {
+    throw "VFG timing diagnostic builds cannot be packaged as a regular release."
 }
 if ((Get-ChildItem -LiteralPath $build -Filter 'swresample-*.dll' -File) -or
     (Test-Path -LiteralPath (Join-Path $build 'ffmpeg-licenses/dolby-ffmpeg-NOTICE.txt'))) {
