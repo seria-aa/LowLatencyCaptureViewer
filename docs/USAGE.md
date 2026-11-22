@@ -233,10 +233,11 @@ Playback mute was added in 2.1.3. If an existing profile already assigns M to an
    button again to cancel key entry.
 3. Choose **Start** to apply the changes. **Cancel** discards unapplied changes.
 
-All eleven shortcuts can be changed, including **Leave fullscreen / Exit** (Esc).
-None can be left empty. Duplicate bindings, modifier-only keys, Windows-key
+Shortcuts can be changed, including **Leave fullscreen / Exit** (Esc).
+If another action already uses `F`, its binding is kept. Use Backspace to clear
+the FPS shortcut when editing it. Duplicate bindings, modifier-only keys, Windows-key
 combinations, and some reserved combinations such as Alt+F4 cannot be assigned.
-**Reset defaults** restores all eleven; choose **Start** to apply the reset.
+**Reset defaults** restores all bindings; choose **Start** to apply the reset.
 
 Help, settings, and OSD labels show the assigned keys, and longer combinations
 expand the key column. Shortcuts act within LLCV, not globally in other apps.
@@ -257,6 +258,7 @@ with or without Ctrl/Alt/Shift. All valid assigned keys continue to work in the 
 | --- | --- |
 | `F2` | Open the default settings page (finish-recording confirmation when recording) |
 | `Tab` | Show/hide live diagnostics |
+| `F` | Show/hide playback FPS only, including interpolated frames submitted for display (video mode) |
 | `F3` | Show/hide the audio meter over video (audio-only has its own view) |
 | `F5` | Restore source-resolution 1:1 size (video mode) |
 | `F6` | Toggle selected upscaling (video mode) |

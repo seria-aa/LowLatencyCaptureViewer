@@ -88,15 +88,20 @@ class NotificationTracker {
     bool enabled_=false,ready_=false,pending_=false;
     unsigned misses_=0, recovered_=0;
     Scale scale_=Scale::Half;
+    uint64_t intent_=0;
     std::optional<Status> problem_;
 public:
-    std::optional<Status> Observe(bool enabled,Scale scale,Status frame){
+    constexpr std::optional<Status> Observe(bool enabled,Scale scale,Status frame,uint64_t intent){
         if(!enabled){const bool was=enabled_;*this={};return was?std::optional{Status::Off}:std::nullopt;}
-        if(!enabled_||scale_!=scale){*this={};enabled_=true;scale_=scale;}
+        if(!enabled_||scale_!=scale||intent_!=intent){*this={};enabled_=true;scale_=scale;intent_=intent;}
         if(frame==Status::Active){
             misses_=0;
-            if(problem_ && ++recovered_<3) return std::nullopt;
-            if(!ready_||problem_){problem_.reset();ready_=true;return Status::Active;}
+            if(problem_){
+                // Recovery updates the live Tab status, but isn't a new request.
+                if(++recovered_>=3){problem_.reset();recovered_=0;ready_=true;}
+                return std::nullopt;
+            }
+            if(!ready_){ready_=true;return Status::Active;}
             return std::nullopt;
         }
         recovered_=0;
@@ -250,6 +255,13 @@ inline bool VulkanSelected(){return !vulkanModelDirectory.empty()&&selectedScale
 #else
 constexpr bool VulkanSelected(){return false;}
 #endif
+#ifdef LLCV_VFG_PACING_DIAGNOSTIC
+// Explicit smoke-run diagnostics. In normal use the path remains empty.
+inline std::wstring vfgPacingTraceFile;
+inline bool vfgTryCapturePacing=false;
+enum class VfgInputTrial { Default, Fixed, Reuse };
+inline VfgInputTrial vfgInputTrial=VfgInputTrial::Default;
+#endif
 class Half {
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -268,6 +280,10 @@ class Half {
 #ifdef LLCV_INTERPOLATION_RELEASE
     bool failedVfgWithoutVerifiedRuntime_=false;
 #endif
+#ifdef LLCV_VFG_PACING_DIAGNOSTIC
+    struct VfgPacingTrace;
+    std::unique_ptr<VfgPacingTrace> vfgPacingTrace_;
+#endif
 public:
     Half();~Half();
     void Reset();
@@ -279,6 +295,11 @@ public:
         ID3D11VideoProcessorEnumerator*,ID3D11Texture2D*,int width,int height,int fps,int64_t arrivalUs);
     void ScheduleOriginalSlot(int fps,int64_t arrival);
     void WaitOriginalSlot(int fps);
+#ifdef LLCV_VFG_PACING_DIAGNOSTIC
+    void BeginVfgPacingSample(int64_t arrival,int width,int height,int fps) noexcept;
+    void RecordVfgPacingDecision(int64_t arrival);
+    void RecordVfgPacingPresent(int64_t arrival,bool interpolated,int64_t begin,int64_t end);
+#endif
 #ifdef LLCV_RIFE_VULKAN
     void RecordPresent(int64_t arrival,bool interpolated,int64_t begin,int64_t end);
 #endif

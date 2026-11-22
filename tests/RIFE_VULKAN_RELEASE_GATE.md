@@ -50,6 +50,38 @@
   until completion or confirmed device loss. The UI limit is not a process
   exit timeout for an unresponsive driver.
 
+## v2.4.2 preparation
+
+- Release branch: `release/v2.4.2`; build directory: `build-v2420-release`.
+  The release does not compile the VFG pacing experiment. Configure
+  `LLCV_VFG_PACING_DIAGNOSTIC=ON` in a separate build directory to run
+  `--smoke-test-vfg-pacing legacy|capture --smoke-test-vfg-pacing-trace <csv>`.
+  For the input-copy comparison, use `--smoke-test-vfg-input fixed|reuse`
+  with legacy pacing and the ordinary isolated VFG smoke-video arguments.
+- F toggles only the playback FPS badge; Tab still opens full diagnostics.
+  The settings migration keeps an existing F binding. Frame interpolation
+  notices still report initial enablement and problems, but not automatic recovery.
+- VFG Low reuses one input buffer on consecutive frames. The synthetic GPU
+  audit matched generated pixels at FHD, QHD and UHD, including a reseed.
+  QHD60 VFG Medium on GC573 + RTX 3080 had 11 late decisions in 9,897
+  fixed-copy pairs and 14 in 9,898 reuse pairs across three runs per mode.
+  Bursts varied by run, so Medium stays fixed-copy. The actual monitor
+  scan-out time was not measured. The separate pacing trial did not change
+  the default timing policy.
+- The fresh Release x64 build registered all 204 tests, including the
+  independent recording file checks and crash recovery cases. The initial
+  run passed 202; two settings fixtures found insufficient bottom margin
+  after adding the FPS shortcut. After correcting the layout, all 38 tests
+  linked against the settings view passed on the final build. The two runs
+  cover all 204 tests.
+- The independently extracted ZIP passed the release and documentation
+  checks. The Setup EXE reports version 2.4.2.0; all 110 payload paths and
+  SHA-256 hashes match the ZIP. Both packaging paths reject a VFG timing
+  diagnostic build.
+- The FPS badge passed automated drawing and shortcut checks. The final
+  viewer was not run on the GC573 because another capture app was active;
+  clean installation and upgrades were not executed.
+
 ## v2.4.1 preparation
 
 - Release branch: `release/v2.4.1`. Use a fresh Release x64 build,

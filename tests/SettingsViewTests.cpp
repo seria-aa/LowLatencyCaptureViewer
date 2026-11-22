@@ -230,7 +230,7 @@ static constexpr Geometry kGeometry[] = {
     {&SettingsControls::fullscreenCursorCombo, "fullscreenCursorCombo", 184, 260, 260, 376, 30},
     {&SettingsControls::fullscreenPositionLabel, "fullscreenPositionLabel", 600, 232, 232, 376, 20},
     {&SettingsControls::fullscreenPositionCombo, "fullscreenPositionCombo", 600, 260, 260, 376, 30},
-    {&SettingsControls::guideVideoHint, "guideVideoHint", 204, 516, 516, 336, 36},
+    {&SettingsControls::guideVideoHint, "guideVideoHint", 204, 487, 487, 336, 36},
     {&SettingsControls::guideDiagnosticsText, "guideDiagnosticsText", 600, 148, 148, 376, 32},
     {&SettingsControls::saveLogCheck, "saveLogCheck", 600, 196, 196, 376, 32},
     {&SettingsControls::guideReportButton, "guideReportButton", 600, 240, 240, 185, 32},
@@ -729,7 +729,7 @@ static void CheckAllCaptionsFit(SettingsControls& state, UINT dpi, bool english)
         const auto row=std::find(llcv::viewer_help::kDisplayOrder.begin(),llcv::viewer_help::kDisplayOrder.end(),i)-llcv::viewer_help::kDisplayOrder.begin();
         Check(action.left == SettingsPixels(296, dpi) &&
               action.top == SettingsPixels(153 + static_cast<int>(row) *
-                  (state.guideKeys.size()>10 ? 32 : state.guideKeys.size()>9 ? 35 : 36), dpi),
+                  (state.guideKeys.size()>10 ? 29 : state.guideKeys.size()>9 ? 35 : 36), dpi),
               "shortcut rows maintain aligned columns and generous rhythm");
         Check(key.top>=action.top && key.bottom<=action.bottom+1 && key.right<action.left,
               "editable key and wrapping action occupy separate aligned columns");

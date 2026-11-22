@@ -905,6 +905,19 @@ int main(int argc, char** argv) {
         for (size_t i=1;i<static_cast<size_t>(llcv::shortcuts::Action::Mute);++i)
             Check(migrated[i]==llcv::shortcuts::Defaults[i],"mute migration preserves every other action");
         CheckSaved(path,settings,"restore defaults after mute migration");
+        constexpr auto fps=static_cast<size_t>(llcv::shortcuts::Action::FpsOverlay);
+        WritePrivateProfileStringW(L"Shortcuts",L"FpsOverlay",nullptr,path.c_str());
+        Check(llcv::settings::LoadFromIni(path).settings.shortcuts[fps]=='F',
+              "FPS overlay uses F when available in a legacy profile");
+        WritePrivateProfileStringW(L"Shortcuts",L"Help",L"70",path.c_str());
+        const auto occupied=llcv::settings::LoadFromIni(path).settings;
+        Check(occupied.shortcuts[0]=='F'&&occupied.shortcuts[fps]==0&&
+              llcv::shortcuts::Valid(occupied.shortcuts),
+              "FPS migration does not replace an existing F binding");
+        if(CheckSaved(path,occupied,"unassigned FPS key saved"))
+            Check(llcv::settings::LoadFromIni(path).settings.shortcuts==occupied.shortcuts,
+                  "unassigned FPS key persists");
+        CheckSaved(path,settings,"restore defaults after FPS migration");
     }
     {
         using namespace llcv::settings;

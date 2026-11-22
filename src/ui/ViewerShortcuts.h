@@ -37,6 +37,7 @@ inline constexpr std::array<Shortcut,shortcuts::Count> kShortcuts{{
     ,{L"F4",L"HUD 보정 켜기/끄기",L"Toggle HUD correction",true}
     ,{L"F7",L"프레임 보간 켜기/끄기",L"Toggle frame interpolation",true}
 #endif
+    ,{L"F",L"FPS만 표시/숨기기",L"Show / hide FPS only",true}
 }};
 // Display order belongs to the UI; action indices also identify saved bindings.
 inline constexpr auto kDisplayOrder = [] {

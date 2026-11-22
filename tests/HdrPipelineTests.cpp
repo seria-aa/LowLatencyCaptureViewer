@@ -633,6 +633,21 @@ static void TestOverlayRefreshIsolation(DirectD3D11Renderer& r) {
     Require(!r.osdTextLayout && !r.volumeTextLayout && !r.cachedOverlayMask,
         "hidden panels allocate no layouts");
 
+    const auto savedFps=g_fpsOsdVisible.load();
+    const auto savedPresentFps=g_osdPresentFps.load();
+    Require(llcv::overlay_ui::FpsBadge::DisplayRate(119.88)==120 &&
+            llcv::overlay_ui::FpsBadge::DisplayRate(0.0)==0,
+            "FPS badge uses rounded presentation rate, with a zero-sample placeholder");
+    const auto renderedBefore=g_overlayRenderedFrames.load();
+    g_osdPresentFps=119.88;
+    g_fpsOsdVisible=true;
+    Check(r.drawOverlayQuads(), "FPS-only overlay draw");
+    Require(g_overlayRenderedFrames.load()==renderedBefore+1 &&
+            !r.osdTextLayout&&!r.volumeTextLayout&&!r.cachedOverlayMask,
+            "FPS badge draws without allocating diagnostic or notification layouts");
+    g_fpsOsdVisible=savedFps;
+    g_osdPresentFps=savedPresentFps;
+
     g_audioOsdVisible = true;
     Check(r.drawOverlayQuads(), "audio-only visible refresh");
     Require(!r.osdTextLayout && !r.volumeTextLayout && r.cachedOverlayMask == 4,

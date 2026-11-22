@@ -16,7 +16,7 @@ static std::wstring Text(HWND h) {
 }
 int main() {
     constexpr size_t recording=static_cast<size_t>(keys::Action::Recording);
-    static_assert(keys::Count==11 && recording==9);
+    static_assert(keys::Count==12 && recording==9);
     Check(keys::Defaults[recording]==VK_F9 && keys::Valid(keys::Defaults),"F9 default");
     wchar_t temp[MAX_PATH]{},file[MAX_PATH]{};
     Check(GetTempPathW(MAX_PATH,temp)!=0 && GetTempFileNameW(temp,L"lks",0,file)!=0,"temporary profile");
@@ -88,16 +88,15 @@ int main() {
                 LayoutSettingsControls(&s,dpi);
                 UpdateAdvancedControlVisibility(&s,false,llcv::settings::VideoPixelFormat::Nv12);
                 if(!SettingsCompactLayout(&s) && binding=='M') {
-                    // The guide rows moved up 12 DIPs to preserve the footer
-                    // margin. Keep the exact row spacing and reset checks.
+                    // The extra FPS row still has to leave a gap above the footer.
                     for(size_t i=0;i<keys::Count;++i) {
                         RECT key{};GetWindowRect(s.guideKeys[i],&key);
                         MapWindowPoints(nullptr,owner,reinterpret_cast<POINT*>(&key),2);
                         const auto row=std::find(llcv::viewer_help::kDisplayOrder.begin(),llcv::viewer_help::kDisplayOrder.end(),i)-llcv::viewer_help::kDisplayOrder.begin();
                         Check(key.left==SettingsPixels(204,dpi) &&
-                              key.top==SettingsPixels(156+static_cast<int>(row)*32,dpi) &&
+                              key.top==SettingsPixels(156+static_cast<int>(row)*29,dpi) &&
                               key.right-key.left==SettingsPixels(80,dpi) &&
-                              key.bottom-key.top==SettingsPixels(29,dpi),
+                              key.bottom-key.top==SettingsPixels(25,dpi),
                               "current guide geometry returns after long bindings");
                     }
                 }

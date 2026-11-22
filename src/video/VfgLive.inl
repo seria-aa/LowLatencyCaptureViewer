@@ -6,6 +6,8 @@ struct VfgLive {
     HMODULE libs[4]{};
     void* effect=nullptr;
     void* image[3]{}; void* rgba[3]{};
+    VfgInputCache inputCache;
+    bool reuseInputs=false;
     using FnSet=int(__cdecl*)(void*,const char*,unsigned);
     using FnImage=int(__cdecl*)(void*,const char*,void*);
     FnSet set=nullptr; FnImage bind=nullptr;
@@ -15,7 +17,7 @@ struct VfgLive {
     unsigned w=0,h=0;
     static void Verify(int code,const char* where){if(code)throw std::runtime_error(std::string(where)+": "+std::to_string(code));}
     void Init(const std::filesystem::path& dir,int adapter,unsigned width,unsigned height,bool medium,cudaStream_t stream){
-        w=width;h=height;
+        w=width;h=height;reuseInputs=VfgInputReuseEnabled(medium);
         cudaDeviceProp prop{};Cu(cudaGetDeviceProperties(&prop,adapter),"VFG device");
 #ifdef LLCV_INTERPOLATION_RELEASE
         if(!ConfiguredVfgArchitecture(prop.major,prop.minor)){
@@ -48,9 +50,18 @@ struct VfgLive {
         Verify(Bind<int(__cdecl*)(void*)>(core,"NvVFX_Load")(effect),"VFG load");
         Verify(bind(effect,"DstImage0",image[2]),"VFG output");Verify(set(effect,"FrameMultiplier",2),"VFG multiplier");
     }
-    void Process(cudaArray_t prev,cudaArray_t curr,cudaArray_t out,cudaStream_t stream){
-        for(int i=0;i<2;++i)Cu(cudaMemcpy2DFromArrayAsync(rgba[i],w*4,i?curr:prev,0,0,w*4,h,cudaMemcpyDeviceToDevice,stream),"VFG input transfer");
-        Verify(bind(effect,"SrcImage0",image[0]),"VFG previous");Verify(bind(effect,"SrcImage1",image[1]),"VFG current");
+    void Process(const std::array<cudaArray_t,2>& input,const std::array<uint64_t,2>& generations,
+                 unsigned current,cudaArray_t out,cudaStream_t stream){
+        // Both linear buffers follow their shared texture slots. The render
+        // fence retires the preceding job before either buffer can be reused.
+        for(unsigned i=0;i<2;++i){
+            const unsigned source=reuseInputs?i:(i?current:1-current);
+            if(reuseInputs&&!inputCache.NeedsCopy(source,generations[source]))continue;
+            Cu(cudaMemcpy2DFromArrayAsync(rgba[i],w*4,input[source],0,0,w*4,h,cudaMemcpyDeviceToDevice,stream),"VFG input transfer");
+            if(reuseInputs)inputCache.MarkCopied(source,generations[source]);
+        }
+        Verify(bind(effect,"SrcImage0",image[reuseInputs?1-current:0]),"VFG previous");
+        Verify(bind(effect,"SrcImage1",image[reuseInputs?current:1]),"VFG current");
         Verify(set(effect,"ShotChange",0),"VFG continuous pair");Verify(set(effect,"FrameIndex",1),"VFG midpoint");Verify(run(effect,1),"VFG run");
         Cu(cudaMemcpy2DToArrayAsync(out,0,0,rgba[2],w*4,w*4,h,cudaMemcpyDeviceToDevice,stream),"VFG output transfer");
     }

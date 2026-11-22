@@ -1,4 +1,5 @@
 #include "video/RifeHalfTest.h"
+#include "video/VfgInputCache.h"
 #ifdef LLCV_INTERPOLATION_RELEASE
 #include "video/VfgRuntimeInstall.h"
 #endif
@@ -126,6 +127,8 @@ void CaptureSequence(const uint8_t* nv12,int width,int height,unsigned stride,in
 struct Half::Impl {
 #ifdef LLCV_RIFE_OPTIONAL
     std::unique_ptr<VfgLive> vfg;
+    uint64_t vfgCaptureGeneration=0;
+    std::array<uint64_t,2> vfgInputGenerations{};
 #endif
 #ifdef LLCV_RIFE_TRAJECTORY
     DeadlineTrace trace;
@@ -138,7 +141,8 @@ struct Half::Impl {
     std::array<Ptr<ID3D11VideoProcessorInputView>,3> cachedInputs;
     struct Image {
         Ptr<ID3D11Texture2D> texture;Ptr<ID3D11VideoProcessorOutputView> output;
-        cudaExternalMemory_t memory=nullptr;cudaMipmappedArray_t mip=nullptr;cudaSurfaceObject_t surface=0;
+        cudaExternalMemory_t memory=nullptr;cudaMipmappedArray_t mip=nullptr;
+        cudaArray_t array=nullptr;cudaSurfaceObject_t surface=0;
     } images[3];
     Ptr<ID3D11Fence> fence;HANDLE complete=nullptr,timer=nullptr;cudaExternalSemaphore_t semaphore=nullptr;cudaStream_t stream=nullptr;CUcontext cudaContext=nullptr;
     UINT64 serial=0,ticket=0;UINT parity=0;bool history=false;int64_t previousArrival=0,originalAt=0;
@@ -279,8 +283,9 @@ struct Half::Impl {
         cudaExternalMemoryHandleDesc external{};external.type=cudaExternalMemoryHandleTypeD3D11Resource;external.handle.win32.handle=handle;external.size=UINT64(W)*H*4;external.flags=cudaExternalMemoryDedicated;
         const auto imported=cudaImportExternalMemory(&image.memory,&external);CloseHandle(handle);Cu(imported,"RIFE image import");
         cudaExternalMemoryMipmappedArrayDesc mapped{};mapped.formatDesc=cudaCreateChannelDesc<uchar4>();mapped.extent=make_cudaExtent(W,H,0);mapped.numLevels=1;mapped.flags=cudaArraySurfaceLoadStore;
-        Cu(cudaExternalMemoryGetMappedMipmappedArray(&image.mip,image.memory,&mapped),"RIFE image map");cudaArray_t array=nullptr;Cu(cudaGetMipmappedArrayLevel(&array,image.mip,0),"RIFE array");
-        cudaResourceDesc surface{};surface.resType=cudaResourceTypeArray;surface.res.array.array=array;Cu(cudaCreateSurfaceObject(&image.surface,&surface),"RIFE surface");
+        Cu(cudaExternalMemoryGetMappedMipmappedArray(&image.mip,image.memory,&mapped),"RIFE image map");
+        Cu(cudaGetMipmappedArrayLevel(&image.array,image.mip,0),"RIFE array");
+        cudaResourceDesc surface{};surface.resType=cudaResourceTypeArray;surface.res.array.array=image.array;Cu(cudaCreateSurfaceObject(&image.surface,&surface),"RIFE surface");
         D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC view{};view.ViewDimension=D3D11_VPOV_DIMENSION_TEXTURE2D;Hr(vd->CreateVideoProcessorOutputView(image.texture.Get(),nativeEnum.Get(),&view,&image.output),"RIFE native output");
     }
     void Initialize(ID3D11Device* d,ID3D11DeviceContext* c,ID3D11VideoDevice* videoDevice,ID3D11VideoContext* videoContext,int width,int height,int fps,Scale initialScale) {
@@ -300,7 +305,15 @@ struct Half::Impl {
         complete=CreateEventW(nullptr,FALSE,FALSE,nullptr);timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);Check(complete&&timer,"RIFE timer/event");
         auto root=RuntimeFolder();
 #ifdef LLCV_RIFE_OPTIONAL
-        if(IsVfg(initialScale)){vfg=std::make_unique<VfgLive>();vfg->Init(VfgDirectory(),selected,W,H,initialScale==Scale::VfgMedium,stream);scale=initialScale;activeScale.store(scale);return;}
+        if(IsVfg(initialScale)){
+            vfg=std::make_unique<VfgLive>();
+            vfg->Init(VfgDirectory(),selected,W,H,initialScale==Scale::VfgMedium,stream);
+#ifdef LLCV_VFG_PACING_DIAGNOSTIC
+            if(vfgInputTrial!=VfgInputTrial::Default)
+                vfg->reuseInputs=vfgInputTrial==VfgInputTrial::Reuse;
+#endif
+            scale=initialScale;activeScale.store(scale);return;
+        }
 #endif
         auto load=[&](const wchar_t* name){auto value=LoadLibraryExW((root/name).c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);Check(value!=nullptr,"RIFE runtime file missing");return value;};
         trtDll=load(L"nvinfer_10.dll");using Factory=void*(*)(void*,int32_t)noexcept;runtime.reset(static_cast<nvinfer1::IRuntime*>(Bind<Factory>(trtDll,"createInferRuntime_INTERNAL")(&logger,NV_TENSORRT_VERSION)));Check(bool(runtime),"RIFE runtime version");
@@ -363,6 +376,9 @@ struct Half::Impl {
             DXGI_COLOR_SPACE_TYPE space{};vc1->VideoProcessorGetStreamColorSpace1(original,0,&space);vc1->VideoProcessorSetStreamColorSpace1(native.Get(),0,space);
         }else{D3D11_VIDEO_PROCESSOR_COLOR_SPACE color{};vc->VideoProcessorGetStreamColorSpace(original,0,&color);vc->VideoProcessorSetStreamColorSpace(native.Get(),0,&color);}
         D3D11_VIDEO_PROCESSOR_STREAM s{};s.Enable=TRUE;s.pInputSurface=cachedInputs[slot].Get();Hr(vc->VideoProcessorBlt(native.Get(),images[parity].output.Get(),0,1,&s),"RIFE NV12 RGB conversion");
+#ifdef LLCV_RIFE_OPTIONAL
+        if(vfg)vfgInputGenerations[parity]=++vfgCaptureGeneration;
+#endif
         if(!history){
 #ifdef LLCV_RIFE_TRAJECTORY
             resetPath=true;
@@ -392,7 +408,7 @@ struct Half::Impl {
         const UINT current=parity;parity=1-parity;const auto available=++serial;ticket=++serial;Hr(context->Signal(fence.Get(),available),"RIFE input signal");context->Flush();
         cudaExternalSemaphoreWaitParams wait{};wait.params.fence.value=available;Cu(cudaWaitExternalSemaphoresAsync(&semaphore,&wait,1,stream),"RIFE input wait");Cu(cudaEventRecord(gpuBegin,stream),"Interpolation timing start");
 #ifdef LLCV_RIFE_OPTIONAL
-        if(vfg){cudaArray_t a[3]{};for(int i=0;i<3;++i)Cu(cudaGetMipmappedArrayLevel(&a[i],images[i].mip,0),"VFG shared image");vfg->Process(a[1-current],a[current],a[2],stream);}else
+        if(vfg)vfg->Process({images[0].array,images[1].array},vfgInputGenerations,current,images[2].array,stream);else
 #endif
         {Cu(pack(images[1-current].surface,images[current].surface,input,W,H,stream),"RIFE input pack");
 #ifdef LLCV_RIFE_AUTO_UI_TEST
@@ -784,6 +800,83 @@ struct Half::VulkanFast {
     }
 };
 #endif
+#ifdef LLCV_VFG_PACING_DIAGNOSTIC
+struct Half::VfgPacingTrace {
+    struct Row {
+        int64_t arrival=0, submitBegin=0, decision=0, originalTarget=0;
+        int64_t generatedBegin=0, generatedEnd=0, originalBegin=0, originalEnd=0;
+        int width=0, height=0, fps=0;
+        Status state=Status::Pending;
+        uint64_t busyBefore=0;
+        bool wasBusy=false;
+    };
+    static inline unsigned nextInstance=0; // Render thread only.
+    unsigned instance=++nextInstance;
+    std::vector<Row> rows;
+    VfgPacingTrace(){rows.reserve(16384);}
+    Row* Find(int64_t arrival){
+        return !rows.empty()&&rows.back().arrival==arrival?&rows.back():nullptr;
+    }
+    ~VfgPacingTrace(){
+        if(rows.empty())return;
+        try {
+            const std::filesystem::path file(vfgPacingTraceFile);
+            std::ofstream out(file,std::ios::app);
+            out.exceptions(std::ios::badbit|std::ios::failbit);
+            if(out.tellp()==0)
+                out<<"pid,instance,pacing,input_mode,width,height,fps,arrival_us,submit_begin_us,decision_us,state,busy,"
+                     "original_target_us,generated_begin_us,generated_end_us,original_begin_us,original_end_us\n";
+            const auto pid=GetCurrentProcessId();
+            const auto mode=vfgTryCapturePacing?"capture":"legacy";
+            const auto inputMode=vfgInputTrial==VfgInputTrial::Reuse?"reuse":
+                vfgInputTrial==VfgInputTrial::Fixed?"fixed":"default";
+            for(const auto& r:rows){
+                const char* outcome="pending";
+                switch(r.state){
+                    case Status::Off:outcome="off";break;
+                    case Status::Pending:break;
+                    case Status::Active:outcome="ready";break;
+                    case Status::Late:outcome=r.wasBusy?"busy":"late";break;
+                    case Status::Unsupported:outcome="unsupported";break;
+                    case Status::Failed:outcome="failed";break;
+                }
+                out<<pid<<','<<instance<<','<<mode<<','<<inputMode<<','<<r.width<<','<<r.height<<','<<r.fps<<','
+                   <<r.arrival<<','<<r.submitBegin<<','<<r.decision<<','<<outcome<<','<<r.wasBusy<<','
+                   <<r.originalTarget<<','<<r.generatedBegin<<','<<r.generatedEnd<<','
+                   <<r.originalBegin<<','<<r.originalEnd<<'\n';
+            }
+            out.close();
+        }catch(...){std::fputs("[vfg-pacing] Could not write trace.\n",stderr);}
+    }
+};
+void Half::BeginVfgPacingSample(int64_t arrival,int width,int height,int fps) noexcept {
+    try {
+        if(!vfgPacingTrace_)vfgPacingTrace_=std::make_unique<VfgPacingTrace>();
+    }catch(...){return;}
+    auto& rows=vfgPacingTrace_->rows;
+    if(rows.size()==rows.capacity()||arrival<=0||vfgPacingTrace_->Find(arrival))return;
+    auto& r=rows.emplace_back();
+    r.arrival=arrival;
+    r.width=width;r.height=height;r.fps=fps;
+    r.busyBefore=busy.load(std::memory_order_relaxed);
+    r.submitBegin=Now();
+}
+void Half::RecordVfgPacingDecision(int64_t arrival){
+    if(!vfgPacingTrace_)return;
+    if(auto* r=vfgPacingTrace_->Find(arrival)){
+        r->decision=Now();
+        r->state=status.load(std::memory_order_relaxed);
+        r->wasBusy=busy.load(std::memory_order_relaxed)!=r->busyBefore;
+    }
+}
+void Half::RecordVfgPacingPresent(int64_t arrival,bool interpolated,int64_t begin,int64_t end){
+    if(!vfgPacingTrace_)return;
+    if(auto* r=vfgPacingTrace_->Find(arrival)){
+        if(interpolated){r->generatedBegin=begin;r->generatedEnd=end;}
+        else {r->originalBegin=begin;r->originalEnd=end;}
+    }
+}
+#endif
 Half::Half()=default;Half::~Half()=default;
 void Half::Reset(){
 #ifdef LLCV_FLYHIGH_TEST
@@ -917,7 +1010,19 @@ void Half::ScheduleOriginalSlot(int fps,[[maybe_unused]] int64_t arrival){
             ?CaptureBoundedOriginalSlot(arrival,now,fps):now+500000/fps;
     }
 #endif
-    if(impl_&&fps>0)impl_->originalAt=Now()+500000/fps;}
+    if(impl_&&fps>0){
+        const auto now=Now();
+        impl_->originalAt=now+500000/fps;
+#ifdef LLCV_VFG_PACING_DIAGNOSTIC
+        if(IsVfg(impl_->scale)){
+            if(vfgTryCapturePacing)impl_->originalAt=CaptureBoundedOriginalSlot(arrival,now,fps);
+            if(vfgPacingTrace_){
+                if(auto* r=vfgPacingTrace_->Find(arrival))r->originalTarget=impl_->originalAt;
+            }
+        }
+#endif
+    }
+}
 #ifdef LLCV_RIFE_VULKAN
 void Half::RecordPresent(int64_t arrival,bool interpolated,int64_t begin,int64_t end){
     if(!vulkanFast_)return;
